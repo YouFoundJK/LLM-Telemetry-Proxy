@@ -796,15 +796,19 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
             async with session.get(proxy_url) as proxy_resp:
                 if proxy_resp.status != 200:
                     await response.write(b"event: error\ndata: {\"error\": \"Proxy SSE unavailable\"}\n\n")
+                    await response.drain()
                     return response
-                async for chunk in proxy_resp.content:
-                    await response.write(chunk)
+                async for chunk in proxy_resp.content.iter_any():
+                    if chunk:
+                        await response.write(chunk)
+                        await response.drain()
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     except Exception as e:
         try:
             err_json = json.dumps({"error": str(e)})
             await response.write(f"event: error\ndata: {err_json}\n\n".encode("utf-8"))
+            await response.drain()
         except Exception:
             pass
     return response

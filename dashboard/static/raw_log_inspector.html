@@ -117,6 +117,95 @@
       cursor: pointer;
     }
 
+    /* Custom Multi-Select Dropdown */
+    .custom-select-wrapper {
+      position: relative;
+      min-width: 175px;
+    }
+
+    .custom-select-trigger {
+      background: rgba(13, 17, 23, 0.9);
+      color: #f0f6fc;
+      border: 1px solid rgba(48, 54, 61, 0.8);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      user-select: none;
+      transition: border-color 0.2s;
+    }
+
+    .custom-select-trigger:after {
+      content: '▼';
+      font-size: 9px;
+      color: #8b949e;
+      transition: transform 0.2s;
+    }
+
+    .custom-select-wrapper.open .custom-select-trigger:after {
+      transform: rotate(180deg);
+    }
+
+    .custom-select-trigger:hover,
+    .custom-select-wrapper.open .custom-select-trigger {
+      border-color: #58a6ff;
+    }
+
+    .custom-select-dropdown {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 220px;
+      background: #161b22;
+      border: 1px solid rgba(48, 54, 61, 0.9);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+      z-index: 250;
+      display: none;
+      max-height: 280px;
+      overflow-y: auto;
+      padding: 6px 0;
+    }
+
+    .custom-select-wrapper.open .custom-select-dropdown {
+      display: block;
+    }
+
+    .custom-option {
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+
+    .custom-option:hover {
+      background: rgba(88, 166, 255, 0.12);
+    }
+
+    .custom-option input[type="checkbox"] {
+      accent-color: #58a6ff;
+      cursor: pointer;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+    }
+
+    .custom-option.select-all-btn {
+      border-bottom: 1px solid rgba(48, 54, 61, 0.8);
+      padding-bottom: 8px;
+      margin-bottom: 4px;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+
     /* Summary Metabar */
     .stats-metabar {
       display: flex;
@@ -574,9 +663,13 @@
       <div class="filter-group">
         <input type="text" id="searchInput" class="filter-input" placeholder="🔍 Search prompts, responses, or models...">
         
-        <select id="modelFilterSelect" class="filter-select">
-          <option value="all">All Models</option>
-        </select>
+        <!-- Custom Multi-select Dropdown for Models with Persistence -->
+        <div class="custom-select-wrapper" id="inspectorModelSelectWrapper">
+          <div class="custom-select-trigger" id="inspectorModelSelectTrigger">All Models</div>
+          <div class="custom-select-dropdown" id="inspectorModelDropdown">
+            <!-- Dynamically populated with checkboxes -->
+          </div>
+        </div>
 
         <select id="statusFilterSelect" class="filter-select">
           <option value="all">All Statuses</option>

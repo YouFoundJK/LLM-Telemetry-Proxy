@@ -1019,15 +1019,18 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
         # Initial connect ping
         init_payload = json.dumps({"type": "connected", "enabled": _raw_logging_enabled, "timestamp": datetime.now(timezone.utc).isoformat()})
         await response.write(f"data: {init_payload}\n\n".encode("utf-8"))
+        await response.drain()
 
         while True:
             try:
                 record = await asyncio.wait_for(q.get(), timeout=15.0)
                 data = json.dumps(record, ensure_ascii=False)
                 await response.write(f"data: {data}\n\n".encode("utf-8"))
+                await response.drain()
             except asyncio.TimeoutError:
                 # Keep-alive heartbeat comment
                 await response.write(b": keepalive\n\n")
+                await response.drain()
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     finally:
