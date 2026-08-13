@@ -26,12 +26,13 @@ from aiohttp import web
 STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 DEFAULT_PORT = 9118
 
+DASHBOARD_DIR = Path(__file__).resolve().parent
+REPO_ROOT = DASHBOARD_DIR.parent
+
 def get_dashboard_html_path() -> Path:
     candidates = [
-        Path(__file__).resolve().parent / "dashboard.html",
-        Path(__file__).resolve().parent / "dashboard" / "dashboard.html",
-        Path(__file__).resolve().parent.parent / "dashboard.html",
-        Path(__file__).resolve().parent.parent / "dashboard" / "dashboard.html",
+        DASHBOARD_DIR / "dashboard.html",
+        REPO_ROOT / "dashboard.html",
     ]
     for c in candidates:
         if c.exists():
@@ -40,9 +41,8 @@ def get_dashboard_html_path() -> Path:
 
 def get_static_dir_path() -> Path:
     candidates = [
-        Path(__file__).resolve().parent / "static",
-        Path(__file__).resolve().parent / "dashboard" / "static",
-        Path(__file__).resolve().parent.parent / "static",
+        DASHBOARD_DIR / "static",
+        REPO_ROOT / "static",
     ]
     for c in candidates:
         if c.exists():
@@ -50,45 +50,20 @@ def get_static_dir_path() -> Path:
     return candidates[0]
 
 def get_model_mapping_path() -> Path:
-    is_windows = sys.platform.startswith("win") or os.name == "nt"
-    if is_windows:
-        candidates = [
-            Path(__file__).resolve().parent / "model_mapping.json",
-            Path(__file__).resolve().parent.parent / "model_mapping.json",
-            Path(r"\\wsl.localhost\Ubuntu\mnt\AWS_clawdbot\home\ubuntu\server\llm_proxy\model_mapping.json"),
-            Path(r"\\wsl.localhost\Ubuntu\home\ubuntu\server\llm_proxy\model_mapping.json"),
-        ]
-    else:
-        candidates = [
-            Path(__file__).resolve().parent.parent / "model_mapping.json",
-            Path(__file__).resolve().parent / "model_mapping.json",
-            Path("/home/ubuntu/server/llm_proxy/model_mapping.json"),
-            Path("/mnt/AWS_clawdbot/home/ubuntu/server/llm_proxy/model_mapping.json"),
-        ]
+    candidates = [
+        REPO_ROOT / "model_mapping.json",
+        DASHBOARD_DIR / "model_mapping.json",
+    ]
     for c in candidates:
         if c.exists():
             return c
     return candidates[0]
 
 def get_model_costs_path() -> Path:
-    is_windows = sys.platform.startswith("win") or os.name == "nt"
-    if is_windows:
-        candidates = [
-            Path(__file__).resolve().parent / "model_costs.json",
-            Path(__file__).resolve().parent.parent / "model_costs.json",
-            Path(r"\\wsl.localhost\Ubuntu\mnt\AWS_clawdbot\home\ubuntu\server\llm_proxy\dashboard\model_costs.json"),
-            Path(r"\\wsl.localhost\Ubuntu\mnt\AWS_clawdbot\home\ubuntu\server\llm_proxy\model_costs.json"),
-            Path(r"\\wsl.localhost\Ubuntu\home\ubuntu\server\llm_proxy\dashboard\model_costs.json"),
-        ]
-    else:
-        candidates = [
-            Path(__file__).resolve().parent / "model_costs.json",
-            Path(__file__).resolve().parent.parent / "model_costs.json",
-            Path("/home/ubuntu/server/llm_proxy/dashboard/model_costs.json"),
-            Path("/home/ubuntu/server/llm_proxy/model_costs.json"),
-            Path("/mnt/AWS_clawdbot/home/ubuntu/server/llm_proxy/dashboard/model_costs.json"),
-            Path("/mnt/AWS_clawdbot/home/ubuntu/server/llm_proxy/model_costs.json"),
-        ]
+    candidates = [
+        DASHBOARD_DIR / "model_costs.json",
+        REPO_ROOT / "model_costs.json",
+    ]
     for c in candidates:
         if c.exists():
             return c
@@ -133,33 +108,18 @@ def get_db_path() -> Path:
     if env_path:
         return Path(env_path)
 
-    is_windows = sys.platform.startswith("win") or os.name == "nt"
-
-    if is_windows:
-        # Windows: prioritize local repository data first, fallback to WSL network path
-        candidates = [
-            Path(__file__).resolve().parent / "data" / "llm_telemetry.db",
-            Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db",
-            Path(r"\\wsl.localhost\Ubuntu\mnt\AWS_clawdbot\home\ubuntu\server\llm_proxy\data\llm_telemetry.db"),
-            Path(r"\\wsl.localhost\Ubuntu\home\ubuntu\server\llm_proxy\data\llm_telemetry.db"),
-        ]
-    else:
-        # Linux / Ubuntu (Production server environment):
-        candidates = [
-            Path(__file__).resolve().parent / "data" / "llm_telemetry.db",
-            Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db",
-            Path("/home/ubuntu/server/llm_proxy/data/llm_telemetry.db"),
-            Path("/mnt/AWS_clawdbot/home/ubuntu/server/llm_proxy/data/llm_telemetry.db"),
-            Path.home() / ".hermes" / "logs" / "llm_telemetry.db",
-        ]
+    # 3. Default relative repository paths
+    candidates = [
+        REPO_ROOT / "data" / "llm_telemetry.db",
+        DASHBOARD_DIR / "data" / "llm_telemetry.db",
+    ]
 
     for candidate in candidates:
-        if candidate is not None:
-            try:
-                if candidate.exists():
-                    return candidate
-            except Exception:
-                pass
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            pass
 
     # Default fallback
     return candidates[0]

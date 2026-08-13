@@ -1,4 +1,4 @@
-#!/home/ubuntu/.hermes/hermes-agent/venv/bin/python3
+#!/usr/bin/env python3
 """
 LLM Telemetry Database Compressor.
 Aggregates historical telemetry data (older than 14 days) into 2-week intervals.

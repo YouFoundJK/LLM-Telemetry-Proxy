@@ -24,7 +24,7 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db"
 def get_conn():
     if not DB_PATH.exists():
         print(f"DB not found: {DB_PATH}", file=sys.stderr)
-        print("Start the proxy first: python3 ~/server/llm_proxy/proxy/llm_telemetry_proxy.py", file=sys.stderr)
+        print("Start the proxy first: python3 proxy/llm_telemetry_proxy.py", file=sys.stderr)
         sys.exit(1)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
