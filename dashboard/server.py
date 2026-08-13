@@ -86,13 +86,16 @@ def get_model_mapping_path() -> Path:
 
 def get_model_costs_path() -> Path:
     candidates = [
-        DASHBOARD_DIR / "model_costs.json",
+        REPO_ROOT / "data" / "model_costs.json",
+        DASHBOARD_DIR / "data" / "model_costs.json",
         REPO_ROOT / "model_costs.json",
+        DASHBOARD_DIR / "model_costs.json",
     ]
     for c in candidates:
         if c.exists():
             return c
     return candidates[0]
+
 
 # ── Model Aliases Mapping ───────────────────────────────────────────────────
 def load_model_mapping() -> dict:
@@ -868,7 +871,7 @@ def main():
     print(f"[dashboard] Server starting on http://localhost:{port}", file=sys.stderr)
     print(f"[dashboard] DB: {db_path}", file=sys.stderr)
     print(f"[dashboard] HTML: {dashboard_html}", file=sys.stderr)
-    web.run_app(create_app(), host="127.0.0.1", port=port, access_log=None)
+    web.run_app(create_app(), host="127.0.0.1", port=port, access_log=None, reuse_address=True)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,12 @@ const path = require('path');
 const assert = require('assert');
 
 // 1. Load actual model_costs.json
-const modelCostsPath = path.join(__dirname, 'model_costs.json');
+const candidatePaths = [
+  path.join(__dirname, '..', 'data', 'model_costs.json'),
+  path.join(__dirname, 'data', 'model_costs.json'),
+  path.join(__dirname, 'model_costs.json'),
+];
+const modelCostsPath = candidatePaths.find(p => fs.existsSync(p)) || candidatePaths[0];
 const rawModelCosts = JSON.parse(fs.readFileSync(modelCostsPath, 'utf8'));
 
 // 2. Exact functions from app.js

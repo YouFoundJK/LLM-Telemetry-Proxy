@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Model Costs Auto-Updater — Fetches latest provider pricing from LiteLLM
-and updates dashboard/model_costs.json using appendable historical tiers.
+and updates data/model_costs.json using appendable historical tiers.
 
 Guarantees:
 - Strictly matches exact model architecture / size from the official spec.
@@ -20,7 +20,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = REPO_ROOT / "dashboard"
-COSTS_PATH = DASHBOARD_DIR / "model_costs.json"
+DATA_DIR = REPO_ROOT / "data"
+
+def get_model_costs_path() -> Path:
+    candidates = [
+        DATA_DIR / "model_costs.json",
+        DASHBOARD_DIR / "data" / "model_costs.json",
+        REPO_ROOT / "model_costs.json",
+        DASHBOARD_DIR / "model_costs.json",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+COSTS_PATH = get_model_costs_path()
 DB_PATH = REPO_ROOT / "data" / "llm_telemetry.db"
 MAPPING_PATH = REPO_ROOT / "data" / "model_mapping.json"
 LITELLM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
