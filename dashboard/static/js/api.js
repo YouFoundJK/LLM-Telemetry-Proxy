@@ -155,7 +155,7 @@ const TelemetryAPI = (() => {
   }
 
   /**
-   * POST /api/proxy/clear-logs — clears proxy log output.
+   * POST /api/clear-logs — clears proxy log output.
    */
   async function clearProxyLogs() {
     const url = `${BASE_URL}/api/proxy/clear-logs`;
@@ -172,6 +172,54 @@ const TelemetryAPI = (() => {
     return handleResponse(response);
   }
 
+  /**
+   * GET /api/raw-log/status — retrieves raw payload logging status & file metadata.
+   */
+  async function getRawLogStatus() {
+    const url = `${BASE_URL}/api/raw-log/status`;
+    const response = await fetch(url);
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/raw-log/toggle — toggle raw logging state.
+   */
+  async function toggleRawLog(enabled) {
+    const url = `${BASE_URL}/api/raw-log/toggle`;
+    const payload = enabled !== undefined ? { enabled: Boolean(enabled) } : {};
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return handleResponse(response);
+  }
+
+  /**
+   * GET /api/raw-log/recent — retrieve the latest N raw logged calls.
+   */
+  async function getRecentRawLogs(limit = 50) {
+    const url = `${BASE_URL}/api/raw-log/recent?limit=${limit}`;
+    const response = await fetch(url);
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/raw-log/clear — clear logger file on disk.
+   */
+  async function clearRawLogs() {
+    const url = `${BASE_URL}/api/raw-log/clear`;
+    const response = await fetch(url, { method: 'POST' });
+    return handleResponse(response);
+  }
+
+  /**
+   * Returns the SSE stream URL for live raw logs.
+   */
+  function getRawLogStreamUrl() {
+    return `${BASE_URL}/api/raw-log/stream`;
+  }
+
   return {
     query,
     getServerStatus,
@@ -184,7 +232,13 @@ const TelemetryAPI = (() => {
     getProxyLogs,
     clearProxyLogs,
     runDbCompress,
+    getRawLogStatus,
+    toggleRawLog,
+    getRecentRawLogs,
+    clearRawLogs,
+    getRawLogStreamUrl,
     BASE_URL
   };
 })();
+
 

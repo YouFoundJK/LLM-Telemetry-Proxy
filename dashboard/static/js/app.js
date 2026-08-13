@@ -680,6 +680,7 @@ const App = (() => {
     await loadCrossCheck();
     await loadHealth();
     await loadProxyStatus();
+    await loadRawLogStatus();
   }
 
   /**
@@ -1281,6 +1282,62 @@ const App = (() => {
         }
       });
     }
+
+    // Raw Payload Logging Toggle button
+    const rawLogToggleBtn = document.getElementById('rawLogToggleBtn');
+    if (rawLogToggleBtn) {
+      rawLogToggleBtn.addEventListener('click', async () => {
+        try {
+          rawLogToggleBtn.disabled = true;
+          const res = await TelemetryAPI.toggleRawLog();
+          UI.showRawLogAlert(res.message || 'Raw logging toggled.', 'info', 3500);
+          await loadRawLogStatus();
+        } catch (err) {
+          UI.showRawLogAlert(`Toggle error: ${err.message}`, 'error', 5000);
+        } finally {
+          rawLogToggleBtn.disabled = false;
+        }
+      });
+    }
+
+    // Open Standalone Inspector Window button
+    const openInspectorBtn = document.getElementById('openInspectorBtn');
+    if (openInspectorBtn) {
+      openInspectorBtn.addEventListener('click', () => {
+        const url = (TelemetryAPI.BASE_URL || '') + '/inspector';
+        window.open(url, '_blank', 'noopener,noreferrer');
+      });
+    }
+
+    // Clear Raw Log File button
+    const rawLogClearBtn = document.getElementById('rawLogClearBtn');
+    if (rawLogClearBtn) {
+      rawLogClearBtn.addEventListener('click', async () => {
+        if (!confirm('Are you sure you want to clear the raw JSON payloads file (logger/payloads.jsonl)?')) return;
+        try {
+          rawLogClearBtn.disabled = true;
+          const res = await TelemetryAPI.clearRawLogs();
+          UI.showRawLogAlert(res.message || 'Logger file cleared.', 'success', 3500);
+          await loadRawLogStatus();
+        } catch (err) {
+          UI.showRawLogAlert(`Clear error: ${err.message}`, 'error', 5000);
+        } finally {
+          rawLogClearBtn.disabled = false;
+        }
+      });
+    }
+  }
+
+  /**
+   * Load Raw Payload Logging Status
+   */
+  async function loadRawLogStatus() {
+    try {
+      const data = await TelemetryAPI.getRawLogStatus();
+      UI.renderRawLogStatus(data);
+    } catch (e) {
+      console.warn('Failed to load raw log status', e);
+    }
   }
 
   /**
@@ -1296,9 +1353,11 @@ const App = (() => {
     }
     State.intervals.crossCheck = setInterval(loadCrossCheck, 30000);
     State.intervals.proxyStatus = setInterval(loadProxyStatus, 4000);
+    State.intervals.rawLogStatus = setInterval(loadRawLogStatus, 4000);
     State.intervals.proxyLogs = setInterval(() => {
       if (State.activeTab === 'controlPanelTab') {
         loadProxyLogs();
+        loadRawLogStatus();
       }
     }, 4000);
   }
@@ -1311,12 +1370,14 @@ const App = (() => {
     if (State.intervals.serverStatus) clearInterval(State.intervals.serverStatus);
     if (State.intervals.crossCheck) clearInterval(State.intervals.crossCheck);
     if (State.intervals.proxyStatus) clearInterval(State.intervals.proxyStatus);
+    if (State.intervals.rawLogStatus) clearInterval(State.intervals.rawLogStatus);
     if (State.intervals.proxyLogs) clearInterval(State.intervals.proxyLogs);
     
     State.intervals.refresh = null;
     State.intervals.serverStatus = null;
     State.intervals.crossCheck = null;
     State.intervals.proxyStatus = null;
+    State.intervals.rawLogStatus = null;
     State.intervals.proxyLogs = null;
   }
 

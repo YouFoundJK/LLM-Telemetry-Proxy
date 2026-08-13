@@ -1799,6 +1799,64 @@ const UI = (() => {
     }
   }
 
+  /**
+   * Render Raw Log Status in Control Panel
+   */
+  function renderRawLogStatus(statusData) {
+    const badge = document.getElementById('rawLogStateBadge');
+    const stateText = document.getElementById('rawLogStateText');
+    const filePathVal = document.getElementById('rawLogFilePathVal');
+    const fileSizeVal = document.getElementById('rawLogFileSizeVal');
+    const toggleBtn = document.getElementById('rawLogToggleBtn');
+    const toggleBtnText = document.getElementById('rawLogToggleBtnText');
+
+    if (!statusData) return;
+
+    const isEnabled = Boolean(statusData.enabled);
+
+    if (badge) {
+      badge.className = `proxy-badge ${isEnabled ? 'online' : 'offline'}`;
+    }
+    if (stateText) {
+      stateText.textContent = isEnabled ? 'RECORDING ACTIVE' : 'LOGGING OFF';
+    }
+    if (filePathVal) {
+      filePathVal.textContent = statusData.rel_path || 'logger/payloads.jsonl';
+    }
+    if (fileSizeVal) {
+      fileSizeVal.textContent = statusData.file_size_formatted || '0 B';
+    }
+    if (toggleBtn && toggleBtnText) {
+      if (isEnabled) {
+        toggleBtn.className = 'btn-proxy btn-stop';
+        toggleBtnText.textContent = 'Disable Raw Logging';
+      } else {
+        toggleBtn.className = 'btn-proxy btn-start';
+        toggleBtnText.textContent = 'Enable Raw Logging';
+      }
+    }
+  }
+
+  /**
+   * Show Raw Log Action Alert in Control Panel
+   */
+  function showRawLogAlert(message, type = 'info', durationMs = 5000) {
+    const alertEl = document.getElementById('rawLogActionAlert');
+    if (!alertEl) return;
+
+    alertEl.className = `proxy-alert ${type}`;
+    alertEl.textContent = message;
+    alertEl.style.display = 'flex';
+
+    if (durationMs > 0) {
+      setTimeout(() => {
+        if (alertEl.textContent === message) {
+          alertEl.style.display = 'none';
+        }
+      }, durationMs);
+    }
+  }
+
   return {
     formatNum,
     formatMs,
@@ -1821,7 +1879,10 @@ const UI = (() => {
     renderProxyStatus,
     renderProxyLogs,
     showProxyAlert,
+    renderRawLogStatus,
+    showRawLogAlert,
     getModelClass
   };
 })();
+
 

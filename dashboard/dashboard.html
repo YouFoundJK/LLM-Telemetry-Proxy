@@ -580,6 +580,54 @@
           </div>
         </div>
 
+        <!-- Real-Time Raw Payload Logging & Live Inspector Card -->
+        <div class="section-card" id="rawLoggingSectionCard" style="border-left: 3px solid var(--accent, #58a6ff);">
+          <div class="proxy-status-header">
+            <div>
+              <h2 style="margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
+                <span>🔬 Real-Time Raw Payload Logging & Inspector</span>
+              </h2>
+              <p style="color: var(--text-muted); font-size: 13px;">Capture complete raw JSON schemas (prompts, responses, tokens, headers, reasoning) into <code>logger/payloads.jsonl</code> in the repository root and inspect live.</p>
+            </div>
+            <div class="proxy-badge-container">
+              <span id="rawLogStateBadge" class="proxy-badge offline">
+                <span class="proxy-status-indicator"></span>
+                <span id="rawLogStateText">LOGGING OFF</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="proxy-metrics-grid" style="margin-top: 14px; margin-bottom: 16px;">
+            <div class="proxy-metric-box">
+              <span class="metric-lbl">Logger File Location</span>
+              <span class="metric-val code" id="rawLogFilePathVal" style="font-size: 12px;">logger/payloads.jsonl</span>
+            </div>
+            <div class="proxy-metric-box">
+              <span class="metric-lbl">File Size on Disk</span>
+              <span class="metric-val" id="rawLogFileSizeVal">0 B</span>
+            </div>
+            <div class="proxy-metric-box">
+              <span class="metric-lbl">Live Streaming Feed</span>
+              <span class="metric-val" id="rawLogStreamStateVal" style="color: var(--text-muted);">Ready (SSE)</span>
+            </div>
+          </div>
+
+          <div class="proxy-actions-row">
+            <div class="proxy-action-buttons">
+              <button id="rawLogToggleBtn" class="btn-proxy btn-start">
+                <span class="btn-icon">⚡</span> <span id="rawLogToggleBtnText">Enable Raw Logging</span>
+              </button>
+              <button id="openInspectorBtn" class="btn-proxy btn-restart" style="background: rgba(88, 166, 255, 0.2); border-color: var(--accent); color: #58a6ff; font-weight: 600;">
+                <span class="btn-icon">↗</span> Open Live Inspector Window
+              </button>
+              <button id="rawLogClearBtn" class="btn-proxy btn-secondary">
+                <span class="btn-icon">🗑</span> Clear Log File
+              </button>
+            </div>
+            <div id="rawLogActionAlert" class="proxy-alert" style="display: none;"></div>
+          </div>
+        </div>
+
         <!-- Two Column Layout: Configuration & Database Maintenance -->
         <div class="gateway-two-col">
           <!-- Gateway Configuration Options -->

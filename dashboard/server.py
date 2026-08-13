@@ -44,6 +44,23 @@ def get_dashboard_html_path() -> Path:
             return c
     return candidates[0]
 
+def get_inspector_html_path() -> Path:
+    candidates = [
+        DASHBOARD_DIR / "static" / "raw_log_inspector.html",
+        DASHBOARD_DIR / "raw_log_inspector.html",
+        REPO_ROOT / "raw_log_inspector.html",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+def get_logger_file_path() -> Path:
+    _env_logger = os.environ.get("LOGGER_FILE_PATH")
+    if _env_logger:
+        return Path(_env_logger)
+    return REPO_ROOT / "logger" / "payloads.jsonl"
+
 def get_static_dir_path() -> Path:
     candidates = [
         DASHBOARD_DIR / "static",
@@ -619,6 +636,151 @@ async def handle_db_compress(request: web.Request) -> web.Response:
     return web.json_response(res, status=status_code)
 
 
+# ── Raw Payload Log & Inspector Endpoints ────────────────────────────────────
+async def handle_inspector(request: web.Request) -> web.Response:
+    """GET /inspector and /raw-logs — serve the standalone inspector UI."""
+    inspector_html = get_inspector_html_path()
+    if inspector_html.exists():
+        return web.FileResponse(inspector_html)
+    return web.Response(text="Inspector HTML not found at " + str(inspector_html), status=404)
+
+
+async def handle_raw_log_status(request: web.Request) -> web.Response:
+    """GET /api/raw-log/status — get raw payload logging state, file size, proxy connection."""
+    logger_file = get_logger_file_path()
+    file_exists = logger_file.exists()
+    size = logger_file.stat().st_size if file_exists else 0
+
+    proxy_status = None
+    proxy_port = 9090
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.0)) as session:
+            async with session.get(f"http://127.0.0.1:{proxy_port}/v1/raw-log/status") as resp:
+                if resp.status == 200:
+                    proxy_status = await resp.json()
+    except Exception:
+        pass
+
+    enabled = proxy_status.get("enabled", False) if proxy_status else False
+
+    def fmt_sz(b):
+        if b < 1024:
+            return f"{b} B"
+        elif b < 1024 * 1024:
+            return f"{b / 1024:.1f} KB"
+        return f"{b / (1024 * 1024):.2f} MB"
+
+    return web.json_response({
+        "enabled": enabled,
+        "proxy_alive": proxy_status is not None,
+        "file_path": str(logger_file),
+        "rel_path": str(logger_file.relative_to(REPO_ROOT)) if logger_file.is_relative_to(REPO_ROOT) else str(logger_file),
+        "file_size_bytes": size,
+        "file_size_formatted": fmt_sz(size),
+        "proxy_details": proxy_status,
+    })
+
+
+async def handle_raw_log_toggle(request: web.Request) -> web.Response:
+    """POST /api/raw-log/toggle — toggle raw logging ON / OFF via proxy."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+    except Exception:
+        data = {}
+
+    proxy_port = 9090
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2.0)) as session:
+            async with session.post(f"http://127.0.0.1:{proxy_port}/v1/raw-log/toggle", json=data) as resp:
+                if resp.status == 200:
+                    res_data = await resp.json()
+                    return web.json_response(res_data)
+                return web.json_response({"success": False, "error": f"Proxy returned status {resp.status}"}, status=502)
+    except Exception as e:
+        return web.json_response({"success": False, "error": f"Proxy unreachable: {str(e)}"}, status=503)
+
+
+async def handle_raw_log_recent(request: web.Request) -> web.Response:
+    """GET /api/raw-log/recent — retrieve the last N lines from the logger file."""
+    limit_str = request.query.get("limit", "50")
+    try:
+        limit = max(1, min(500, int(limit_str)))
+    except ValueError:
+        limit = 50
+
+    logger_file = get_logger_file_path()
+    if not logger_file.exists():
+        return web.json_response({"entries": [], "total_count": 0})
+
+    try:
+        entries = []
+        with open(logger_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_str = line.strip()
+                if line_str:
+                    try:
+                        entries.append(json.loads(line_str))
+                    except Exception:
+                        pass
+        total_count = len(entries)
+        recent_entries = entries[-limit:]
+        return web.json_response({"entries": list(reversed(recent_entries)), "total_count": total_count})
+    except Exception as e:
+        return web.json_response({"error": str(e), "entries": []}, status=500)
+
+
+async def handle_raw_log_clear(request: web.Request) -> web.Response:
+    """POST /api/raw-log/clear — truncate the logger file."""
+    logger_file = get_logger_file_path()
+    try:
+        if logger_file.exists():
+            with open(logger_file, "w", encoding="utf-8") as f:
+                f.truncate(0)
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.0)) as session:
+                await session.post("http://127.0.0.1:9090/v1/raw-log/clear")
+        except Exception:
+            pass
+        return web.json_response({"success": True, "message": "Logger file cleared successfully."})
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
+    """GET /api/raw-log/stream — Server-Sent Events (SSE) bridge to proxy stream."""
+    response = web.StreamResponse(
+        status=200,
+        reason='OK',
+        headers={
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+        }
+    )
+    await response.prepare(request)
+
+    proxy_url = "http://127.0.0.1:9090/v1/raw-log/stream"
+    try:
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(proxy_url) as proxy_resp:
+                if proxy_resp.status != 200:
+                    await response.write(b"event: error\ndata: {\"error\": \"Proxy SSE unavailable\"}\n\n")
+                    return response
+                async for chunk in proxy_resp.content:
+                    await response.write(chunk)
+    except (asyncio.CancelledError, ConnectionResetError):
+        pass
+    except Exception as e:
+        try:
+            err_json = json.dumps({"error": str(e)})
+            await response.write(f"event: error\ndata: {err_json}\n\n".encode("utf-8"))
+        except Exception:
+            pass
+    return response
+
+
 # ── App ──────────────────────────────────────────────────────────────────────
 def create_app():
     app = web.Application(middlewares=[cors_middleware])
@@ -637,8 +799,17 @@ def create_app():
     app.router.add_post("/api/proxy/clear-logs", handle_proxy_clear_logs)
     app.router.add_post("/api/db/compress", handle_db_compress)
 
+    # Raw Payload Log & Inspector routes
+    app.router.add_get("/api/raw-log/status", handle_raw_log_status)
+    app.router.add_post("/api/raw-log/toggle", handle_raw_log_toggle)
+    app.router.add_get("/api/raw-log/recent", handle_raw_log_recent)
+    app.router.add_post("/api/raw-log/clear", handle_raw_log_clear)
+    app.router.add_get("/api/raw-log/stream", handle_raw_log_stream)
+
     app.router.add_get("/", handle_dashboard)
     app.router.add_get("/dashboard", handle_dashboard)
+    app.router.add_get("/inspector", handle_inspector)
+    app.router.add_get("/raw-logs", handle_inspector)
 
     static_dir = get_static_dir_path()
     static_dir.mkdir(exist_ok=True)

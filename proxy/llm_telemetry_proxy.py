@@ -31,6 +31,7 @@ import argparse
 import atexit
 import os
 import signal
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,9 +46,18 @@ STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9090
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOGGER_DIR = REPO_ROOT / "logger"
+_env_logger_file = os.environ.get("LOGGER_FILE_PATH")
+LOGGER_FILE = Path(_env_logger_file) if _env_logger_file else (LOGGER_DIR / "payloads.jsonl")
+
+# Raw payload logging state (Default: False)
+_raw_logging_enabled = False
+_raw_subscribers = set()
+
 _env_db_path = os.environ.get("TELEMETRY_DB_PATH")
-DB_PATH = Path(_env_db_path) if _env_db_path else (Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db")
-PID_FILE = Path(__file__).resolve().parent.parent / "data" / ".proxy.pid"
+DB_PATH = Path(_env_db_path) if _env_db_path else (REPO_ROOT / "data" / "llm_telemetry.db")
+PID_FILE = REPO_ROOT / "data" / ".proxy.pid"
 
 # Models to track server load for
 WATCHED_MODELS = ["Deepseek-v4", "Glm-5.2", "Qwen3.5-int4", "Kimi-K2.7"]
@@ -313,6 +323,124 @@ async def fetch_server_load(model_hint=None):
     return None, None, None
 
 
+# ── Raw Payload Logging Helpers ─────────────────────────────────────────────
+def format_size(bytes_val: int) -> str:
+    if bytes_val < 1024:
+        return f"{bytes_val} B"
+    elif bytes_val < 1024 * 1024:
+        return f"{bytes_val / 1024:.1f} KB"
+    else:
+        return f"{bytes_val / (1024 * 1024):.2f} MB"
+
+
+def make_raw_payload_record(
+    req_id: str,
+    path: str,
+    method: str,
+    call_type: str,
+    model: str,
+    client_ip: str,
+    req_headers: dict,
+    payload_obj: any,
+    status_code: int,
+    resp_headers: dict,
+    is_stream: bool,
+    ttfb_ms: float,
+    total_ms: float,
+    tokens_per_s: float,
+    input_tokens: int,
+    output_tokens: int,
+    reasoning_tokens: int,
+    content_text: str,
+    reasoning_text: str,
+    tool_calls: any,
+    raw_resp_json: any,
+    error: str,
+) -> dict:
+    safe_req_headers = {}
+    for k, v in (req_headers or {}).items():
+        if k.lower() == "authorization" and isinstance(v, str) and v.startswith("Bearer "):
+            token = v[7:]
+            if len(token) > 10:
+                masked = f"Bearer {token[:4]}...{token[-4:]}"
+            else:
+                masked = "Bearer ***"
+            safe_req_headers[k] = masked
+        else:
+            safe_req_headers[k] = v
+
+    return {
+        "id": req_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "endpoint": path,
+        "method": method,
+        "call_type": call_type,
+        "model": model,
+        "client": {
+            "ip": client_ip,
+            "headers": safe_req_headers,
+            "user_agent": safe_req_headers.get("User-Agent") or safe_req_headers.get("user-agent", ""),
+        },
+        "request": {
+            "headers": safe_req_headers,
+            "payload": payload_obj,
+            "messages": payload_obj.get("messages") if isinstance(payload_obj, dict) else None,
+            "prompt": payload_obj.get("prompt") if isinstance(payload_obj, dict) else None,
+            "parameters": {
+                k: v for k, v in payload_obj.items()
+                if k not in ("messages", "prompt")
+            } if isinstance(payload_obj, dict) else {},
+        },
+        "response": {
+            "status_code": status_code,
+            "headers": dict(resp_headers) if resp_headers else {},
+            "is_stream": bool(is_stream),
+            "ttfb_ms": round(ttfb_ms, 2) if ttfb_ms is not None else None,
+            "total_ms": round(total_ms, 2) if total_ms is not None else None,
+            "tokens_per_s": round(tokens_per_s, 2) if tokens_per_s is not None else None,
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "total_tokens": ((input_tokens or 0) + (output_tokens or 0)) if (input_tokens is not None or output_tokens is not None) else None,
+            },
+            "content": {
+                "text": content_text,
+                "reasoning_content": reasoning_text,
+                "tool_calls": tool_calls,
+            },
+            "raw_json": raw_resp_json,
+            "error": error,
+        },
+    }
+
+
+def append_raw_payload(record: dict):
+    if not _raw_logging_enabled:
+        return
+    try:
+        LOGGER_DIR.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        with open(LOGGER_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[telemetry] Failed to append raw payload to {LOGGER_FILE}: {e}", file=sys.stderr)
+
+
+async def broadcast_raw_payload(record: dict):
+    if not _raw_subscribers:
+        return
+    dead = set()
+    for q in list(_raw_subscribers):
+        try:
+            q.put_nowait(record)
+        except asyncio.QueueFull:
+            pass
+        except Exception:
+            dead.add(q)
+    _raw_subscribers.difference_update(dead)
+
+
 # ── Proxy Handler ───────────────────────────────────────────────────────────
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     path = request.path
@@ -326,6 +454,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     body = await request.read()
     model = None
     input_tokens = None
+    payload = None
     try:
         if body:
             payload = json.loads(body)
@@ -346,11 +475,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     if body and "Content-Length" in headers:
         headers["Content-Length"] = str(len(body))
 
+    req_id = f"req_{uuid.uuid4().hex[:12]}"
     t_start = time.monotonic()
     ttfb_ms = None
     status_code = None
     error = None
     output_tokens = None
+    reasoning_tokens = None
     tokens_per_s = None
     logged = False
 
@@ -383,6 +514,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         t_first_byte = None
                         collected_usage = None
                         content_chars = 0
+                        collected_content = ""
+                        collected_reasoning = ""
+                        collected_tool_calls = []
 
                         async for chunk in upstream_resp.content:
                             if t_first_byte is None:
@@ -401,8 +535,12 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                                 delta = choice.get("delta", {})
                                                 if delta.get("content"):
                                                     content_chars += len(delta["content"])
+                                                    collected_content += delta["content"]
                                                 if delta.get("reasoning_content"):
                                                     content_chars += len(delta["reasoning_content"])
+                                                    collected_reasoning += delta["reasoning_content"]
+                                                if delta.get("tool_calls"):
+                                                    collected_tool_calls.extend(delta["tool_calls"])
                                         except json.JSONDecodeError:
                                             pass
                             except Exception:
@@ -413,14 +551,18 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         if collected_usage:
                             input_tokens = collected_usage.get("prompt_tokens", input_tokens)
                             output_tokens = collected_usage.get("completion_tokens")
+                            reasoning_tokens = (
+                                collected_usage.get("completion_tokens_details", {}).get("reasoning_tokens")
+                                or collected_usage.get("reasoning_tokens")
+                            )
                             if not output_tokens or output_tokens == 0:
                                 output_tokens = max(1, content_chars // 4)
-                        
+
                         # Check token budget after getting usage data
                         allowed, budget_status = _token_budget.record_and_check(
                             input_tokens or 0, output_tokens or 0
                         )
-                        
+
                         # Add budget status to response headers for all responses
                         budget_headers = {
                             "X-Token-Budget-Used": str(budget_status["total_used"]),
@@ -428,22 +570,6 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
                             "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
                         }
-                        
-                        if not allowed:
-                            # Budget exceeded - send error response
-                            error_msg = (
-                                f"🚫 DAILY TOKEN BUDGET EXCEEDED\\n\\n"
-                                f"Used: {budget_status['total_used']:,} tokens "
-                                f"({budget_status['percentage_used']:.1f}% of daily limit)\\n"
-                                f"Limit: {budget_status['daily_limit']:,} tokens/day\\n"
-                                f"Remaining: {budget_status['remaining']:,} tokens\\n\\n"
-                                f"Token cap enforced by proxy. Requests blocked until 24h window rolls."
-                            )
-                            return web.json_response(
-                                {"error": {"message": error_msg, "type": "token_budget_exceeded"}},
-                                status=429,
-                                headers=budget_headers
-                            )
 
                         t_total = (time.monotonic() - t_start) * 1000
                         if ttfb_ms is None:
@@ -451,13 +577,54 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         if output_tokens and t_total > 0:
                             tokens_per_s = output_tokens / (t_total / 1000)
 
+                        if not allowed:
+                            error_msg = (
+                                f"🚫 DAILY TOKEN BUDGET EXCEEDED\n\n"
+                                f"Used: {budget_status['total_used']:,} tokens "
+                                f"({budget_status['percentage_used']:.1f}% of daily limit)\n"
+                                f"Limit: {budget_status['daily_limit']:,} tokens/day\n"
+                                f"Remaining: {budget_status['remaining']:,} tokens\n\n"
+                                f"Token cap enforced by proxy. Requests blocked until 24h window rolls."
+                            )
+                            error = "token_budget_exceeded"
+
                         log_call(model, path, input_tokens, output_tokens,
                                  ttfb_ms, t_total, tokens_per_s,
                                  server_running, server_tok_s, server_model,
                                  status_code, error, call_type)
                         logged = True
                         log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
-                        
+
+                        # Raw Payload Record for live inspection & file dump
+                        raw_record = make_raw_payload_record(
+                            req_id=req_id,
+                            path=path,
+                            method=method,
+                            call_type=call_type,
+                            model=model,
+                            client_ip=request.remote,
+                            req_headers=dict(request.headers),
+                            payload_obj=payload,
+                            status_code=status_code,
+                            resp_headers=dict(upstream_resp.headers),
+                            is_stream=True,
+                            ttfb_ms=ttfb_ms,
+                            total_ms=t_total,
+                            tokens_per_s=tokens_per_s,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            reasoning_tokens=reasoning_tokens,
+                            content_text=collected_content,
+                            reasoning_text=collected_reasoning,
+                            tool_calls=collected_tool_calls if collected_tool_calls else None,
+                            raw_resp_json=None,
+                            error=error,
+                        )
+                        if _raw_logging_enabled:
+                            append_raw_payload(raw_record)
+                        if _raw_subscribers:
+                            asyncio.create_task(broadcast_raw_payload(raw_record))
+
                         # Add budget headers to successful response
                         for key, value in budget_headers.items():
                             response.headers[key] = value
@@ -468,12 +635,28 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         t_first_byte = time.monotonic()
                         ttfb_ms = (t_first_byte - t_start) * 1000
 
+                        resp_data = None
+                        resp_text = None
+                        resp_reasoning = None
+                        resp_tool_calls = None
                         try:
                             resp_data = json.loads(resp_body)
                             if resp_data.get("usage"):
                                 u = resp_data["usage"]
                                 input_tokens = u.get("prompt_tokens", input_tokens)
                                 output_tokens = u.get("completion_tokens")
+                                reasoning_tokens = (
+                                    u.get("completion_tokens_details", {}).get("reasoning_tokens")
+                                    or u.get("reasoning_tokens")
+                                )
+                            choices = resp_data.get("choices", [])
+                            if choices and isinstance(choices, list):
+                                msg = choices[0].get("message", {})
+                                resp_text = msg.get("content")
+                                resp_reasoning = msg.get("reasoning_content")
+                                resp_tool_calls = msg.get("tool_calls")
+                                if not resp_text and "text" in choices[0]:
+                                    resp_text = choices[0].get("text")
                         except (json.JSONDecodeError, KeyError):
                             pass
 
@@ -481,7 +664,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         allowed, budget_status = _token_budget.record_and_check(
                             input_tokens or 0, output_tokens or 0
                         )
-                        
+
                         # Add budget status to response headers for all responses
                         budget_headers = {
                             "X-Token-Budget-Used": str(budget_status["total_used"]),
@@ -489,9 +672,53 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
                             "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
                         }
-                        
+
+                        t_total = (time.monotonic() - t_start) * 1000
+                        if ttfb_ms is None:
+                            ttfb_ms = t_total
+                        if output_tokens and t_total > 0:
+                            tokens_per_s = output_tokens / (t_total / 1000)
+
                         if not allowed:
-                            # Budget exceeded - send error response
+                            error = "token_budget_exceeded"
+
+                        log_call(model, path, input_tokens, output_tokens,
+                                 ttfb_ms, t_total, tokens_per_s,
+                                 server_running, server_tok_s, server_model,
+                                 status_code, error, call_type)
+                        logged = True
+                        log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
+
+                        raw_record = make_raw_payload_record(
+                            req_id=req_id,
+                            path=path,
+                            method=method,
+                            call_type=call_type,
+                            model=model,
+                            client_ip=request.remote,
+                            req_headers=dict(request.headers),
+                            payload_obj=payload,
+                            status_code=status_code,
+                            resp_headers=dict(upstream_resp.headers),
+                            is_stream=False,
+                            ttfb_ms=ttfb_ms,
+                            total_ms=t_total,
+                            tokens_per_s=tokens_per_s,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            reasoning_tokens=reasoning_tokens,
+                            content_text=resp_text,
+                            reasoning_text=resp_reasoning,
+                            tool_calls=resp_tool_calls,
+                            raw_resp_json=resp_data,
+                            error=error,
+                        )
+                        if _raw_logging_enabled:
+                            append_raw_payload(raw_record)
+                        if _raw_subscribers:
+                            asyncio.create_task(broadcast_raw_payload(raw_record))
+
+                        if not allowed:
                             error_msg = (
                                 f"🚫 DAILY TOKEN BUDGET EXCEEDED\n\n"
                                 f"Used: {budget_status['total_used']:,} tokens "
@@ -505,19 +732,6 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 status=429,
                                 headers=budget_headers
                             )
-
-                        t_total = (time.monotonic() - t_start) * 1000
-                        if ttfb_ms is None:
-                            ttfb_ms = t_total
-                        if output_tokens and t_total > 0:
-                            tokens_per_s = output_tokens / (t_total / 1000)
-
-                        log_call(model, path, input_tokens, output_tokens,
-                                 ttfb_ms, t_total, tokens_per_s,
-                                 server_running, server_tok_s, server_model,
-                                 status_code, error, call_type)
-                        logged = True
-                        log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
 
                         return web.Response(
                             status=upstream_resp.status,
@@ -533,6 +747,19 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                  server_running, server_tok_s, server_model,
                  None, error, call_type)
         log_proxy_call(path, method, call_type, model, None, error, 1 if logged else 0, ttfb_ms, t_total)
+
+        raw_record = make_raw_payload_record(
+            req_id=req_id, path=path, method=method, call_type=call_type, model=model,
+            client_ip=request.remote, req_headers=dict(request.headers), payload_obj=payload,
+            status_code=504, resp_headers={}, is_stream=False, ttfb_ms=ttfb_ms, total_ms=t_total,
+            tokens_per_s=None, input_tokens=input_tokens, output_tokens=None, reasoning_tokens=None,
+            content_text=None, reasoning_text=None, tool_calls=None, raw_resp_json=None, error=error
+        )
+        if _raw_logging_enabled:
+            append_raw_payload(raw_record)
+        if _raw_subscribers:
+            asyncio.create_task(broadcast_raw_payload(raw_record))
+
         return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
 
     except Exception as e:
@@ -543,6 +770,19 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                  server_running, server_tok_s, server_model,
                  status_code, error, call_type)
         log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total)
+
+        raw_record = make_raw_payload_record(
+            req_id=req_id, path=path, method=method, call_type=call_type, model=model,
+            client_ip=request.remote, req_headers=dict(request.headers), payload_obj=payload,
+            status_code=status_code or 502, resp_headers={}, is_stream=False, ttfb_ms=ttfb_ms, total_ms=t_total,
+            tokens_per_s=None, input_tokens=input_tokens, output_tokens=None, reasoning_tokens=None,
+            content_text=None, reasoning_text=None, tool_calls=None, raw_resp_json=None, error=error
+        )
+        if _raw_logging_enabled:
+            append_raw_payload(raw_record)
+        if _raw_subscribers:
+            asyncio.create_task(broadcast_raw_payload(raw_record))
+
         return web.json_response({"error": {"message": str(e)}}, status=502)
 
 
@@ -598,6 +838,7 @@ async def handle_health(request: web.Request) -> web.Response:
                     "waiting": d["waiting"],
                 }
     
+    file_size = LOGGER_FILE.stat().st_size if LOGGER_FILE.exists() else 0
     return web.json_response({
         "status": "ok",
         "upstream": UPSTREAM,
@@ -608,12 +849,157 @@ async def handle_health(request: web.Request) -> web.Response:
         },
         "token_budget": budget_status,
         "model_queue": model_queue,
+        "raw_logging": {
+            "enabled": _raw_logging_enabled,
+            "file_path": str(LOGGER_FILE),
+            "file_size_bytes": file_size,
+            "file_size_formatted": format_size(file_size),
+            "subscribers_count": len(_raw_subscribers),
+        }
     })
 
 
+# ── Raw Payload Management Endpoints ─────────────────────────────────────────
+async def handle_raw_log_status(request: web.Request) -> web.Response:
+    """GET /v1/raw-log/status or /raw-log/status"""
+    file_size = LOGGER_FILE.stat().st_size if LOGGER_FILE.exists() else 0
+    return web.json_response({
+        "enabled": _raw_logging_enabled,
+        "file_path": str(LOGGER_FILE),
+        "rel_path": str(LOGGER_FILE.relative_to(REPO_ROOT)) if LOGGER_FILE.is_relative_to(REPO_ROOT) else str(LOGGER_FILE),
+        "file_size_bytes": file_size,
+        "file_size_formatted": format_size(file_size),
+        "subscribers_count": len(_raw_subscribers),
+    })
+
+
+async def handle_raw_log_toggle(request: web.Request) -> web.Response:
+    """POST /v1/raw-log/toggle or /raw-log/toggle"""
+    global _raw_logging_enabled
+    try:
+        data = await request.json() if request.can_read_body else {}
+    except Exception:
+        data = {}
+    
+    if "enabled" in data:
+        _raw_logging_enabled = bool(data["enabled"])
+    else:
+        _raw_logging_enabled = not _raw_logging_enabled
+
+    file_size = LOGGER_FILE.stat().st_size if LOGGER_FILE.exists() else 0
+    return web.json_response({
+        "success": True,
+        "enabled": _raw_logging_enabled,
+        "file_path": str(LOGGER_FILE),
+        "file_size_formatted": format_size(file_size),
+        "message": f"Raw payload logging is now {'ENABLED' if _raw_logging_enabled else 'DISABLED'}"
+    })
+
+
+async def handle_raw_log_recent(request: web.Request) -> web.Response:
+    """GET /v1/raw-log/recent or /raw-log/recent — retrieve the last N lines from the logger file."""
+    limit_str = request.query.get("limit", "50")
+    try:
+        limit = max(1, min(500, int(limit_str)))
+    except ValueError:
+        limit = 50
+
+    if not LOGGER_FILE.exists():
+        return web.json_response({"entries": [], "total_count": 0})
+
+    try:
+        entries = []
+        with open(LOGGER_FILE, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        pass
+        total_count = len(entries)
+        recent_entries = entries[-limit:]
+        return web.json_response({"entries": list(reversed(recent_entries)), "total_count": total_count})
+    except Exception as e:
+        return web.json_response({"error": str(e), "entries": []}, status=500)
+
+
+async def handle_raw_log_clear(request: web.Request) -> web.Response:
+    """POST /v1/raw-log/clear or /raw-log/clear — truncate the logger file."""
+    try:
+        if LOGGER_FILE.exists():
+            with open(LOGGER_FILE, "w", encoding="utf-8") as f:
+                f.truncate(0)
+        return web.json_response({"success": True, "message": "Logger file cleared successfully."})
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
+    """GET /v1/raw-log/stream or /raw-log/stream — Server-Sent Events (SSE) live feed."""
+    response = web.StreamResponse(
+        status=200,
+        reason='OK',
+        headers={
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+        }
+    )
+    await response.prepare(request)
+
+    q = asyncio.Queue(maxsize=100)
+    _raw_subscribers.add(q)
+    try:
+        # Initial connect ping
+        init_payload = json.dumps({"type": "connected", "enabled": _raw_logging_enabled, "timestamp": datetime.now(timezone.utc).isoformat()})
+        await response.write(f"data: {init_payload}\n\n".encode("utf-8"))
+
+        while True:
+            try:
+                record = await asyncio.wait_for(q.get(), timeout=15.0)
+                data = json.dumps(record, ensure_ascii=False)
+                await response.write(f"data: {data}\n\n".encode("utf-8"))
+            except asyncio.TimeoutError:
+                # Keep-alive heartbeat comment
+                await response.write(b": keepalive\n\n")
+    except (asyncio.CancelledError, ConnectionResetError):
+        pass
+    finally:
+        _raw_subscribers.discard(q)
+    return response
+
+
 # ── App ──────────────────────────────────────────────────────────────────────
+@web.middleware
+async def cors_middleware(request, handler):
+    if request.method == "OPTIONS":
+        return web.Response(headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+        })
+    response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
 def create_app():
-    app = web.Application(client_max_size=10 * 1024 * 1024)
+    app = web.Application(client_max_size=10 * 1024 * 1024, middlewares=[cors_middleware])
+    
+    # Raw payload management routes (must be before wildcard /v1/{tail:.*})
+    app.router.add_get("/v1/raw-log/status", handle_raw_log_status)
+    app.router.add_get("/raw-log/status", handle_raw_log_status)
+    app.router.add_post("/v1/raw-log/toggle", handle_raw_log_toggle)
+    app.router.add_post("/raw-log/toggle", handle_raw_log_toggle)
+    app.router.add_get("/v1/raw-log/recent", handle_raw_log_recent)
+    app.router.add_get("/raw-log/recent", handle_raw_log_recent)
+    app.router.add_post("/v1/raw-log/clear", handle_raw_log_clear)
+    app.router.add_post("/raw-log/clear", handle_raw_log_clear)
+    app.router.add_get("/v1/raw-log/stream", handle_raw_log_stream)
+    app.router.add_get("/raw-log/stream", handle_raw_log_stream)
+
     app.router.add_route("*", "/v1/{tail:.*}", handle_proxy)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/", handle_health)

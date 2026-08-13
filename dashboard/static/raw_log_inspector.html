@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-Time LLM Payload Inspector & Raw Logger</title>
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="static/css/style.css">
+
+  <style>
+    /* Inspector Dedicated Modern Styles */
+    .inspector-body {
+      background-color: #080b10;
+      color: #f0f6fc;
+      font-family: var(--font-sans, 'Outfit', sans-serif);
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .inspector-header {
+      background: rgba(13, 17, 23, 0.95);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(48, 54, 61, 0.8);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      padding: 12px 24px;
+    }
+
+    .inspector-nav {
+      max-width: 1700px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-title span {
+      color: #58a6ff;
+    }
+
+    .toolbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .inspector-container {
+      max-width: 1700px;
+      margin: 18px auto;
+      padding: 0 24px;
+      flex: 1;
+      width: 100%;
+    }
+
+    /* Filter & Search Bar */
+    .filter-card {
+      background: rgba(22, 27, 34, 0.85);
+      border: 1px solid rgba(48, 54, 61, 0.7);
+      border-radius: 10px;
+      padding: 12px 18px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .filter-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .filter-input {
+      background: rgba(13, 17, 23, 0.9);
+      border: 1px solid rgba(48, 54, 61, 0.8);
+      border-radius: 6px;
+      color: #f0f6fc;
+      padding: 6px 12px;
+      font-size: 13px;
+      outline: none;
+      min-width: 220px;
+      font-family: inherit;
+    }
+
+    .filter-input:focus {
+      border-color: #58a6ff;
+      box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+    }
+
+    .filter-select {
+      background: rgba(13, 17, 23, 0.9);
+      border: 1px solid rgba(48, 54, 61, 0.8);
+      border-radius: 6px;
+      color: #f0f6fc;
+      padding: 6px 10px;
+      font-size: 13px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* Summary Metabar */
+    .stats-metabar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 12px;
+      color: #8b949e;
+      flex-wrap: wrap;
+    }
+
+    .stat-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(48, 54, 61, 0.5);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-family: var(--font-mono, monospace);
+    }
+
+    .stat-badge strong {
+      color: #f0f6fc;
+    }
+
+    /* Feed & Payload Cards */
+    .payload-feed {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .payload-card {
+      background: rgba(22, 27, 34, 0.75);
+      border: 1px solid rgba(48, 54, 61, 0.7);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: all 0.2s ease;
+    }
+
+    .payload-card:hover {
+      border-color: rgba(88, 166, 255, 0.5);
+    }
+
+    .payload-card.error-call {
+      border-left: 4px solid #f85149;
+    }
+
+    .payload-card.success-call {
+      border-left: 4px solid #3fb950;
+    }
+
+    .payload-card-header {
+      padding: 12px 18px;
+      background: rgba(13, 17, 23, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .payload-card-header:hover {
+      background: rgba(22, 27, 34, 0.9);
+    }
+
+    .card-title-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .method-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: rgba(88, 166, 255, 0.15);
+      color: #58a6ff;
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      font-family: var(--font-mono, monospace);
+    }
+
+    .model-badge-lg {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 6px;
+      background: rgba(188, 140, 255, 0.15);
+      color: #bc8cff;
+      border: 1px solid rgba(188, 140, 255, 0.3);
+    }
+
+    .status-pill {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-family: var(--font-mono, monospace);
+    }
+
+    .status-200 {
+      background: rgba(63, 185, 80, 0.15);
+      color: #3fb950;
+      border: 1px solid rgba(63, 185, 80, 0.3);
+    }
+
+    .status-err {
+      background: rgba(248, 81, 73, 0.15);
+      color: #f85149;
+      border: 1px solid rgba(248, 81, 73, 0.3);
+    }
+
+    .token-pills-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-family: var(--font-mono, monospace);
+    }
+
+    .tok-in {
+      color: #58a6ff;
+    }
+
+    .tok-out {
+      color: #3fb950;
+    }
+
+    .tok-reasoning {
+      color: #bc8cff;
+    }
+
+    .tok-total {
+      color: #e3b341;
+      font-weight: 600;
+    }
+
+    .card-body {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      border-top: 1px solid rgba(48, 54, 61, 0.6);
+      background: rgba(13, 17, 23, 0.4);
+    }
+
+    /* Subsections */
+    .foldable-section {
+      border: 1px solid rgba(48, 54, 61, 0.6);
+      border-radius: 8px;
+      background: rgba(22, 27, 34, 0.5);
+      overflow: hidden;
+    }
+
+    .foldable-header {
+      padding: 8px 14px;
+      background: rgba(13, 17, 23, 0.7);
+      font-size: 12px;
+      font-weight: 600;
+      color: #8b949e;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .foldable-header:hover {
+      background: rgba(33, 38, 45, 0.8);
+      color: #f0f6fc;
+    }
+
+    .foldable-content {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* Messages Turns */
+    .msg-card {
+      border-radius: 6px;
+      border: 1px solid rgba(48, 54, 61, 0.5);
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .msg-system {
+      background: rgba(188, 140, 255, 0.06);
+      border-color: rgba(188, 140, 255, 0.25);
+    }
+
+    .msg-user {
+      background: rgba(88, 166, 255, 0.06);
+      border-color: rgba(88, 166, 255, 0.25);
+    }
+
+    .msg-assistant {
+      background: rgba(63, 185, 80, 0.06);
+      border-color: rgba(63, 185, 80, 0.25);
+    }
+
+    .msg-tool {
+      background: rgba(210, 153, 34, 0.06);
+      border-color: rgba(210, 153, 34, 0.25);
+    }
+
+    .msg-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .msg-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-mono, monospace);
+      font-size: 12.5px;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    /* Reasoning / Thinking Box */
+    .reasoning-box {
+      background: rgba(188, 140, 255, 0.08);
+      border: 1px solid rgba(188, 140, 255, 0.3);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+
+    .reasoning-header {
+      font-size: 11px;
+      font-weight: 700;
+      color: #bc8cff;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .reasoning-text {
+      color: #d2a8ff;
+      font-style: italic;
+      font-family: var(--font-mono, monospace);
+      font-size: 12px;
+      white-space: pre-wrap;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    /* Key Value Grid for Metadata & Headers */
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .kv-item {
+      background: rgba(13, 17, 23, 0.6);
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px solid rgba(48, 54, 61, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .kv-key {
+      color: #8b949e;
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+    }
+
+    .kv-val {
+      color: #f0f6fc;
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      word-break: break-all;
+      text-align: right;
+    }
+
+    /* JSON Interactive Tree Viewer */
+    .json-tree-container {
+      background: #0d1117;
+      border: 1px solid rgba(48, 54, 61, 0.8);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: var(--font-mono, monospace);
+      font-size: 12px;
+      line-height: 1.6;
+      max-height: 600px;
+      overflow-y: auto;
+      color: #e6edf3;
+    }
+
+    .json-key {
+      color: #79c0ff;
+    }
+
+    .json-string {
+      color: #a5d6ff;
+    }
+
+    .json-number {
+      color: #7ee787;
+    }
+
+    .json-boolean {
+      color: #ff7b72;
+    }
+
+    .json-null {
+      color: #8b949e;
+      font-style: italic;
+    }
+
+    .json-toggle {
+      cursor: pointer;
+      user-select: none;
+      display: inline-block;
+      width: 14px;
+      color: #8b949e;
+      font-weight: bold;
+    }
+
+    .json-toggle:hover {
+      color: #58a6ff;
+    }
+
+    .json-collapsed-text {
+      color: #6e7681;
+      font-style: italic;
+      cursor: pointer;
+    }
+
+    /* Buttons & Mini Controls */
+    .btn-mini {
+      background: rgba(33, 38, 45, 0.8);
+      border: 1px solid rgba(48, 54, 61, 0.8);
+      border-radius: 4px;
+      color: #c9d1d9;
+      font-size: 11px;
+      padding: 3px 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: inherit;
+    }
+
+    .btn-mini:hover {
+      background: rgba(48, 54, 61, 0.9);
+      color: #f0f6fc;
+      border-color: #58a6ff;
+    }
+
+    .btn-mini-primary {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: rgba(88, 166, 255, 0.4);
+      color: #58a6ff;
+      font-weight: 500;
+    }
+
+    .btn-mini-primary:hover {
+      background: rgba(88, 166, 255, 0.25);
+    }
+
+    /* Empty state */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #8b949e;
+      background: rgba(22, 27, 34, 0.4);
+      border: 1px dashed rgba(48, 54, 61, 0.6);
+      border-radius: 10px;
+      margin: 20px 0;
+    }
+
+    .empty-state h3 {
+      font-size: 16px;
+      color: #f0f6fc;
+      margin-bottom: 8px;
+    }
+
+    .empty-state p {
+      font-size: 13px;
+      max-width: 500px;
+      margin: 0 auto 16px auto;
+    }
+  </style>
+
+  <script src="static/js/api.js" defer></script>
+  <script src="static/js/inspector.js" defer></script>
+</head>
+<body class="inspector-body">
+
+  <!-- Sticky Top Header & Live Navigation -->
+  <header class="inspector-header">
+    <div class="inspector-nav">
+      <div class="brand-title">
+        <span>🔬</span> Real-Time Payload <span>Inspector</span>
+      </div>
+
+      <div class="toolbar-actions">
+        <!-- Live SSE Status Indicator -->
+        <div class="stat-badge" id="liveConnBadge">
+          <span class="live-dot" id="liveConnDot" style="width: 8px; height: 8px; border-radius: 50%; background: #8b949e; display: inline-block;"></span>
+          <span id="liveConnText" style="font-size: 12px;">Connecting...</span>
+        </div>
+
+        <!-- Logging Toggle Button -->
+        <button id="inspectorToggleLoggingBtn" class="btn-mini btn-mini-primary" style="padding: 5px 12px; font-size: 12px;">
+          ⚡ <span id="inspectorToggleLoggingText">Toggle Logging</span>
+        </button>
+
+        <!-- Auto-scroll Checkbox -->
+        <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; cursor: pointer; user-select: none;">
+          <input type="checkbox" id="autoScrollCheck" checked style="cursor: pointer;">
+          Auto-scroll
+        </label>
+
+        <!-- Expand / Collapse All -->
+        <button id="expandAllBtn" class="btn-mini">Expand All</button>
+        <button id="collapseAllBtn" class="btn-mini">Collapse All</button>
+
+        <!-- Clear Display -->
+        <button id="clearScreenBtn" class="btn-mini">Clear Feed</button>
+
+        <!-- Truncate Disk File -->
+        <button id="clearDiskFileBtn" class="btn-mini" style="color: #f85149; border-color: rgba(248, 81, 73, 0.4);">
+          🗑 Truncate File
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <div class="inspector-container">
+    
+    <!-- Filter & Search Toolbar -->
+    <div class="filter-card">
+      <div class="filter-group">
+        <input type="text" id="searchInput" class="filter-input" placeholder="🔍 Search prompts, responses, or models...">
+        
+        <select id="modelFilterSelect" class="filter-select">
+          <option value="all">All Models</option>
+        </select>
+
+        <select id="statusFilterSelect" class="filter-select">
+          <option value="all">All Statuses</option>
+          <option value="success">200 OK Only</option>
+          <option value="errors">Errors (4xx / 5xx)</option>
+        </select>
+      </div>
+
+      <!-- File Metadata & Counter Pill -->
+      <div class="stats-metabar">
+        <div class="stat-badge">
+          <span>File:</span> <strong id="metaFilePath">logger/payloads.jsonl</strong>
+        </div>
+        <div class="stat-badge">
+          <span>Size:</span> <strong id="metaFileSize">0 B</strong>
+        </div>
+        <div class="stat-badge">
+          <span>Calls Displayed:</span> <strong id="metaTotalCalls">0</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Event Stream Feed -->
+    <div id="payloadFeed" class="payload-feed">
+      <div class="empty-state" id="initialEmptyState">
+        <h3>Awaiting Live Telemetry Payload Logs</h3>
+        <p>Ensure Raw Payload Logging is toggled <strong>ON</strong>. As requests pass through the proxy, complete incoming & outgoing JSON schemas will stream here in real-time.</p>
+        <button id="emptyStateEnableBtn" class="btn-mini btn-mini-primary" style="padding: 6px 16px; font-size: 13px;">
+          ⚡ Turn ON Raw Payload Logging
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+</body>
+</html>
