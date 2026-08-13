@@ -539,14 +539,21 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                                 if delta.get("reasoning_content"):
                                                     content_chars += len(delta["reasoning_content"])
                                                     collected_reasoning += delta["reasoning_content"]
-                                                if delta.get("tool_calls"):
-                                                    collected_tool_calls.extend(delta["tool_calls"])
+                                            if chunk_data.get("error"):
+                                                err_obj = chunk_data["error"]
+                                                if isinstance(err_obj, dict):
+                                                    error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
+                                                else:
+                                                    error = str(err_obj)
                                         except json.JSONDecodeError:
                                             pass
                             except Exception:
                                 pass
 
                         await response.write_eof()
+
+                        if status_code and (status_code < 200 or status_code >= 300) and not error:
+                            error = f"HTTP {status_code}"
 
                         if collected_usage:
                             input_tokens = collected_usage.get("prompt_tokens", input_tokens)
@@ -657,8 +664,22 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 resp_tool_calls = msg.get("tool_calls")
                                 if not resp_text and "text" in choices[0]:
                                     resp_text = choices[0].get("text")
+                            if resp_data.get("error"):
+                                err_obj = resp_data["error"]
+                                if isinstance(err_obj, dict):
+                                    error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
+                                else:
+                                    error = str(err_obj)
+                            elif resp_data.get("message") and status_code and (status_code < 200 or status_code >= 300):
+                                error = str(resp_data["message"])
+                            elif resp_data.get("detail") and status_code and (status_code < 200 or status_code >= 300):
+                                error = str(resp_data["detail"])
                         except (json.JSONDecodeError, KeyError):
-                            pass
+                            if status_code and (status_code < 200 or status_code >= 300):
+                                error = resp_body.decode("utf-8", errors="replace")[:200].strip()
+
+                        if not error and status_code and (status_code < 200 or status_code >= 300):
+                            error = f"HTTP {status_code}"
 
                         # Check token budget after getting usage data
                         allowed, budget_status = _token_budget.record_and_check(
@@ -808,8 +829,10 @@ async def _simple_forward(request, path, method):
                     body = await upstream_resp.read()
                     status_code = upstream_resp.status
                     t_total = (time.monotonic() - t_start) * 1000
+                    if status_code and (status_code < 200 or status_code >= 300):
+                        error = f"HTTP {status_code}"
                     # Still count these in proxy_calls for cross-checking
-                    log_proxy_call(path, method, classify_endpoint(path), None, status_code, None, 0, None, t_total)
+                    log_proxy_call(path, method, classify_endpoint(path), None, status_code, error, 0, None, t_total)
                     return web.Response(
                         status=upstream_resp.status,
                         body=body,

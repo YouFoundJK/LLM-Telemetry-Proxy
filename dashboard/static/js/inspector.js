@@ -547,8 +547,8 @@
   function buildResponseSection(record) {
     const text = record.response?.content?.text;
     const reasoning = record.response?.content?.reasoning_content;
-    const toolCalls = record.response?.content?.tool_calls;
-    const error = record.response?.error;
+    const isErr = Boolean(record.response?.error || (record.response?.status_code && record.response.status_code >= 400));
+    const error = record.response?.error || (isErr && record.response?.status_code ? `HTTP ${record.response.status_code}` : null);
 
     if (!text && !reasoning && !toolCalls && !error) return null;
 

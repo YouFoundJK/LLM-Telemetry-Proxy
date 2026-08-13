@@ -259,7 +259,7 @@ async def handle_query(request: web.Request) -> web.Response:
 
         errors_only = request.query.get("errors_only")
         if errors_only and errors_only.lower() in ("1", "true", "yes"):
-            where_parts.append("error IS NOT NULL")
+            where_parts.append("((error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)))")
 
         where_clause = " AND ".join(where_parts) if where_parts else "1=1"
         group_by = request.query.get("group_by")
@@ -282,7 +282,7 @@ async def handle_query(request: web.Request) -> web.Response:
                        SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN total_ms * COALESCE(calls_count, 1) ELSE 0 END) as sum_total_ms_for_tps,
                        SUM(server_running * COALESCE(calls_count, 1)) as sum_load,
                        SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as load_count,
-                       SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
+                       SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
                 FROM api_calls WHERE {where_clause}
                 GROUP BY model ORDER BY calls DESC
             """, params).fetchall()
@@ -364,7 +364,7 @@ async def handle_query(request: web.Request) -> web.Response:
                        SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_rtt,
                        SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN output_tokens ELSE 0 END) / NULLIF(SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN total_ms * COALESCE(calls_count, 1) ELSE 0 END) / 1000.0, 0) as avg_tps,
                        SUM(server_running * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_load,
-                       SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
+                       SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
                 FROM api_calls WHERE {where_clause}
                 GROUP BY hour ORDER BY hour
             """, params).fetchall()
@@ -380,7 +380,7 @@ async def handle_query(request: web.Request) -> web.Response:
                        SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_rtt,
                        SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN output_tokens ELSE 0 END) / NULLIF(SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN total_ms * COALESCE(calls_count, 1) ELSE 0 END) / 1000.0, 0) as avg_tps,
                        SUM(server_running * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_load,
-                       SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
+                       SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
                 FROM api_calls WHERE {where_clause}
                 GROUP BY day ORDER BY day
             """, params).fetchall()
@@ -403,10 +403,24 @@ async def handle_query(request: web.Request) -> web.Response:
                 ORDER BY id DESC LIMIT ?
             """, params + [limit]).fetchall()
             
+            http_err_map = {
+                400: "HTTP 400 Bad Request",
+                401: "HTTP 401 Unauthorized",
+                403: "HTTP 403 Forbidden",
+                404: "HTTP 404 Not Found",
+                408: "HTTP 408 Request Timeout",
+                429: "HTTP 429 Rate Limit Exceeded",
+                500: "HTTP 500 Internal Server Error",
+                502: "HTTP 502 Bad Gateway",
+                503: "HTTP 503 Service Unavailable",
+                504: "HTTP 504 Gateway Timeout"
+            }
             calls = []
             for r in rows:
                 d = dict(r)
                 d["model"] = get_resolved_model(d["model"], mapping)
+                if not d.get("error") and d.get("status_code") and (d["status_code"] < 200 or d["status_code"] >= 300):
+                    d["error"] = http_err_map.get(d["status_code"], f"HTTP {d['status_code']}")
                 calls.append(d)
             result["calls"] = calls
 
@@ -417,7 +431,7 @@ async def handle_query(request: web.Request) -> web.Response:
                    COALESCE(SUM(ttfb_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN ttfb_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_ttfb,
                    COALESCE(SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_rtt,
                    COALESCE(SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN output_tokens ELSE 0 END) / NULLIF(SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN total_ms * COALESCE(calls_count, 1) ELSE 0 END) / 1000.0, 0), 0) as avg_tps,
-                   SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors,
+                   SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as errors,
                    MIN(timestamp) as first_call,
                    MAX(timestamp) as last_call
             FROM api_calls WHERE {where_clause}
@@ -450,7 +464,7 @@ async def handle_query(request: web.Request) -> web.Response:
             proxy_stats = conn.execute(f"""
                 SELECT
                     SUM(COALESCE(calls_count, 1)) as total_calls,
-                    SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as total_errors,
+                    SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as total_errors,
                     SUM(CASE WHEN logged = 1 THEN COALESCE(calls_count, 1) ELSE 0 END) as logged_calls,
                     SUM(CASE WHEN logged = 0 THEN COALESCE(calls_count, 1) ELSE 0 END) as unlogged_calls,
                     MIN(timestamp) as started_at,
@@ -463,7 +477,7 @@ async def handle_query(request: web.Request) -> web.Response:
                 type_breakdown = conn.execute(f"""
                     SELECT call_type,
                            SUM(COALESCE(calls_count, 1)) as calls,
-                           SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors,
+                           SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as errors,
                            SUM(CASE WHEN logged = 1 THEN COALESCE(calls_count, 1) ELSE 0 END) as logged
                     FROM proxy_calls WHERE {where_clause} GROUP BY call_type ORDER BY calls DESC
                 """, params).fetchall()

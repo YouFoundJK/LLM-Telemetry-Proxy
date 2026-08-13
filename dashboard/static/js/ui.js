@@ -392,7 +392,26 @@ const UI = (() => {
       return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
     });
 
-    tbody.innerHTML = sorted.slice(0, 500).map(c => `
+    const httpStatusMap = {
+      400: 'HTTP 400 Bad Request',
+      401: 'HTTP 401 Unauthorized',
+      403: 'HTTP 403 Forbidden',
+      404: 'HTTP 404 Not Found',
+      408: 'HTTP 408 Request Timeout',
+      429: 'HTTP 429 Rate Limit Exceeded',
+      500: 'HTTP 500 Internal Server Error',
+      502: 'HTTP 502 Bad Gateway',
+      503: 'HTTP 503 Service Unavailable',
+      504: 'HTTP 504 Gateway Timeout'
+    };
+
+    tbody.innerHTML = sorted.slice(0, 500).map(c => {
+      const isErr = Boolean(c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300)));
+      const errorMsg = c.error || (isErr && c.status_code ? (httpStatusMap[c.status_code] || `HTTP ${c.status_code}`) : (isErr ? 'Error' : ''));
+      const statusTagClass = isErr ? 'tag-error' : (c.status_code >= 200 && c.status_code < 300) ? 'tag-success' : 'tag-warning';
+      const statusText = c.status_code || (isErr ? 'ERR' : '?');
+
+      return `
       <tr>
         <td>${formatShortDate(c.timestamp)}</td>
         <td><span class="tag ${getModelClass(c.model)}">${c.model || 'System / Non-Inference'}</span></td>
@@ -404,15 +423,15 @@ const UI = (() => {
         <td class="num">${formatTps(c.tokens_per_s)}</td>
         <td class="num">${c.server_running !== null ? c.server_running : '—'}</td>
         <td>
-          <span class="tag ${c.error ? 'tag-error' : (c.status_code >= 200 && c.status_code < 300) ? 'tag-success' : 'tag-warning'}">
-            ${c.error ? 'ERR' : c.status_code || '?'}
+          <span class="tag ${statusTagClass}">
+            ${statusText}
           </span>
         </td>
-        <td style="color:var(--red); font-size:11px; font-family:var(--font-mono); max-width: 250px; overflow: hidden; text-overflow: ellipsis;" title="${c.error || ''}">
-          ${c.error || ''}
+        <td style="color:var(--red); font-size:11px; font-family:var(--font-mono); max-width: 250px; overflow: hidden; text-overflow: ellipsis;" title="${errorMsg}">
+          ${errorMsg}
         </td>
       </tr>
-    `).join('');
+    `}).join('');
   }
 
   /**
@@ -497,7 +516,7 @@ const UI = (() => {
         b.loadSum += c.server_running * cnt;
         b.loadCount += cnt;
       }
-      if (c.error) b.errors += cnt;
+      if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) b.errors += cnt;
     });
 
     tbody.innerHTML = Object.entries(byModel)
@@ -769,15 +788,15 @@ const UI = (() => {
       return null;
     }
 
-    // 1. Determine top 2 most-used models dynamically
-    const modelVolume = {};
+    // 1. Determine top 2 most-used models dynamically by input tokens
+    const modelInputTokens = {};
     calls.forEach(c => {
       if (!c.model || c.model === 'unknown' || c.model === 'System / Non-Inference') return;
-      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
-      modelVolume[c.model] = (modelVolume[c.model] || 0) + cnt;
+      const inp = c.input_tokens || 0;
+      modelInputTokens[c.model] = (modelInputTokens[c.model] || 0) + inp;
     });
 
-    const sortedModels = Object.keys(modelVolume).sort((a, b) => modelVolume[b] - modelVolume[a]);
+    const sortedModels = Object.keys(modelInputTokens).sort((a, b) => modelInputTokens[b] - modelInputTokens[a]);
 
     if (sortedModels.length < 2) {
       const singleModel = sortedModels[0] || 'Unknown';
@@ -811,7 +830,7 @@ const UI = (() => {
             grp.tpsOutput += (c.output_tokens || 0);
             grp.tpsTotalMs += (c.total_ms || 0) * cnt;
           }
-          if (c.error) grp.errors += cnt;
+          if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) grp.errors += cnt;
         }
       });
 
@@ -955,7 +974,7 @@ const UI = (() => {
             • <b>Generation Speed</b>: ${genText}
           </p>
           <p style="font-size:13px; line-height: 1.5; color:var(--text-muted); font-size:12px; margin-top:8px;">
-            * Analysis is computed dynamically comparing the top 2 active models over the selected time range (${summaryA.calls} ${modelA} calls vs ${summaryB.calls} ${modelB} calls).
+            * Analysis is computed dynamically comparing the top 2 models by input token volume over the selected time range (${formatNum(summaryA.calls)} ${modelA} calls vs ${formatNum(summaryB.calls)} ${modelB} calls).
           </p>
         </div>
       `;
@@ -1098,7 +1117,7 @@ const UI = (() => {
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       
       hourData[h].calls += cnt;
-      if (c.error) {
+      if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) {
         hourData[h].errors += cnt;
       }
       if (c.total_ms) {
@@ -1157,7 +1176,7 @@ const UI = (() => {
 
         // Period stats
         stats.periods[period].calls += cnt;
-        if (c.error) stats.periods[period].errors += cnt;
+        if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) stats.periods[period].errors += cnt;
         if (c.total_ms) {
           stats.periods[period].rttSum += c.total_ms * cnt;
           stats.periods[period].rttCount += cnt;
@@ -1169,7 +1188,7 @@ const UI = (() => {
 
         // Day stats
         stats.days[day].calls += cnt;
-        if (c.error) stats.days[day].errors += cnt;
+        if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) stats.days[day].errors += cnt;
         if (c.total_ms) {
           stats.days[day].rttSum += c.total_ms * cnt;
           stats.days[day].rttCount += cnt;

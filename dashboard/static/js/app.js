@@ -277,7 +277,7 @@ const App = (() => {
         tpsOutputTokens += (c.output_tokens || 0);
         tpsTotalMs += (c.total_ms || 0) * cnt;
       }
-      if (c.error) {
+      if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) {
         errors += cnt;
       }
       if (!firstCall || c.timestamp < firstCall) firstCall = c.timestamp;
@@ -366,7 +366,7 @@ const App = (() => {
         g.loadSum += c.server_running * cnt;
         g.loadCount += cnt;
       }
-      if (c.error) {
+      if (c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))) {
         g.errors += cnt;
       }
     });
@@ -410,7 +410,7 @@ const App = (() => {
       filteredCalls = filteredCalls.filter(c => c.model && selectedModels.includes(c.model));
     }
     if (State.currentErrorsFilter) {
-      filteredCalls = filteredCalls.filter(c => c.error);
+      filteredCalls = filteredCalls.filter(c => Boolean(c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))));
     }
 
     const summary = computeSummary(filteredCalls);

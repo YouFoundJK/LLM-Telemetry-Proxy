@@ -585,7 +585,7 @@ const TelemetryCharts = (() => {
       byBucket[b] = 0;
     });
 
-    const errors = calls.filter(c => c.error);
+    const errors = calls.filter(c => Boolean(c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))));
     errors.forEach(c => {
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
