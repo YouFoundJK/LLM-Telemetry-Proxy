@@ -97,11 +97,94 @@ const TelemetryAPI = (() => {
     return handleResponse(response);
   }
 
+  /**
+   * GET /api/proxy/status — retrieves proxy gateway live state and health.
+   */
+  async function getProxyStatus(port) {
+    const url = port ? `${BASE_URL}/api/proxy/status?port=${encodeURIComponent(port)}` : `${BASE_URL}/api/proxy/status`;
+    const response = await fetch(url);
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/proxy/start — starts the proxy gateway process.
+   */
+  async function startProxy(params = {}) {
+    const url = `${BASE_URL}/api/proxy/start`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/proxy/stop — stops / kills the proxy gateway process.
+   */
+  async function stopProxy(params = {}) {
+    const url = `${BASE_URL}/api/proxy/stop`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/proxy/restart — restarts the proxy gateway process.
+   */
+  async function restartProxy(params = {}) {
+    const url = `${BASE_URL}/api/proxy/restart`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    return handleResponse(response);
+  }
+
+  /**
+   * GET /api/proxy/logs — retrieves tail of proxy log output.
+   */
+  async function getProxyLogs(lines = 150) {
+    const url = `${BASE_URL}/api/proxy/logs?lines=${lines}`;
+    const response = await fetch(url);
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/proxy/clear-logs — clears proxy log output.
+   */
+  async function clearProxyLogs() {
+    const url = `${BASE_URL}/api/proxy/clear-logs`;
+    const response = await fetch(url, { method: 'POST' });
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/db/compress — triggers historical database compression.
+   */
+  async function runDbCompress() {
+    const url = `${BASE_URL}/api/db/compress`;
+    const response = await fetch(url, { method: 'POST' });
+    return handleResponse(response);
+  }
+
   return {
     query,
     getServerStatus,
     getCosts,
     getHealth,
+    getProxyStatus,
+    startProxy,
+    stopProxy,
+    restartProxy,
+    getProxyLogs,
+    clearProxyLogs,
+    runDbCompress,
     BASE_URL
   };
 })();
+

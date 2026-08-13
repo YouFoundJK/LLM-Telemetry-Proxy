@@ -25,8 +25,14 @@ const App = (() => {
     intervals: {
       refresh: null,
       serverStatus: null,
-      crossCheck: null
+      crossCheck: null,
+      proxyStatus: null,
+      proxyLogs: null
     },
+    
+    // Proxy Gateway State
+    proxyStatus: null,
+    healthData: null,
     
     // Dropdown Instance
     modelDropdownInstance: null,
@@ -484,6 +490,7 @@ const App = (() => {
    */
   async function init() {
     setupTabNavigation();
+    setupProxyControl();
     setupFilters();
     setupToggleSwitches();
     
@@ -530,6 +537,9 @@ const App = (() => {
 
     if (tabId === 'diagnosticsTab') {
       loadHealth();
+    } else if (tabId === 'proxyTab') {
+      loadProxyStatus();
+      loadProxyLogs();
     }
   }
 
@@ -651,6 +661,7 @@ const App = (() => {
     await loadServerStatus();
     await loadCrossCheck();
     await loadHealth();
+    await loadProxyStatus();
   }
 
   /**
@@ -1055,9 +1066,202 @@ const App = (() => {
   async function loadHealth() {
     try {
       const data = await TelemetryAPI.getHealth();
+      State.healthData = data;
       UI.renderHealth(data);
+      
+      const dbPathEl = document.getElementById('proxyDbPathVal');
+      const dbSizeEl = document.getElementById('proxyDbSizeVal');
+      if (dbPathEl && data.db_path) dbPathEl.textContent = data.db_path;
+      if (dbSizeEl && data.db_size_mb !== undefined) dbSizeEl.textContent = `${data.db_size_mb} MB`;
     } catch (e) {
       console.error('Diagnostics check failed', e);
+    }
+  }
+
+  /**
+   * Load live Proxy Gateway Status
+   */
+  async function loadProxyStatus() {
+    try {
+      const portInput = document.getElementById('proxyConfigPort');
+      const port = portInput ? parseInt(portInput.value, 10) : null;
+      const data = await TelemetryAPI.getProxyStatus(port);
+      State.proxyStatus = data;
+      UI.renderProxyStatus(data);
+    } catch (e) {
+      console.warn('Failed to load proxy status', e);
+    }
+  }
+
+  /**
+   * Load live Proxy Execution Logs
+   */
+  async function loadProxyLogs() {
+    try {
+      const linesSelect = document.getElementById('proxyLogLinesSelect');
+      const lines = linesSelect ? parseInt(linesSelect.value, 10) : 200;
+      const autoScrollChk = document.getElementById('proxyLogAutoScroll');
+      const autoScroll = autoScrollChk ? autoScrollChk.checked : true;
+      const data = await TelemetryAPI.getProxyLogs(lines);
+      UI.renderProxyLogs(data, autoScroll);
+    } catch (e) {
+      console.warn('Failed to load proxy logs', e);
+    }
+  }
+
+  /**
+   * Setup Gateway Control Listeners and Actions
+   */
+  function setupProxyControl() {
+    // Top header badge click -> switch to proxy tab
+    const headerBadge = document.getElementById('proxyHeaderBadge');
+    if (headerBadge) {
+      headerBadge.addEventListener('click', () => {
+        switchTab('proxyTab');
+      });
+    }
+
+    // Start Gateway button
+    const startBtn = document.getElementById('proxyStartBtn');
+    if (startBtn) {
+      startBtn.addEventListener('click', async () => {
+        const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
+        const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
+        const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
+
+        startBtn.disabled = true;
+        UI.showProxyAlert(`Starting proxy gateway on port ${port}...`, 'info', 0);
+        try {
+          const res = await TelemetryAPI.startProxy({ port, host, upstream });
+          if (res.success) {
+            UI.showProxyAlert(res.message || 'Proxy started successfully.', 'success', 5000);
+          } else {
+            UI.showProxyAlert(res.error || 'Failed to start proxy.', 'error', 8000);
+          }
+        } catch (err) {
+          UI.showProxyAlert(`Start error: ${err.message}`, 'error', 8000);
+        } finally {
+          await loadProxyStatus();
+          await loadProxyLogs();
+        }
+      });
+    }
+
+    // Stop Gateway button
+    const stopBtn = document.getElementById('proxyStopBtn');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', async () => {
+        if (!confirm('Are you sure you want to stop the LLM Telemetry Proxy gateway?')) return;
+        stopBtn.disabled = true;
+        UI.showProxyAlert('Stopping proxy gateway...', 'info', 0);
+        try {
+          const res = await TelemetryAPI.stopProxy({ force: true });
+          if (res.success) {
+            UI.showProxyAlert(res.message || 'Proxy stopped successfully.', 'success', 5000);
+          } else {
+            UI.showProxyAlert(res.error || 'Failed to stop proxy.', 'error', 8000);
+          }
+        } catch (err) {
+          UI.showProxyAlert(`Stop error: ${err.message}`, 'error', 8000);
+        } finally {
+          await loadProxyStatus();
+          await loadProxyLogs();
+        }
+      });
+    }
+
+    // Restart Gateway button
+    const restartBtn = document.getElementById('proxyRestartBtn');
+    if (restartBtn) {
+      restartBtn.addEventListener('click', async () => {
+        const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
+        const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
+        const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
+
+        restartBtn.disabled = true;
+        UI.showProxyAlert(`Restarting proxy gateway on port ${port}...`, 'info', 0);
+        try {
+          const res = await TelemetryAPI.restartProxy({ port, host, upstream });
+          if (res.success) {
+            UI.showProxyAlert(res.message || 'Proxy restarted successfully.', 'success', 5000);
+          } else {
+            UI.showProxyAlert(res.error || 'Failed to restart proxy.', 'error', 8000);
+          }
+        } catch (err) {
+          UI.showProxyAlert(`Restart error: ${err.message}`, 'error', 8000);
+        } finally {
+          await loadProxyStatus();
+          await loadProxyLogs();
+        }
+      });
+    }
+
+    // Refresh Status button
+    const refreshStatusBtn = document.getElementById('proxyRefreshStatusBtn');
+    if (refreshStatusBtn) {
+      refreshStatusBtn.addEventListener('click', async () => {
+        await loadProxyStatus();
+        UI.showProxyAlert('Proxy status refreshed.', 'info', 2000);
+      });
+    }
+
+    // Log Refresh button
+    const logRefreshBtn = document.getElementById('proxyLogRefreshBtn');
+    if (logRefreshBtn) {
+      logRefreshBtn.addEventListener('click', async () => {
+        await loadProxyLogs();
+      });
+    }
+
+    // Log Lines select change
+    const logLinesSelect = document.getElementById('proxyLogLinesSelect');
+    if (logLinesSelect) {
+      logLinesSelect.addEventListener('change', () => {
+        loadProxyLogs();
+      });
+    }
+
+    // Log Clear button
+    const logClearBtn = document.getElementById('proxyLogClearBtn');
+    if (logClearBtn) {
+      logClearBtn.addEventListener('click', async () => {
+        if (!confirm('Clear the proxy log file?')) return;
+        try {
+          await TelemetryAPI.clearProxyLogs();
+          await loadProxyLogs();
+          UI.showProxyAlert('Proxy logs cleared.', 'info', 3000);
+        } catch (err) {
+          UI.showProxyAlert(`Failed to clear logs: ${err.message}`, 'error', 5000);
+        }
+      });
+    }
+
+    // Run DB Compress button
+    const runDbCompressBtn = document.getElementById('runDbCompressBtn');
+    if (runDbCompressBtn) {
+      runDbCompressBtn.addEventListener('click', async () => {
+        if (!confirm('Run database compression? This aggregates historical data older than 14 days and creates an automatic backup (.db.bak).')) return;
+        runDbCompressBtn.disabled = true;
+        runDbCompressBtn.textContent = '⏳ Compressing Database...';
+        UI.showProxyAlert('Running database compression in background...', 'info', 0);
+        try {
+          const res = await TelemetryAPI.runDbCompress();
+          if (res.success) {
+            UI.showProxyAlert('Database compression completed successfully!', 'success', 6000);
+            alert(`Database Compression Result:\n\n${res.output}`);
+          } else {
+            UI.showProxyAlert(`Database compression finished with warnings/errors.`, 'error', 8000);
+            alert(`Database Compression Output:\n\n${res.output || res.error}`);
+          }
+        } catch (err) {
+          UI.showProxyAlert(`Compression error: ${err.message}`, 'error', 8000);
+        } finally {
+          runDbCompressBtn.disabled = false;
+          runDbCompressBtn.textContent = '⚡ Run Database Compression (db_compress.py)';
+          await loadHealth();
+          await refresh();
+        }
+      });
     }
   }
 
@@ -1073,6 +1277,12 @@ const App = (() => {
       State.intervals.serverStatus = setInterval(loadServerStatus, 15000);
     }
     State.intervals.crossCheck = setInterval(loadCrossCheck, 30000);
+    State.intervals.proxyStatus = setInterval(loadProxyStatus, 4000);
+    State.intervals.proxyLogs = setInterval(() => {
+      if (State.activeTab === 'proxyTab') {
+        loadProxyLogs();
+      }
+    }, 4000);
   }
 
   /**
@@ -1082,10 +1292,14 @@ const App = (() => {
     if (State.intervals.refresh) clearInterval(State.intervals.refresh);
     if (State.intervals.serverStatus) clearInterval(State.intervals.serverStatus);
     if (State.intervals.crossCheck) clearInterval(State.intervals.crossCheck);
+    if (State.intervals.proxyStatus) clearInterval(State.intervals.proxyStatus);
+    if (State.intervals.proxyLogs) clearInterval(State.intervals.proxyLogs);
     
     State.intervals.refresh = null;
     State.intervals.serverStatus = null;
     State.intervals.crossCheck = null;
+    State.intervals.proxyStatus = null;
+    State.intervals.proxyLogs = null;
   }
 
   function ensureLiveNodesConfig(allFetchedNames) {
@@ -1224,7 +1438,10 @@ const App = (() => {
     refresh,
     loadServerStatus,
     loadCrossCheck,
-    loadHealth
+    loadHealth,
+    loadProxyStatus,
+    loadProxyLogs,
+    switchTab
   };
 })();
 

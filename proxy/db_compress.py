@@ -47,13 +47,21 @@ def is_bucket_closed(ts_str, cutoff_dt):
         return False
 
 def load_model_mapping() -> dict:
-    mapping_path = Path(__file__).resolve().parent.parent / "model_mapping.json"
+    candidates = [
+        Path(__file__).resolve().parent.parent / "data" / "model_mapping.json",
+        Path(__file__).resolve().parent.parent / "model_mapping.json",
+    ]
+    mapping_path = candidates[0]
+    for c in candidates:
+        if c.exists():
+            mapping_path = c
+            break
     if mapping_path.exists():
         try:
             with open(mapping_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"[compressor] Error loading model_mapping.json: {e}", file=sys.stderr)
+            print(f"[compressor] Error loading model_mapping.json from {mapping_path}: {e}", file=sys.stderr)
     return {}
 
 def get_resolved_model(model_name: str, mapping: dict) -> str:

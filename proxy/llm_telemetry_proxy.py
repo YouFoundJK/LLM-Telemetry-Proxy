@@ -27,6 +27,10 @@ import json
 import sqlite3
 import sys
 import time
+import argparse
+import atexit
+import os
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,7 +44,10 @@ UPSTREAM = "https://llm.ai.e-infra.cz/v1"
 STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9090
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db"
+
+_env_db_path = os.environ.get("TELEMETRY_DB_PATH")
+DB_PATH = Path(_env_db_path) if _env_db_path else (Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db")
+PID_FILE = Path(__file__).resolve().parent.parent / "data" / ".proxy.pid"
 
 # Models to track server load for
 WATCHED_MODELS = ["Deepseek-v4", "Glm-5.2", "Qwen3.5-int4", "Kimi-K2.7"]
@@ -614,13 +621,59 @@ def create_app():
 
 
 def main():
+    global LISTEN_HOST, LISTEN_PORT, UPSTREAM, DB_PATH, PID_FILE
+
+    parser = argparse.ArgumentParser(description="LLM Telemetry Proxy")
+    parser.add_argument("--port", type=int, default=LISTEN_PORT, help="Listen port (default 9090)")
+    parser.add_argument("--host", type=str, default=LISTEN_HOST, help="Listen host (default 0.0.0.0)")
+    parser.add_argument("--upstream", type=str, default=UPSTREAM, help="Upstream API base URL")
+    parser.add_argument("--db", type=str, default=str(DB_PATH), help="SQLite database file path")
+    parser.add_argument("--pid-file", type=str, default=str(PID_FILE), help="PID file path")
+    args = parser.parse_args()
+
+    LISTEN_PORT = args.port
+    LISTEN_HOST = args.host
+    UPSTREAM = args.upstream
+    DB_PATH = Path(args.db)
+    PID_FILE = Path(args.pid_file)
+
+    # Write PID file
+    try:
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception as e:
+        print(f"[telemetry] Warning: could not write PID file: {e}", file=sys.stderr)
+
+    def cleanup_pid():
+        try:
+            if PID_FILE.exists():
+                content = PID_FILE.read_text(encoding="utf-8").strip()
+                if content == str(os.getpid()):
+                    PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    atexit.register(cleanup_pid)
+
+    def handle_signal(sig, frame):
+        cleanup_pid()
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGINT, handle_signal)
+        signal.signal(signal.SIGTERM, handle_signal)
+    except Exception:
+        pass
+
     init_db()
     print(f"[telemetry] Proxy starting on {LISTEN_HOST}:{LISTEN_PORT}", file=sys.stderr)
     print(f"[telemetry] Upstream: {UPSTREAM}", file=sys.stderr)
     print(f"[telemetry] DB: {DB_PATH}", file=sys.stderr)
-    print(f"[telemetry] Dashboard: ~/telemetry-dashboard/dashboard.sh start", file=sys.stderr)
+    print(f"[telemetry] PID: {os.getpid()}", file=sys.stderr)
+    print(f"[telemetry] Dashboard: Control via Dashboard UI (http://localhost:9118)", file=sys.stderr)
     web.run_app(create_app(), host=LISTEN_HOST, port=LISTEN_PORT, access_log=None)
 
 
 if __name__ == "__main__":
     main()
+

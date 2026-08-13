@@ -8,6 +8,8 @@ env/
 # Environment / Local settings
 .env
 .env.local
+*.log
+
 
 # Dashboard runtime files
 .dashboard.pid

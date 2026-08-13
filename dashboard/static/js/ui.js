@@ -1661,6 +1661,131 @@ const UI = (() => {
     }
   }
 
+  /**
+   * Render Gateway Status & Metrics
+   */
+  function renderProxyStatus(status) {
+    if (!status) return;
+
+    const isRunning = Boolean(status.running || status.health_ok);
+    const pid = status.pid;
+    const port = status.port || 9090;
+    const upstream = status.upstream || (status.health && status.health.upstream) || 'https://llm.ai.e-infra.cz/v1';
+
+    // Header badge
+    const headerDot = document.getElementById('proxyHeaderDot');
+    const headerText = document.getElementById('proxyHeaderText');
+    if (headerDot && headerText) {
+      headerDot.className = `proxy-dot ${isRunning ? 'online' : 'offline'}`;
+      headerText.textContent = isRunning ? `Proxy: ${port}` : 'Proxy: Offline';
+    }
+
+    // Main status badge
+    const stateBadge = document.getElementById('proxyStateBadge');
+    const stateText = document.getElementById('proxyStateText');
+    if (stateBadge && stateText) {
+      stateBadge.className = `proxy-badge ${isRunning ? 'online' : 'offline'}`;
+      stateText.textContent = isRunning ? 'ONLINE' : 'STOPPED';
+    }
+
+    // Metric items
+    const pidEl = document.getElementById('proxyPidVal');
+    if (pidEl) pidEl.textContent = isRunning && pid ? pid : (isRunning ? 'Active' : '—');
+
+    const portEl = document.getElementById('proxyPortVal');
+    if (portEl) portEl.textContent = port;
+
+    const upstreamEl = document.getElementById('proxyUpstreamVal');
+    if (upstreamEl) upstreamEl.textContent = upstream;
+
+    // Rate limiter & active concurrency
+    const concurrencyEl = document.getElementById('proxyConcurrencyVal');
+    if (concurrencyEl) {
+      if (status.health && status.health.rate_limiter) {
+        const rl = status.health.rate_limiter;
+        concurrencyEl.textContent = `${rl.active || 0} / ${rl.max_concurrent || 4}`;
+      } else {
+        concurrencyEl.textContent = isRunning ? '0 / 4' : '—';
+      }
+    }
+
+    // Token budget
+    const budgetFill = document.getElementById('proxyTokenBudgetFill');
+    const budgetText = document.getElementById('proxyTokenBudgetText');
+    if (budgetFill && budgetText) {
+      if (status.health && status.health.token_budget) {
+        const tb = status.health.token_budget;
+        const perc = tb.percentage_used || 0;
+        budgetFill.style.width = `${Math.min(perc, 100)}%`;
+        if (perc > 85) {
+          budgetFill.className = 'token-budget-fill danger';
+        } else if (perc > 60) {
+          budgetFill.className = 'token-budget-fill warn';
+        } else {
+          budgetFill.className = 'token-budget-fill';
+        }
+        const usedM = ((tb.total_used || 0) / 1_000_000).toFixed(1);
+        const limitM = ((tb.daily_limit || 480_000_000) / 1_000_000).toFixed(0);
+        budgetText.textContent = `${usedM}M / ${limitM}M (${perc}%)`;
+      } else {
+        budgetFill.style.width = '0%';
+        budgetText.textContent = isRunning ? '0 / 480M (0%)' : '—';
+      }
+    }
+
+    // Button states
+    const startBtn = document.getElementById('proxyStartBtn');
+    const stopBtn = document.getElementById('proxyStopBtn');
+    const restartBtn = document.getElementById('proxyRestartBtn');
+
+    if (startBtn) startBtn.disabled = isRunning;
+    if (stopBtn) stopBtn.disabled = !isRunning;
+    if (restartBtn) restartBtn.disabled = !isRunning;
+  }
+
+  /**
+   * Render Proxy Execution Logs in Terminal
+   */
+  function renderProxyLogs(logsData, autoScroll = true) {
+    const terminal = document.getElementById('proxyLogTerminal');
+    if (!terminal) return;
+
+    if (!logsData) {
+      terminal.textContent = 'No logs available.';
+      return;
+    }
+
+    if (logsData.error) {
+      terminal.textContent = `Error reading logs: ${logsData.error}`;
+      return;
+    }
+
+    terminal.textContent = logsData.logs || 'No output recorded yet.';
+    if (autoScroll) {
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+  }
+
+  /**
+   * Show Notification Alert on Gateway Tab
+   */
+  function showProxyAlert(message, type = 'info', durationMs = 5000) {
+    const alertEl = document.getElementById('proxyActionAlert');
+    if (!alertEl) return;
+
+    alertEl.className = `proxy-alert ${type}`;
+    alertEl.textContent = message;
+    alertEl.style.display = 'flex';
+
+    if (durationMs > 0) {
+      setTimeout(() => {
+        if (alertEl.textContent === message) {
+          alertEl.style.display = 'none';
+        }
+      }, durationMs);
+    }
+  }
+
   return {
     formatNum,
     formatMs,
@@ -1680,6 +1805,10 @@ const UI = (() => {
     formatCost,
     renderCostSummary,
     renderCostTables,
+    renderProxyStatus,
+    renderProxyLogs,
+    showProxyAlert,
     getModelClass
   };
 })();
+

@@ -22,6 +22,11 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+try:
+    from proxy_manager import ProxyManager
+except ImportError:
+    from dashboard.proxy_manager import ProxyManager
+
 # ── Config & Path Resolvers ──────────────────────────────────────────────────
 STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 DEFAULT_PORT = 9118
@@ -51,6 +56,8 @@ def get_static_dir_path() -> Path:
 
 def get_model_mapping_path() -> Path:
     candidates = [
+        REPO_ROOT / "data" / "model_mapping.json",
+        DASHBOARD_DIR / "data" / "model_mapping.json",
         REPO_ROOT / "model_mapping.json",
         DASHBOARD_DIR / "model_mapping.json",
     ]
@@ -541,6 +548,77 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     return web.Response(text="Dashboard file not found at " + str(dashboard_html), status=404)
 
 
+# ── Proxy Management Endpoints ───────────────────────────────────────────────
+async def handle_proxy_status(request: web.Request) -> web.Response:
+    """GET /api/proxy/status — get proxy running state, health, port, upstream, etc."""
+    port_str = request.query.get("port")
+    port = int(port_str) if port_str and port_str.isdigit() else None
+    status = await ProxyManager.get_status(port=port)
+    return web.json_response(status)
+
+
+async def handle_proxy_start(request: web.Request) -> web.Response:
+    """POST /api/proxy/start — start the proxy background process."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+    except Exception:
+        data = {}
+    port = int(data.get("port", 9090))
+    host = data.get("host", "0.0.0.0")
+    upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
+    db_path = get_db_path()
+    res = await ProxyManager.start(port=port, host=host, upstream=upstream, db_path=db_path)
+    status_code = 200 if res.get("success") else 500
+    return web.json_response(res, status=status_code)
+
+
+async def handle_proxy_stop(request: web.Request) -> web.Response:
+    """POST /api/proxy/stop — stop / kill the proxy process."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+    except Exception:
+        data = {}
+    force = bool(data.get("force", False))
+    res = await ProxyManager.stop(force=force)
+    return web.json_response(res)
+
+
+async def handle_proxy_restart(request: web.Request) -> web.Response:
+    """POST /api/proxy/restart — restart the proxy process."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+    except Exception:
+        data = {}
+    port = int(data.get("port", 9090))
+    host = data.get("host", "0.0.0.0")
+    upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
+    db_path = get_db_path()
+    res = await ProxyManager.restart(port=port, host=host, upstream=upstream, db_path=db_path)
+    status_code = 200 if res.get("success") else 500
+    return web.json_response(res, status=status_code)
+
+
+async def handle_proxy_logs(request: web.Request) -> web.Response:
+    """GET /api/proxy/logs — view recent proxy log output."""
+    lines_str = request.query.get("lines", "150")
+    lines = int(lines_str) if lines_str.isdigit() else 150
+    logs_data = ProxyManager.get_logs(lines=lines)
+    return web.json_response(logs_data)
+
+
+async def handle_proxy_clear_logs(request: web.Request) -> web.Response:
+    """POST /api/proxy/clear-logs — clear proxy log output file."""
+    res = ProxyManager.clear_logs()
+    return web.json_response(res)
+
+
+async def handle_db_compress(request: web.Request) -> web.Response:
+    """POST /api/db/compress — run db_compress.py maintenance script."""
+    res = await ProxyManager.run_db_compress()
+    status_code = 200 if res.get("success") else 500
+    return web.json_response(res, status=status_code)
+
+
 # ── App ──────────────────────────────────────────────────────────────────────
 def create_app():
     app = web.Application(middlewares=[cors_middleware])
@@ -549,6 +627,16 @@ def create_app():
     app.router.add_get("/api/stats", handle_query)  # alias
     app.router.add_get("/api/costs", handle_costs)
     app.router.add_get("/health", handle_health)
+    
+    # Proxy lifecycle routes
+    app.router.add_get("/api/proxy/status", handle_proxy_status)
+    app.router.add_post("/api/proxy/start", handle_proxy_start)
+    app.router.add_post("/api/proxy/stop", handle_proxy_stop)
+    app.router.add_post("/api/proxy/restart", handle_proxy_restart)
+    app.router.add_get("/api/proxy/logs", handle_proxy_logs)
+    app.router.add_post("/api/proxy/clear-logs", handle_proxy_clear_logs)
+    app.router.add_post("/api/db/compress", handle_db_compress)
+
     app.router.add_get("/", handle_dashboard)
     app.router.add_get("/dashboard", handle_dashboard)
 
@@ -580,3 +668,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
