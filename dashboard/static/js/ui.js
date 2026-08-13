@@ -438,7 +438,7 @@ const UI = (() => {
           <td class="num">${formatMs(g.avg_rtt)}</td>
           <td class="num">${formatMs(g.max_rtt)}</td>
           <td class="num">${formatTps(g.avg_tps)}</td>
-          <td class="num">${(g.avg_load || 0).toFixed(1)}</td>
+          <td class="num">${g.avg_load !== null && g.avg_load !== undefined && g.avg_load > 0 ? Number(g.avg_load).toFixed(1) : '—'}</td>
           <td class="num">
             <span class="tag ${g.errors ? 'tag-error' : 'tag-success'}">
               ${g.errors || '0'}
@@ -476,8 +476,8 @@ const UI = (() => {
       const b = byModel[m];
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       b.calls += cnt;
-      b.input += (c.input_tokens || 0) * cnt;
-      b.output += (c.output_tokens || 0) * cnt;
+      b.input += (c.input_tokens || 0);
+      b.output += (c.output_tokens || 0);
 
       if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
         b.ttfbSum += c.ttfb_ms * cnt;
@@ -490,7 +490,7 @@ const UI = (() => {
         if (c.total_ms > b.maxRtt) b.maxRtt = c.total_ms;
       }
       if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
-        b.tpsOutput += (c.output_tokens || 0) * cnt;
+        b.tpsOutput += (c.output_tokens || 0);
         b.tpsTotalMs += (c.total_ms || 0) * cnt;
       }
       if (c.server_running !== null && c.server_running !== undefined) {
@@ -803,12 +803,12 @@ const UI = (() => {
         if (grp) {
           const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
           grp.calls += cnt;
-          grp.inputTok += (c.input_tokens || 0) * cnt;
-          grp.outputTok += (c.output_tokens || 0) * cnt;
+          grp.inputTok += (c.input_tokens || 0);
+          grp.outputTok += (c.output_tokens || 0);
           if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) grp.ttfb.push(c.ttfb_ms);
           if (c.total_ms !== null && c.total_ms !== undefined) grp.rtt.push(c.total_ms);
           if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
-            grp.tpsOutput += (c.output_tokens || 0) * cnt;
+            grp.tpsOutput += (c.output_tokens || 0);
             grp.tpsTotalMs += (c.total_ms || 0) * cnt;
           }
           if (c.error) grp.errors += cnt;
@@ -919,29 +919,40 @@ const UI = (() => {
       `;
 
       const speedWinner = winner.ttfb === 'modelA' ? modelA : (winner.ttfb === 'modelB' ? modelB : null);
-      let speedPct = '0';
-      if (speedWinner && summaryA.avgTtfb > 0 && summaryB.avgTtfb > 0) {
-        const higherTtfb = Math.max(summaryA.avgTtfb, summaryB.avgTtfb);
-        const lowerTtfb = Math.min(summaryA.avgTtfb, summaryB.avgTtfb);
-        speedPct = ((higherTtfb - lowerTtfb) / higherTtfb * 100).toFixed(0);
+      let speedText = 'Both models show comparable startup latency.';
+      if (speedWinner) {
+        if (summaryA.avgTtfb > 0 && summaryB.avgTtfb > 0) {
+          const higherTtfb = Math.max(summaryA.avgTtfb, summaryB.avgTtfb);
+          const lowerTtfb = Math.min(summaryA.avgTtfb, summaryB.avgTtfb);
+          const speedPct = ((higherTtfb - lowerTtfb) / higherTtfb * 100).toFixed(0);
+          speedText = `<b>${speedWinner}</b> starts generating text faster, leading by <b>${speedPct}%</b> in average Time to First Token. Use ${speedWinner} for interactive UI prompts or real-time autocomplete tasks where immediate response is critical.`;
+        } else {
+          speedText = `<b>${speedWinner}</b> has streaming TTFT recorded (avg <b>${formatMs(summaryA.avgTtfb || summaryB.avgTtfb)}</b>). Use ${speedWinner} for interactive UI prompts or real-time tasks.`;
+        }
       }
 
       const genWinner = winner.tps === 'modelA' ? modelA : (winner.tps === 'modelB' ? modelB : null);
-      let genPct = '0';
-      if (genWinner && Math.min(summaryA.avgTps, summaryB.avgTps) > 0) {
-        const higherTps = Math.max(summaryA.avgTps, summaryB.avgTps);
-        const lowerTps = Math.min(summaryA.avgTps, summaryB.avgTps);
-        genPct = ((higherTps - lowerTps) / lowerTps * 100).toFixed(0);
+      let genText = 'Both models show comparable token generation speeds.';
+      if (genWinner) {
+        if (Math.min(summaryA.avgTps, summaryB.avgTps) > 0) {
+          const higherTps = Math.max(summaryA.avgTps, summaryB.avgTps);
+          const lowerTps = Math.min(summaryA.avgTps, summaryB.avgTps);
+          const genPct = ((higherTps - lowerTps) / lowerTps * 100).toFixed(0);
+          genText = `<b>${genWinner}</b> prints tokens at a higher velocity, winning by <b>${genPct}%</b> in raw generation throughput (${formatTps(higherTps)} vs ${formatTps(lowerTps)} tok/s). Use ${genWinner} for bulk agent summaries, code generation, or long reasoning tasks.`;
+        } else {
+          const maxTps = Math.max(summaryA.avgTps, summaryB.avgTps);
+          genText = `<b>${genWinner}</b> is generating streaming tokens at <b>${formatTps(maxTps)} tok/s</b>. Use ${genWinner} for bulk agent summaries or code generation tasks.`;
+        }
       }
 
       const recommendation = `
         <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display:flex; flex-direction:column; gap:12px;">
           <h4 style="font-size:13px; text-transform:uppercase; color:var(--accent); margin-bottom:4px;">💡 Telemetry Recommendation Report</h4>
           <p style="font-size:13px; line-height: 1.6;">
-            • <b>Latency & Startup (TTFT)</b>: ${speedWinner ? `<b>${speedWinner}</b> starts generating text faster, leading by <b>${speedPct}%</b> in average Time to First Token. Use ${speedWinner} for interactive UI prompts or real-time autocomplete tasks where immediate response is critical.` : 'Both models show comparable startup latency.'}
+            • <b>Latency & Startup (TTFT)</b>: ${speedText}
           </p>
           <p style="font-size:13px; line-height: 1.6;">
-            • <b>Generation Speed</b>: ${genWinner ? `<b>${genWinner}</b> prints tokens at a higher velocity, winning by <b>${genPct}%</b> in raw generation throughput (${formatTps(Math.max(summaryA.avgTps, summaryB.avgTps))} vs ${formatTps(Math.min(summaryA.avgTps, summaryB.avgTps))} tok/s). Use ${genWinner} for bulk agent summaries, code generation, or long reasoning tasks.` : 'Both models show comparable token generation speeds.'}
+            • <b>Generation Speed</b>: ${genText}
           </p>
           <p style="font-size:13px; line-height: 1.5; color:var(--text-muted); font-size:12px; margin-top:8px;">
             * Analysis is computed dynamically comparing the top 2 active models over the selected time range (${summaryA.calls} ${modelA} calls vs ${summaryB.calls} ${modelB} calls).
@@ -994,8 +1005,8 @@ const UI = (() => {
             <td class="num">${formatNum(r.input)}</td>
             <td class="num">${formatNum(r.output)}</td>
             <td class="num" style="color:var(--accent); font-weight:600;">${formatNum(r.total)}</td>
-            <td class="num">${formatNum(r.avgInput)}</td>
-            <td class="num">${formatNum(r.avgOutput)}</td>
+            <td class="num">${formatNum(Math.round(r.avgInput))}</td>
+            <td class="num">${formatNum(Math.round(r.avgOutput))}</td>
             <td class="num">${r.ratio ? `${r.ratio.toFixed(2)}x` : '—'}</td>
           </tr>
         `).join('');
@@ -1035,7 +1046,7 @@ const UI = (() => {
           reportHtml += `
             <p style="font-size:13px; line-height:1.6;">
               • <b>Prompt Bloat Alert</b>: <b>${highestRatioModel.name}</b> has a high Prompt-to-Completion ratio of <b>${highestRatioModel.ratio.toFixed(2)}x</b> 
-              (avg prompt size <b>${formatNum(highestRatioModel.avgInput)}</b> tokens vs completion size <b>${formatNum(highestRatioModel.avgOutput)}</b> tokens). 
+              (avg prompt size <b>${formatNum(Math.round(highestRatioModel.avgInput))}</b> tokens vs completion size <b>${formatNum(Math.round(highestRatioModel.avgOutput))}</b> tokens). 
               Consider implementing <b>context caching</b>, shortening system prompts, or compressing few-shot examples.
             </p>
           `;
@@ -1048,7 +1059,7 @@ const UI = (() => {
         }
         
         if (highestAvgTokensModel && (highestAvgTokensModel.avgInput + highestAvgTokensModel.avgOutput) > 2000) {
-          const avgTotal = highestAvgTokensModel.avgInput + highestAvgTokensModel.avgOutput;
+          const avgTotal = Math.round(highestAvgTokensModel.avgInput + highestAvgTokensModel.avgOutput);
           reportHtml += `
             <p style="font-size:13px; line-height:1.6;">
               • <b>Heavy Request Overhead</b>: <b>${highestAvgTokensModel.name}</b> has a high average token density of <b>${formatNum(avgTotal)}</b> tokens per call. 
@@ -1084,18 +1095,19 @@ const UI = (() => {
     calls.forEach(c => {
       const d = new Date(c.timestamp);
       const h = d.getHours(); // Local hour of day!
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       
-      hourData[h].calls++;
+      hourData[h].calls += cnt;
       if (c.error) {
-        hourData[h].errors++;
+        hourData[h].errors += cnt;
       }
       if (c.total_ms) {
-        hourData[h].rttSum += c.total_ms / 1000; // in seconds
-        hourData[h].rttCount++;
+        hourData[h].rttSum += (c.total_ms / 1000) * cnt; // in seconds
+        hourData[h].rttCount += cnt;
       }
       if (c.ttfb_ms) {
-        hourData[h].ttfbSum += c.ttfb_ms; // in milliseconds
-        hourData[h].ttfbCount++;
+        hourData[h].ttfbSum += c.ttfb_ms * cnt; // in milliseconds
+        hourData[h].ttfbCount += cnt;
       }
     });
 
@@ -1466,6 +1478,7 @@ const UI = (() => {
   function formatCost(val) {
     if (val === null || val === undefined) return '—';
     if (val === 0) return '$0.00';
+    if (val > 0 && val < 0.00001) return '$' + val.toFixed(6);
     if (val < 0.01) return '$' + val.toFixed(5);
     if (val < 1) return '$' + val.toFixed(4);
     return '$' + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

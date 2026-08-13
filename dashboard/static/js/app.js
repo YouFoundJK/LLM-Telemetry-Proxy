@@ -262,8 +262,8 @@ const App = (() => {
     calls.forEach(c => {
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       totalCalls += cnt;
-      totalInput += (c.input_tokens || 0) * cnt;
-      totalOutput += (c.output_tokens || 0) * cnt;
+      totalInput += (c.input_tokens || 0);
+      totalOutput += (c.output_tokens || 0);
       
       if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
         ttfbSum += c.ttfb_ms * cnt;
@@ -274,7 +274,7 @@ const App = (() => {
         rttCount += cnt;
       }
       if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
-        tpsOutputTokens += (c.output_tokens || 0) * cnt;
+        tpsOutputTokens += (c.output_tokens || 0);
         tpsTotalMs += (c.total_ms || 0) * cnt;
       }
       if (c.error) {
@@ -345,8 +345,8 @@ const App = (() => {
       const g = groups[key];
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       g.calls += cnt;
-      g.total_input += (c.input_tokens || 0) * cnt;
-      g.total_output += (c.output_tokens || 0) * cnt;
+      g.total_input += (c.input_tokens || 0);
+      g.total_output += (c.output_tokens || 0);
 
       if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
         g.ttfbSum += c.ttfb_ms * cnt;
@@ -359,7 +359,7 @@ const App = (() => {
         if (c.total_ms > g.rttMax) g.rttMax = c.total_ms;
       }
       if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
-        g.tpsOutputTokens += (c.output_tokens || 0) * cnt;
+        g.tpsOutputTokens += (c.output_tokens || 0);
         g.tpsTotalMs += (c.total_ms || 0) * cnt;
       }
       if (c.server_running !== null && c.server_running !== undefined) {

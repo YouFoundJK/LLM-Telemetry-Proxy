@@ -188,6 +188,8 @@ def compress(dry_run=False):
         total_output = 0
         total_ttfb = 0.0
         total_rtt = 0.0
+        ttfb_count = 0
+        rtt_count = 0
         sum_tps = 0.0
         sum_running = 0.0
         sum_tok_s = 0.0
@@ -202,8 +204,13 @@ def compress(dry_run=False):
             total_calls += c_count
             total_input += r["input_tokens"] if r["input_tokens"] else 0
             total_output += r["output_tokens"] if r["output_tokens"] else 0
-            total_ttfb += r["ttfb_ms"] if r["ttfb_ms"] else 0.0
-            total_rtt += r["total_ms"] if r["total_ms"] else 0.0
+            
+            if r["ttfb_ms"] is not None:
+                total_ttfb += r["ttfb_ms"] * c_count
+                ttfb_count += c_count
+            if r["total_ms"] is not None:
+                total_rtt += r["total_ms"] * c_count
+                rtt_count += c_count
             
             if r["tokens_per_s"] is not None:
                 sum_tps += r["tokens_per_s"] * c_count
@@ -218,6 +225,8 @@ def compress(dry_run=False):
             if r["server_model"] and not server_model:
                 server_model = r["server_model"]
 
+        avg_ttfb = total_ttfb / ttfb_count if ttfb_count > 0 else None
+        avg_rtt = total_rtt / rtt_count if rtt_count > 0 else None
         avg_tps = sum_tps / tps_count if tps_count > 0 else None
         avg_running = sum_running / running_count if running_count > 0 else None
         avg_tok_s = sum_tok_s / tok_s_count if tok_s_count > 0 else None
@@ -228,8 +237,8 @@ def compress(dry_run=False):
             "endpoint": endpoint,
             "input_tokens": total_input,
             "output_tokens": total_output,
-            "ttfb_ms": total_ttfb,
-            "total_ms": total_rtt,
+            "ttfb_ms": avg_ttfb,
+            "total_ms": avg_rtt,
             "tokens_per_s": avg_tps,
             "server_running": avg_running,
             "server_tok_s": avg_tok_s,
@@ -256,12 +265,14 @@ def compress(dry_run=False):
             total_calls += c_count
             
             if r["ttfb_ms"] is not None:
-                total_ttfb += r["ttfb_ms"]
+                total_ttfb += r["ttfb_ms"] * c_count
+                ttfb_count += c_count
             if r["total_ms"] is not None:
-                total_rtt += r["total_ms"]
+                total_rtt += r["total_ms"] * c_count
+                rtt_count += c_count
 
-        avg_ttfb = total_ttfb if total_calls > 0 else None
-        avg_rtt = total_rtt if total_calls > 0 else None
+        avg_ttfb = total_ttfb / ttfb_count if ttfb_count > 0 else None
+        avg_rtt = total_rtt / rtt_count if rtt_count > 0 else None
 
         aggregated_proxy.append({
             "timestamp": bucket_ts,

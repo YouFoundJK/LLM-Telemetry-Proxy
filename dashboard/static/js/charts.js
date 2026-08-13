@@ -315,14 +315,15 @@ const TelemetryCharts = (() => {
     const rttBuckets = { '<1s': 0, '1-3s': 0, '3-10s': 0, '10-30s': 0, '30-60s': 0, '60-120s': 0, '>120s': 0 };
     calls.forEach(c => {
       if (!c.total_ms) return;
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const s = c.total_ms / 1000;
-      if (s < 1) rttBuckets['<1s']++;
-      else if (s < 3) rttBuckets['1-3s']++;
-      else if (s < 10) rttBuckets['3-10s']++;
-      else if (s < 30) rttBuckets['10-30s']++;
-      else if (s < 60) rttBuckets['30-60s']++;
-      else if (s < 120) rttBuckets['60-120s']++;
-      else rttBuckets['>120s']++;
+      if (s < 1) rttBuckets['<1s'] += cnt;
+      else if (s < 3) rttBuckets['1-3s'] += cnt;
+      else if (s < 10) rttBuckets['3-10s'] += cnt;
+      else if (s < 30) rttBuckets['10-30s'] += cnt;
+      else if (s < 60) rttBuckets['30-60s'] += cnt;
+      else if (s < 120) rttBuckets['60-120s'] += cnt;
+      else rttBuckets['>120s'] += cnt;
     });
 
     const ctx = document.getElementById('rttChart');
@@ -360,13 +361,14 @@ const TelemetryCharts = (() => {
     const ttfbBuckets = { '<500ms': 0, '500ms-1s': 0, '1-3s': 0, '3-10s': 0, '10-30s': 0, '>30s': 0 };
     calls.forEach(c => {
       if (!c.ttfb_ms) return;
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const ms = c.ttfb_ms;
-      if (ms < 500) ttfbBuckets['<500ms']++;
-      else if (ms < 1000) ttfbBuckets['500ms-1s']++;
-      else if (ms < 3000) ttfbBuckets['1-3s']++;
-      else if (ms < 10000) ttfbBuckets['3-10s']++;
-      else if (ms < 30000) ttfbBuckets['10-30s']++;
-      else ttfbBuckets['>30s']++;
+      if (ms < 500) ttfbBuckets['<500ms'] += cnt;
+      else if (ms < 1000) ttfbBuckets['500ms-1s'] += cnt;
+      else if (ms < 3000) ttfbBuckets['1-3s'] += cnt;
+      else if (ms < 10000) ttfbBuckets['3-10s'] += cnt;
+      else if (ms < 30000) ttfbBuckets['10-30s'] += cnt;
+      else ttfbBuckets['>30s'] += cnt;
     });
 
     const ctx = document.getElementById('ttfbChart');
@@ -532,14 +534,15 @@ const TelemetryCharts = (() => {
     const sizeBuckets = { '<1K': 0, '1-10K': 0, '10-50K': 0, '50-100K': 0, '100-150K': 0, '150-200K': 0, '>200K': 0 };
     calls.forEach(c => {
       if (!c.input_tokens || c.input_tokens <= 0) return;
-      const t = c.input_tokens;
-      if (t < 1000) sizeBuckets['<1K']++;
-      else if (t < 10000) sizeBuckets['1-10K']++;
-      else if (t < 50000) sizeBuckets['10-50K']++;
-      else if (t < 100000) sizeBuckets['50-100K']++;
-      else if (t < 150000) sizeBuckets['100-150K']++;
-      else if (t < 200000) sizeBuckets['150-200K']++;
-      else sizeBuckets['>200K']++;
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
+      const t = c.input_tokens / cnt; // Token size per call
+      if (t < 1000) sizeBuckets['<1K'] += cnt;
+      else if (t < 10000) sizeBuckets['1-10K'] += cnt;
+      else if (t < 50000) sizeBuckets['10-50K'] += cnt;
+      else if (t < 100000) sizeBuckets['50-100K'] += cnt;
+      else if (t < 150000) sizeBuckets['100-150K'] += cnt;
+      else if (t < 200000) sizeBuckets['150-200K'] += cnt;
+      else sizeBuckets['>200K'] += cnt;
     });
 
     const ctx = document.getElementById('inputSizeChart');
@@ -584,11 +587,12 @@ const TelemetryCharts = (() => {
 
     const errors = calls.filter(c => c.error);
     errors.forEach(c => {
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
       if (byBucket[bucketKey] !== undefined) {
-        byBucket[bucketKey]++;
+        byBucket[bucketKey] += cnt;
       } else {
-        byBucket[bucketKey] = 1;
+        byBucket[bucketKey] = cnt;
       }
     });
 
