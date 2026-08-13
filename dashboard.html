@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Telemetry Dashboard</title>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Flatpickr (Combined Date Picker) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css">
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+  <!-- Custom Styling System -->
+  <link rel="stylesheet" href="static/css/style.css">
+  
+  <!-- Modular Frontend Logic (Deferred loading preserves order of execution) -->
+  <script src="static/js/api.js" defer></script>
+  <script src="static/js/charts.js" defer></script>
+  <script src="static/js/ui.js" defer></script>
+  <script src="static/js/app.js" defer></script>
+</head>
+<body>
+
+  <!-- Sticky Top Header -->
+  <header class="header-wrapper">
+    <div class="header">
+      <div class="header-brand">
+        <h1>LLM <span>Telemetry</span> Dashboard</h1>
+      </div>
+      
+      <!-- Live Sync Status -->
+      <div class="live-status-container">
+        <div class="live-dot" id="liveStatusDot"></div>
+        <span id="liveStatusText">Auto updates active</span>
+      </div>
+
+      <!-- Hamburger Menu Button for Mobile -->
+      <button class="hamburger-btn" id="hamburgerMenuBtn" aria-label="Toggle Navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+
+      <!-- Controls Tab Buttons -->
+      <nav class="nav-tabs">
+        <button class="tab-btn active" data-tab="overviewTab">Overview</button>
+        <button class="tab-btn" data-tab="tablesTab">Data Tables</button>
+        <button class="tab-btn" data-tab="analyzerTab">Performance Analyzer</button>
+        <button class="tab-btn" data-tab="crossCheckTab">Cross-Check</button>
+        <button class="tab-btn" data-tab="costsTab">Cost Analyzer</button>
+        <button class="tab-btn" data-tab="diagnosticsTab">Diagnostics</button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Application Body -->
+  <main class="app-container">
+
+    <!-- Global Filter controls card -->
+    <section class="controls-card">
+      <div class="filters-grid">
+        
+        <!-- Custom Multi-select Dropdown for Models -->
+        <div class="filter-item">
+          <label>Model selection</label>
+          <div class="custom-select-wrapper" id="modelSelectWrapper">
+            <div class="custom-select-trigger" id="modelSelectTrigger">All Models</div>
+            <div class="custom-select-dropdown" id="modelDropdown">
+              <!-- Checkboxes dynamically populated in ui.js -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Combined Date Range Picker -->
+        <div class="filter-item">
+          <label>Date Range</label>
+          <input type="text" id="dateRangePicker" class="datetime-input" placeholder="Select date range...">
+        </div>
+
+        <!-- Errors selector button group -->
+        <div class="filter-item">
+          <label>Filter errors</label>
+          <div class="btn-group">
+            <button class="btn-option active" data-errors="">All</button>
+            <button class="btn-option" data-errors="1">Errors Only</button>
+          </div>
+        </div>
+
+        <!-- Quick range selection -->
+        <div class="filter-item">
+          <label>Quick range</label>
+          <div class="btn-group">
+            <button class="btn-option" data-range="1h">1H</button>
+            <button class="btn-option" data-range="6h">6H</button>
+            <button class="btn-option active" data-range="24h">24H</button>
+            <button class="btn-option" data-range="7d">7D</button>
+          </div>
+        </div>
+
+        <!-- Group by selection -->
+        <div class="filter-item">
+          <label>Aggregation</label>
+          <div class="btn-group">
+            <button class="btn-option active" data-group="">Raw</button>
+            <button class="btn-option" data-group="model">Model</button>
+            <button class="btn-option" data-group="hour">Hour</button>
+            <button class="btn-option" data-group="day">Day</button>
+          </div>
+        </div>
+
+        <!-- Manual sync & Pause updates actions -->
+        <div class="filter-item actions-item" style="margin-left: auto; flex-direction: row; gap: 15px; align-items: center;">
+          <div class="toggle-wrapper">
+            <label class="switch">
+              <input type="checkbox" id="liveUpdatesToggle" checked>
+              <span class="slider"></span>
+            </label>
+            <label for="liveUpdatesToggle" style="cursor: pointer; user-select: none;">Live</label>
+          </div>
+          <button class="btn-action" id="manualRefreshBtn">
+            ↻ Refresh
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Top level metrics summary bar -->
+    <section class="summary-grid" id="summaryBar">
+      <div class="loading-overlay">
+        <div class="spinner"></div>
+        <span>Retrieving telemetry stats summary...</span>
+      </div>
+    </section>
+
+    <!-- Tab Section 1: Overview Dashboard -->
+    <div id="overviewTab" class="tab-content active">
+      <div class="dashboard-sections">
+        
+        <!-- Charts columns -->
+        <div>
+          <!-- Token Usage Time Series -->
+          <div class="section-card">
+            <h2>
+              Token Usage Over Time
+              <div class="btn-group" style="padding: 1px;">
+                <button class="btn-option active" data-token-metric="input" style="padding: 3px 8px; font-size:10px;">Input</button>
+                <button class="btn-option" data-token-metric="output" style="padding: 3px 8px; font-size:10px;">Output</button>
+                <button class="btn-option" data-token-metric="total" style="padding: 3px 8px; font-size:10px;">Total</button>
+              </div>
+            </h2>
+            <div class="chart-card-outer">
+              <div class="chart-canvas-container">
+                <canvas id="tokenChart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Other Charts Grid -->
+          <div class="charts-grid">
+            
+            <div class="chart-card-outer">
+              <div class="chart-card-header">
+                <h3>RTT Distribution</h3>
+              </div>
+              <div class="chart-canvas-container">
+                <canvas id="rttChart"></canvas>
+              </div>
+            </div>
+
+            <div class="chart-card-outer">
+              <div class="chart-card-header">
+                <h3>TTFB Distribution</h3>
+              </div>
+              <div class="chart-canvas-container">
+                <canvas id="ttfbChart"></canvas>
+              </div>
+            </div>
+
+            <div class="chart-card-outer">
+              <div class="chart-card-header">
+                <h3>Throughput Trend</h3>
+              </div>
+              <div class="chart-canvas-container">
+                <canvas id="tpsChart"></canvas>
+              </div>
+            </div>
+
+            <div class="chart-card-outer">
+              <div class="chart-card-header">
+                <h3>Latency vs Server Load</h3>
+              </div>
+              <div class="chart-canvas-container">
+                <canvas id="loadChart"></canvas>
+              </div>
+            </div>
+
+            <div class="chart-card-outer">
+              <div class="chart-card-header">
+                <h3>Input Size Distribution</h3>
+              </div>
+              <div class="chart-canvas-container">
+                <canvas id="inputSizeChart"></canvas>
+              </div>
+            </div>
+
+            <div class="chart-card-outer">
+              <div class="chart-card-header">
+                <h3>Error Outages Timeline</h3>
+              </div>
+              <div class="chart-canvas-container">
+                <canvas id="errorChart"></canvas>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Live Server nodes sidebar -->
+        <div>
+          <div class="section-card" style="height: calc(100% - 24px);">
+            <h2 style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+              <span>Live Model Nodes (e-INFRA)</span>
+              <div class="toggle-wrapper" style="font-size: 13px; font-weight: normal; margin-left: auto; gap: 12px; text-transform: none; display: flex; align-items: center;">
+                <button id="editLiveNodesBtn" class="btn-action" style="padding: 2px 8px; font-size: 11px; font-weight: 500; height: 24px; display: flex; align-items: center; gap: 4px; margin-bottom: 0;">
+                  ⚙️ Edit
+                </button>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <label class="switch" style="margin-bottom: 0;">
+                    <input type="checkbox" id="eInfraToggle" checked>
+                    <span class="slider"></span>
+                  </label>
+                  <label for="eInfraToggle" style="cursor: pointer; user-select: none; color: var(--text-muted); margin-bottom: 0;">Sync</label>
+                </div>
+              </div>
+            </h2>
+            <div class="server-grid" id="serverStatus" style="display: flex; flex-direction: column; gap: 16px;">
+              <div class="loading-overlay">
+                <div class="spinner"></div>
+                <span>Checking e-INFRA node states...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Tab Section 2: Data Tables (Details) -->
+    <div id="tablesTab" class="tab-content">
+      
+      <!-- Per-Model summary (always shown) -->
+      <div class="section-card">
+        <h2>Per-Model Summary stats</h2>
+        <div class="table-responsive">
+          <table id="modelTable">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th class="num">Calls</th>
+                <th class="num">Input Tok</th>
+                <th class="num">Output Tok</th>
+                <th class="num">Avg TTFB</th>
+                <th class="num">Max TTFB</th>
+                <th class="num">Avg RTT</th>
+                <th class="num">Max RTT</th>
+                <th class="num">Avg tok/s</th>
+                <th class="num">Avg Load</th>
+                <th class="num">Errors</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Dynamic entries in ui.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Raw Recent calls list -->
+      <div class="section-card" id="rawCallsTableCard">
+        <h2>Recent Calls Logs <span style="float: right; font-weight: normal; color: var(--text-dim); text-transform: none; font-size:11px;">Click columns to sort (displays up to 500 rows)</span></h2>
+        <div class="table-responsive scrollable">
+          <table id="callsTable">
+            <thead>
+              <tr>
+                <th data-sort="timestamp">Time</th>
+                <th data-sort="model">Model</th>
+                <th data-sort="call_type">Type</th>
+                <th data-sort="input_tokens" class="num">Input</th>
+                <th data-sort="output_tokens" class="num">Output</th>
+                <th data-sort="ttfb_ms" class="num">TTFB</th>
+                <th data-sort="total_ms" class="num">RTT</th>
+                <th data-sort="tokens_per_s" class="num">tok/s</th>
+                <th data-sort="server_running" class="num">Load</th>
+                <th data-sort="status_code">Status</th>
+                <th>Error message</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Dynamic entries in ui.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Grouped aggregation list (toggled visible when grouping is enabled) -->
+      <div class="section-card" id="groupedCallsTableCard" style="display: none;">
+        <h2 id="groupedTableTitle">Grouped Summary</h2>
+        <div class="table-responsive" id="groupedTableContainer">
+          <!-- Dynamic entries in ui.js -->
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Tab Section 5: Performance Analyzer -->
+    <div id="analyzerTab" class="tab-content">
+      
+      <!-- Side-by-side Model Duel (DeepSeek vs GLM 5.2) -->
+      <div class="section-card">
+        <h2>Model Performance Duel: DeepSeek vs GLM 5.2</h2>
+        <div id="modelDuelContainer">
+          <div class="loading-overlay">
+            <div class="spinner"></div>
+            <span>Analyzing model comparison metrics...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Actionable Performance Insights by Time & Model -->
+      <div class="section-card">
+        <h2>Actionable Performance Insights</h2>
+        <div id="performanceInsightsContainer" style="margin-top: 15px;">
+          <div class="loading-overlay">
+            <div class="spinner"></div>
+            <span>Computing performance insights...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Token Usage & Optimization Analyzer -->
+      <div class="section-card">
+        <h2>Token Usage & Optimization Analyzer</h2>
+        <div class="token-analyzer-layout" id="tokenAnalyzerLayout" style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; margin-top: 15px;">
+          <div>
+            <h4 style="font-size:13px; text-transform:uppercase; color:var(--accent); margin-bottom:12px;">📊 Token Efficiency Matrix by Model</h4>
+            <div class="table-responsive">
+              <table id="tokenEfficiencyTable">
+                <thead>
+                  <tr style="border-bottom:1px solid var(--border);">
+                    <th style="text-align:left; padding:8px 12px;">Model</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Calls</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Input Tokens</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Output Tokens</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Total Tokens</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Avg Prompt Size</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Avg Completion Size</th>
+                    <th class="num" style="padding:8px 12px; text-align:right;">Prompt/Comp Ratio</th>
+                  </tr>
+                </thead>
+                <tbody id="tokenEfficiencyTableBody">
+                  <tr><td colspan="8" style="text-align:center; color:var(--text-dim); padding:12px;">Calculating stats...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <div id="tokenOptimizationReport" style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display:flex; flex-direction:column; gap:12px;">
+              <div style="display:flex; align-items:center; justify-content:center; padding: 20px; gap: 10px; color: var(--text-muted);">
+                <div class="spinner"></div>
+                <span>Analyzing token patterns...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="charts-grid" style="margin-top: 24px;">
+          <div class="chart-card-outer">
+            <div class="chart-card-header">
+              <h3>Token Volume Trends over Time (Input vs Output vs Total)</h3>
+            </div>
+            <div class="chart-canvas-container">
+              <canvas id="analyzerTokenTrendChart"></canvas>
+            </div>
+          </div>
+          <div class="chart-card-outer">
+            <div class="chart-card-header">
+              <h3>Average Tokens per Call over Time by Model</h3>
+            </div>
+            <div class="chart-canvas-container">
+              <canvas id="analyzerAvgTokenChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Time of Day & Rate Limit Analysis Charts -->
+      <div class="section-card">
+        <h2>Time of Day & Rate Limiting Analysis</h2>
+        <div class="charts-grid">
+          
+          <div class="chart-card-outer">
+            <div class="chart-card-header">
+              <h3>Calls & Error Outages by Hour of Day (Local Time)</h3>
+            </div>
+            <div class="chart-canvas-container">
+              <canvas id="hourlyVolumeChart"></canvas>
+            </div>
+          </div>
+
+          <div class="chart-card-outer">
+            <div class="chart-card-header">
+              <h3>Average Latency (RTT) & TTFT by Hour of Day</h3>
+            </div>
+            <div class="chart-canvas-container">
+              <canvas id="hourlyLatencyChart"></canvas>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Tab Section 3: Proxy Cross-Checking comparison -->
+    <div id="crossCheckTab" class="tab-content">
+      <div class="section-card">
+        <h2>Proxy Calls Sync & Integrity check</h2>
+        <div id="crossCheckSection" style="padding-top: 10px;">
+          <div class="loading-overlay">
+            <div class="spinner"></div>
+            <span>Evaluating database synchronization...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Section 6: Cost Analyzer -->
+    <div id="costsTab" class="tab-content">
+      
+      <!-- Top level Cost metrics summary cards -->
+      <section class="summary-grid" id="costSummaryBar" style="margin-bottom: 24px; min-height: unset;">
+        <div class="loading-overlay">
+          <div class="spinner"></div>
+          <span>Retrieving cost telemetry stats summary...</span>
+        </div>
+      </section>
+
+      <div class="dashboard-sections" style="display: block;">
+        
+        <!-- Cost charts -->
+        <div class="charts-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 24px; gap: 24px;">
+          <div class="chart-card-outer">
+            <div class="chart-card-header">
+              <h3>Inference Cost Over Time ($)</h3>
+            </div>
+            <div class="chart-canvas-container">
+              <canvas id="costOverTimeChart"></canvas>
+            </div>
+          </div>
+
+          <div class="chart-card-outer">
+            <div class="chart-card-header">
+              <h3>Cost Share by Model ($)</h3>
+            </div>
+            <div class="chart-canvas-container">
+              <canvas id="costShareChart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cost detail tables -->
+        <div class="section-card">
+          <h2>Model Cost Breakdown</h2>
+          <div class="table-responsive">
+            <table id="costModelTable">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th class="num">Calls</th>
+                  <th class="num">Input Tokens</th>
+                  <th class="num">Output Tokens</th>
+                  <th class="num">Input Cost ($)</th>
+                  <th class="num">Output Cost ($)</th>
+                  <th class="num">Total Cost ($)</th>
+                  <th class="num">Avg Cost/Call ($)</th>
+                  <th>Cheapest Provider Source</th>
+                  <th>Last Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- Populated dynamically in ui.js -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Grouped cost table (only shown if aggregation filter is hour/day) -->
+        <div class="section-card" id="groupedCostTableCard" style="display: none; margin-top: 24px;">
+          <h2 id="groupedCostTableTitle">Grouped Cost Summary</h2>
+          <div class="table-responsive" id="groupedCostTableContainer">
+            <!-- Populated dynamically in ui.js -->
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Tab Section 4: System Diagnostics and health -->
+    <div id="diagnosticsTab" class="tab-content">
+      <div class="section-card">
+        <h2>System Diagnostics</h2>
+        <div id="diagnosticsPanel" style="padding-top: 10px;">
+          <div class="loading-overlay">
+            <div class="spinner"></div>
+            <span>Reading database and server configuration...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit Live Nodes Modal -->
+    <div id="liveNodesModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Customize Live Model Nodes</h3>
+          <span class="close-btn" id="closeLiveNodesModalBtn">&times;</span>
+        </div>
+        <div class="modal-body">
+          <p style="color:var(--text-muted); font-size:12px; margin-bottom:12px;">Toggle visibility and use arrows to prioritize the order of the model status cards.</p>
+          <div id="liveNodesListContainer" class="nodes-edit-list">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Sidebar Backdrop Overlay -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+</body>
+</html>

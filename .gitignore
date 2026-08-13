@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+*.db
+# Environment / Local settings
+.env
+.env.local
+
+# Dashboard runtime files
+.dashboard.pid
+.dashboard.port
+.dashboard.log
