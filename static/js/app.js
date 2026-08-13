@@ -246,8 +246,8 @@ const App = (() => {
     let ttfbCount = 0;
     let rttSum = 0;
     let rttCount = 0;
-    let tpsSum = 0;
-    let tpsCount = 0;
+    let tpsOutputTokens = 0;
+    let tpsTotalMs = 0;
     let errors = 0;
     let firstCall = null;
     let lastCall = null;
@@ -255,8 +255,8 @@ const App = (() => {
     calls.forEach(c => {
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       totalCalls += cnt;
-      totalInput += c.input_tokens || 0;
-      totalOutput += c.output_tokens || 0;
+      totalInput += (c.input_tokens || 0) * cnt;
+      totalOutput += (c.output_tokens || 0) * cnt;
       
       if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
         ttfbSum += c.ttfb_ms * cnt;
@@ -266,9 +266,9 @@ const App = (() => {
         rttSum += c.total_ms * cnt;
         rttCount += cnt;
       }
-      if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) {
-        tpsSum += c.tokens_per_s * cnt;
-        tpsCount += cnt;
+      if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
+        tpsOutputTokens += (c.output_tokens || 0) * cnt;
+        tpsTotalMs += (c.total_ms || 0) * cnt;
       }
       if (c.error) {
         errors += cnt;
@@ -283,7 +283,7 @@ const App = (() => {
       total_output: totalOutput,
       avg_ttfb: ttfbCount ? (ttfbSum / ttfbCount) : 0,
       avg_rtt: rttCount ? (rttSum / rttCount) : 0,
-      avg_tps: tpsCount ? (tpsSum / tpsCount) : 0,
+      avg_tps: tpsTotalMs > 0 ? (tpsOutputTokens / (tpsTotalMs / 1000)) : 0,
       errors: errors,
       first_call: firstCall,
       last_call: lastCall
@@ -327,8 +327,8 @@ const App = (() => {
           rttSum: 0,
           rttCount: 0,
           rttMax: 0,
-          tpsSum: 0,
-          tpsCount: 0,
+          tpsOutputTokens: 0,
+          tpsTotalMs: 0,
           loadSum: 0,
           loadCount: 0,
           errors: 0
@@ -338,8 +338,8 @@ const App = (() => {
       const g = groups[key];
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       g.calls += cnt;
-      g.total_input += c.input_tokens || 0;
-      g.total_output += c.output_tokens || 0;
+      g.total_input += (c.input_tokens || 0) * cnt;
+      g.total_output += (c.output_tokens || 0) * cnt;
 
       if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
         g.ttfbSum += c.ttfb_ms * cnt;
@@ -351,9 +351,9 @@ const App = (() => {
         g.rttCount += cnt;
         if (c.total_ms > g.rttMax) g.rttMax = c.total_ms;
       }
-      if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) {
-        g.tpsSum += c.tokens_per_s * cnt;
-        g.tpsCount += cnt;
+      if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
+        g.tpsOutputTokens += (c.output_tokens || 0) * cnt;
+        g.tpsTotalMs += (c.total_ms || 0) * cnt;
       }
       if (c.server_running !== null && c.server_running !== undefined) {
         g.loadSum += c.server_running * cnt;
@@ -364,7 +364,7 @@ const App = (() => {
       }
     });
 
-    return Object.values(groups).map(g => {
+    const resultList = Object.values(groups).map(g => {
       const res = {
         calls: g.calls,
         total_input: g.total_input,
@@ -373,7 +373,7 @@ const App = (() => {
         max_ttfb: g.ttfbMax,
         avg_rtt: g.rttCount ? (g.rttSum / g.rttCount) : 0,
         max_rtt: g.rttMax,
-        avg_tps: g.tpsCount ? (g.tpsSum / g.tpsCount) : 0,
+        avg_tps: g.tpsTotalMs > 0 ? (g.tpsOutputTokens / (g.tpsTotalMs / 1000)) : 0,
         avg_load: g.loadCount ? (g.loadSum / g.loadCount) : 0,
         errors: g.errors
       };
@@ -385,6 +385,12 @@ const App = (() => {
 
       return res;
     });
+
+    if (groupBy === 'model') {
+      resultList.sort((a, b) => (b.total_input || 0) - (a.total_input || 0));
+    }
+
+    return resultList;
   }
 
   function renderTelemetry(data) {

@@ -426,7 +426,7 @@ const UI = (() => {
 
     // If server grouped by model, render server stats
     if (isModelGroup && data.groups) {
-      const groups = data.groups;
+      const groups = [...data.groups].sort((a, b) => (b.total_input || 0) - (a.total_input || 0));
       tbody.innerHTML = groups.map(g => `
         <tr>
           <td><span class="tag ${getModelClass(g.model)}">${g.model || 'System / Non-Inference'}</span></td>
@@ -466,8 +466,8 @@ const UI = (() => {
           rttSum: 0,
           rttCount: 0,
           maxRtt: 0,
-          tpsSum: 0,
-          tpsCount: 0,
+          tpsOutput: 0,
+          tpsTotalMs: 0,
           loadSum: 0,
           loadCount: 0,
           errors: 0
@@ -476,8 +476,8 @@ const UI = (() => {
       const b = byModel[m];
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       b.calls += cnt;
-      b.input += c.input_tokens || 0;
-      b.output += c.output_tokens || 0;
+      b.input += (c.input_tokens || 0) * cnt;
+      b.output += (c.output_tokens || 0) * cnt;
 
       if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
         b.ttfbSum += c.ttfb_ms * cnt;
@@ -489,9 +489,9 @@ const UI = (() => {
         b.rttCount += cnt;
         if (c.total_ms > b.maxRtt) b.maxRtt = c.total_ms;
       }
-      if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) {
-        b.tpsSum += c.tokens_per_s * cnt;
-        b.tpsCount += cnt;
+      if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
+        b.tpsOutput += (c.output_tokens || 0) * cnt;
+        b.tpsTotalMs += (c.total_ms || 0) * cnt;
       }
       if (c.server_running !== null && c.server_running !== undefined) {
         b.loadSum += c.server_running * cnt;
@@ -501,11 +501,11 @@ const UI = (() => {
     });
 
     tbody.innerHTML = Object.entries(byModel)
-      .sort((a, b) => b[1].calls - a[1].calls)
+      .sort((a, b) => (b[1].input || 0) - (a[1].input || 0))
       .map(([m, b]) => {
         const avgTtfb = b.ttfbCount > 0 ? (b.ttfbSum / b.ttfbCount) : 0;
         const avgRtt = b.rttCount > 0 ? (b.rttSum / b.rttCount) : 0;
-        const avgTps = b.tpsCount > 0 ? (b.tpsSum / b.tpsCount) : 0;
+        const avgTps = b.tpsTotalMs > 0 ? (b.tpsOutput / (b.tpsTotalMs / 1000)) : 0;
         const avgLoad = b.loadCount > 0 ? (b.loadSum / b.loadCount) : 0;
 
         return `
@@ -790,8 +790,8 @@ const UI = (() => {
       if (duelTitle) duelTitle.textContent = `Model Performance Duel: ${modelA} vs ${modelB}`;
 
       const duelData = {
-        modelA: { name: modelA, calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tps: [], errors: 0 },
-        modelB: { name: modelB, calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tps: [], errors: 0 }
+        modelA: { name: modelA, calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tpsOutput: 0, tpsTotalMs: 0, errors: 0 },
+        modelB: { name: modelB, calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tpsOutput: 0, tpsTotalMs: 0, errors: 0 }
       };
 
       calls.forEach(c => {
@@ -807,7 +807,10 @@ const UI = (() => {
           grp.outputTok += (c.output_tokens || 0) * cnt;
           if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) grp.ttfb.push(c.ttfb_ms);
           if (c.total_ms !== null && c.total_ms !== undefined) grp.rtt.push(c.total_ms);
-          if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) grp.tps.push(c.tokens_per_s);
+          if ((c.output_tokens || 0) > 0 && (c.total_ms || 0) > 0) {
+            grp.tpsOutput += (c.output_tokens || 0) * cnt;
+            grp.tpsTotalMs += (c.total_ms || 0) * cnt;
+          }
           if (c.error) grp.errors += cnt;
         }
       });
@@ -819,7 +822,7 @@ const UI = (() => {
         calls: duelData.modelA.calls,
         avgTtfb: avg(duelData.modelA.ttfb),
         avgRtt: avg(duelData.modelA.rtt),
-        avgTps: avg(duelData.modelA.tps),
+        avgTps: duelData.modelA.tpsTotalMs > 0 ? (duelData.modelA.tpsOutput / (duelData.modelA.tpsTotalMs / 1000)) : 0,
         successRate: 100 - calcPct(duelData.modelA.errors, duelData.modelA.calls),
         totalTokens: duelData.modelA.inputTok + duelData.modelA.outputTok
       };
@@ -828,7 +831,7 @@ const UI = (() => {
         calls: duelData.modelB.calls,
         avgTtfb: avg(duelData.modelB.ttfb),
         avgRtt: avg(duelData.modelB.rtt),
-        avgTps: avg(duelData.modelB.tps),
+        avgTps: duelData.modelB.tpsTotalMs > 0 ? (duelData.modelB.tpsOutput / (duelData.modelB.tpsTotalMs / 1000)) : 0,
         successRate: 100 - calcPct(duelData.modelB.errors, duelData.modelB.calls),
         totalTokens: duelData.modelB.inputTok + duelData.modelB.outputTok
       };
