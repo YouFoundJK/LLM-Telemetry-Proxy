@@ -50,12 +50,11 @@
       <!-- Controls Tab Buttons -->
       <nav class="nav-tabs">
         <button class="tab-btn active" data-tab="overviewTab">Overview</button>
-        <button class="tab-btn" data-tab="proxyTab">Gateway Control</button>
         <button class="tab-btn" data-tab="tablesTab">Data Tables</button>
         <button class="tab-btn" data-tab="analyzerTab">Performance Analyzer</button>
         <button class="tab-btn" data-tab="crossCheckTab">Cross-Check</button>
         <button class="tab-btn" data-tab="costsTab">Cost Analyzer</button>
-        <button class="tab-btn" data-tab="diagnosticsTab">Diagnostics</button>
+        <button class="tab-btn" data-tab="controlPanelTab">Control Panel</button>
       </nav>
     </div>
   </header>
@@ -513,8 +512,8 @@
       </div>
     </div>
 
-    <!-- Tab Section 5: Gateway Control / Proxy Manager -->
-    <div id="proxyTab" class="tab-content">
+    <!-- Tab Section: Central Control Panel (Gateway & Diagnostics) -->
+    <div id="controlPanelTab" class="tab-content">
       <div class="gateway-manager-container">
         
         <!-- Live Status & Quick Action Card -->
@@ -625,8 +624,19 @@
           </div>
         </div>
 
+        <!-- System & Diagnostics Section -->
+        <div class="section-card">
+          <h2>System & Diagnostics</h2>
+          <div id="diagnosticsPanel" style="padding-top: 10px;">
+            <div class="loading-overlay">
+              <div class="spinner"></div>
+              <span>Reading database and server configuration...</span>
+            </div>
+          </div>
+        </div>
+
         <!-- Live Proxy Logs Section -->
-        <div class="section-card" style="margin-top: 24px;">
+        <div class="section-card">
           <div class="log-viewer-header">
             <div>
               <h2>Proxy Execution Logs</h2>
@@ -655,19 +665,6 @@
           </div>
         </div>
 
-      </div>
-    </div>
-
-    <!-- Tab Section 4: System Diagnostics and health -->
-    <div id="diagnosticsTab" class="tab-content">
-      <div class="section-card">
-        <h2>System Diagnostics</h2>
-        <div id="diagnosticsPanel" style="padding-top: 10px;">
-          <div class="loading-overlay">
-            <div class="spinner"></div>
-            <span>Reading database and server configuration...</span>
-          </div>
-        </div>
       </div>
     </div>
 

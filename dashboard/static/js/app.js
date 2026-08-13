@@ -239,8 +239,9 @@ const App = (() => {
     }
 
     if (savedFilters.activeTab) {
-      State.activeTab = savedFilters.activeTab;
       switchTab(savedFilters.activeTab);
+    } else {
+      switchTab('overviewTab');
     }
   }
 
@@ -509,6 +510,7 @@ const App = (() => {
       applyFilters(savedFilters);
     } else {
       setQuickRange('24h', false);
+      switchTab('overviewTab');
     }
 
     const savedSelectedModels = savedFilters ? (savedFilters.selectedModels || []) : null;
@@ -522,6 +524,11 @@ const App = (() => {
    * Set Up Tabs Switcher (with support for programmatic switching)
    */
   function switchTab(tabId) {
+    // Map legacy tab IDs to controlPanelTab if needed
+    if (tabId === 'proxyTab' || tabId === 'diagnosticsTab') {
+      tabId = 'controlPanelTab';
+    }
+
     const btn = document.querySelector(`.tab-btn[data-tab="${tabId}"]`);
     if (!btn) return;
 
@@ -535,9 +542,20 @@ const App = (() => {
     State.activeTab = tabId;
     saveFiltersToLocalStorage();
 
-    if (tabId === 'diagnosticsTab') {
+    // Only show telemetry filter controls and summary KPI cards on telemetry tabs
+    const isTelemetryTab = ['overviewTab', 'tablesTab', 'analyzerTab', 'crossCheckTab', 'costsTab'].includes(tabId);
+    const controlsCard = document.querySelector('.controls-card');
+    const summaryBar = document.getElementById('summaryBar');
+
+    if (controlsCard) {
+      controlsCard.style.display = isTelemetryTab ? '' : 'none';
+    }
+    if (summaryBar) {
+      summaryBar.style.display = isTelemetryTab ? '' : 'none';
+    }
+
+    if (tabId === 'controlPanelTab') {
       loadHealth();
-    } else if (tabId === 'proxyTab') {
       loadProxyStatus();
       loadProxyLogs();
     }
@@ -1113,11 +1131,11 @@ const App = (() => {
    * Setup Gateway Control Listeners and Actions
    */
   function setupProxyControl() {
-    // Top header badge click -> switch to proxy tab
+    // Top header badge click -> switch to control panel tab
     const headerBadge = document.getElementById('proxyHeaderBadge');
     if (headerBadge) {
       headerBadge.addEventListener('click', () => {
-        switchTab('proxyTab');
+        switchTab('controlPanelTab');
       });
     }
 
@@ -1279,7 +1297,7 @@ const App = (() => {
     State.intervals.crossCheck = setInterval(loadCrossCheck, 30000);
     State.intervals.proxyStatus = setInterval(loadProxyStatus, 4000);
     State.intervals.proxyLogs = setInterval(() => {
-      if (State.activeTab === 'proxyTab') {
+      if (State.activeTab === 'controlPanelTab') {
         loadProxyLogs();
       }
     }, 4000);
