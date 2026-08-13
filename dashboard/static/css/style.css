@@ -1472,8 +1472,15 @@ td.num {
   gap: 20px;
 }
 
+.gateway-three-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+}
+
 @media (max-width: 900px) {
-  gateway-two-col {
+  .gateway-two-col,
+  .gateway-three-col {
     grid-template-columns: 1fr;
   }
 }

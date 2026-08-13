@@ -1,13 +1,27 @@
 {
-  "gpt-oss-120b": [
+  "deepseek-v4-flash": [
     {
       "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.03,
-      "output_cost_per_million": 0.15,
-      "provider_source": "OpenRouter"
+      "input_cost_per_million": 0.14,
+      "output_cost_per_million": 0.28,
+      "provider_source": "DeepSeek API (Official)"
     }
   ],
-  "deepseek-v4-pro-thinking": [
+  "deepseek-v4-flash-thinking": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.14,
+      "output_cost_per_million": 0.28,
+      "provider_source": "DeepSeek API (Official)"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.25,
+      "output_cost_per_million": 1.75,
+      "provider_source": "Libertai (LiteLLM)"
+    }
+  ],
+  "deepseek-v4-pro": [
     {
       "effective_date": "2026-07-04",
       "input_cost_per_million": 0.435,
@@ -15,7 +29,7 @@
       "provider_source": "DeepSeek API (Official)"
     }
   ],
-  "deepseek-v4-pro": [
+  "deepseek-v4-pro-thinking": [
     {
       "effective_date": "2026-07-04",
       "input_cost_per_million": 0.435,
@@ -29,6 +43,12 @@
       "input_cost_per_million": 0.14,
       "output_cost_per_million": 0.28,
       "provider_source": "DeepSeek API (Official)"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.28,
+      "output_cost_per_million": 0.42,
+      "provider_source": "Deepseek (LiteLLM)"
     }
   ],
   "glm-5.2": [
@@ -36,15 +56,93 @@
       "effective_date": "2026-07-04",
       "input_cost_per_million": 0.77,
       "output_cost_per_million": 2.42,
-      "provider_source": "OpenRouter"
+      "provider_source": "OpenRouter / Zhipu AI"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 1.4,
+      "output_cost_per_million": 4.4,
+      "provider_source": "Dashscope (LiteLLM)"
+    }
+  ],
+  "glm-5": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.8,
+      "output_cost_per_million": 2.56,
+      "provider_source": "OpenRouter / Zhipu AI"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 1.0,
+      "output_cost_per_million": 3.2,
+      "provider_source": "Zai (LiteLLM)"
+    }
+  ],
+  "glm": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.8,
+      "output_cost_per_million": 2.56,
+      "provider_source": "OpenRouter / Zhipu AI"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 1.0,
+      "output_cost_per_million": 3.2,
+      "provider_source": "Zai (LiteLLM)"
+    }
+  ],
+  "kimi-k3": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.95,
+      "output_cost_per_million": 4.0,
+      "provider_source": "Moonshot AI"
     }
   ],
   "kimi-k2.7": [
     {
       "effective_date": "2026-07-04",
       "input_cost_per_million": 0.95,
-      "output_cost_per_million": 4.00,
+      "output_cost_per_million": 4.0,
       "provider_source": "Moonshot AI"
+    }
+  ],
+  "kimi-k2.6": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.95,
+      "output_cost_per_million": 4.0,
+      "provider_source": "Moonshot AI"
+    }
+  ],
+  "gpt-oss-120b": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.03,
+      "output_cost_per_million": 0.15,
+      "provider_source": "OpenRouter"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.18,
+      "output_cost_per_million": 0.8,
+      "provider_source": "Openrouter (LiteLLM)"
+    }
+  ],
+  "qwen3.5-122b": [
+    {
+      "effective_date": "2026-07-04",
+      "input_cost_per_million": 0.26,
+      "output_cost_per_million": 2.08,
+      "provider_source": "OpenRouter"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.4,
+      "output_cost_per_million": 2.0,
+      "provider_source": "Openrouter (LiteLLM)"
     }
   ],
   "qwen3.5-int4": [
@@ -55,20 +153,32 @@
       "provider_source": "OpenRouter"
     }
   ],
-  "qwen3.5-122b": [
+  "qwen3-embedding-4b": [
     {
       "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.26,
-      "output_cost_per_million": 2.08,
-      "provider_source": "OpenRouter"
+      "input_cost_per_million": 0.01,
+      "output_cost_per_million": 0.0,
+      "provider_source": "Alibaba Cloud Model Studio"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.0,
+      "output_cost_per_million": 0.0,
+      "provider_source": "Fireworks_ai (LiteLLM)"
     }
   ],
-  "mistral-medium-3.5": [
+  "qwen3-reranker-4b": [
     {
       "effective_date": "2026-07-04",
-      "input_cost_per_million": 1.50,
-      "output_cost_per_million": 7.50,
-      "provider_source": "OpenRouter"
+      "input_cost_per_million": 0.03,
+      "output_cost_per_million": 0.0,
+      "provider_source": "DeepInfra"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.0,
+      "output_cost_per_million": 0.0,
+      "provider_source": "Fireworks_ai (LiteLLM)"
     }
   ],
   "gemma4": [
@@ -77,6 +187,12 @@
       "input_cost_per_million": 0.12,
       "output_cost_per_million": 0.35,
       "provider_source": "OpenRouter"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.1,
+      "output_cost_per_million": 0.3,
+      "provider_source": "Cloudflare (LiteLLM)"
     }
   ],
   "gemma-4": [
@@ -85,78 +201,28 @@
       "input_cost_per_million": 0.12,
       "output_cost_per_million": 0.35,
       "provider_source": "OpenRouter"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.1,
+      "output_cost_per_million": 0.3,
+      "provider_source": "Cloudflare (LiteLLM)"
     }
   ],
-  "whisper-large-v3": [
+  "command-a": [
     {
       "effective_date": "2026-07-04",
-      "input_cost_per_million": 7.50,
-      "output_cost_per_million": 0.00,
-      "provider_source": "Fireworks AI"
+      "input_cost_per_million": 2.5,
+      "output_cost_per_million": 10.0,
+      "provider_source": "Cohere (LiteLLM)"
     }
   ],
-  "qwen3-embedding-4b": [
+  "mistral-medium-3.5": [
     {
       "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.01,
-      "output_cost_per_million": 0.00,
-      "provider_source": "Alibaba Cloud Model Studio"
-    }
-  ],
-  "qwen3-reranker-4b": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.03,
-      "output_cost_per_million": 0.00,
-      "provider_source": "DeepInfra"
-    }
-  ],
-  "nomic-embed-text-v1.5": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.008,
-      "output_cost_per_million": 0.00,
-      "provider_source": "Nomic AI"
-    }
-  ],
-  "nomic-embed-text-v2-moe": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.008,
-      "output_cost_per_million": 0.00,
-      "provider_source": "Nomic AI"
-    }
-  ],
-  "mxbai-embed-large:latest": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.01,
-      "output_cost_per_million": 0.00,
-      "provider_source": "Mixedbread AI"
-    }
-  ],
-  "mxbai-embed-large": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.01,
-      "output_cost_per_million": 0.00,
-      "provider_source": "Mixedbread AI"
-    }
-  ],
-  "multilingual-e5-large-instruct": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.01,
-      "output_cost_per_million": 0.00,
-      "provider_source": "OpenRouter"
-    }
-  ],
-  "multilingual-e5-large": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 0.01,
-      "output_cost_per_million": 0.00,
-      "provider_source": "OpenRouter"
+      "input_cost_per_million": 1.5,
+      "output_cost_per_million": 7.5,
+      "provider_source": "Mistral AI / Scaleway (LiteLLM)"
     }
   ]
 }

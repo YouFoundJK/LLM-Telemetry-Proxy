@@ -19,6 +19,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
+import asyncio
 import aiohttp
 from aiohttp import web
 
@@ -572,6 +573,20 @@ async def handle_costs(request: web.Request) -> web.Response:
         return web.json_response(fallback)
 
 
+async def handle_costs_sync(request: web.Request) -> web.Response:
+    """POST /api/costs/sync — automatically sync latest prices from LiteLLM and update model_costs.json."""
+    try:
+        try:
+            from update_model_costs import sync_model_costs
+        except ImportError:
+            from dashboard.update_model_costs import sync_model_costs
+        loop = asyncio.get_event_loop()
+        report = await loop.run_in_executor(None, sync_model_costs)
+        return web.json_response(report)
+    except Exception as e:
+        return web.json_response({"error": f"Failed to sync model costs: {str(e)}"}, status=500)
+
+
 async def handle_dashboard(request: web.Request) -> web.Response:
     dashboard_html = get_dashboard_html_path()
     if dashboard_html.exists():
@@ -802,6 +817,7 @@ def create_app():
     app.router.add_get("/api/server-status", handle_server_status)
     app.router.add_get("/api/stats", handle_query)  # alias
     app.router.add_get("/api/costs", handle_costs)
+    app.router.add_post("/api/costs/sync", handle_costs_sync)
     app.router.add_get("/health", handle_health)
     
     # Proxy lifecycle routes

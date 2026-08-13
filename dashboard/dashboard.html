@@ -477,7 +477,13 @@
 
         <!-- Cost detail tables -->
         <div class="section-card">
-          <h2>Model Cost Breakdown</h2>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
+            <h2 style="margin: 0;">Model Cost Breakdown</h2>
+            <button id="syncCostsBtnCostsTab" class="btn-proxy btn-restart" style="padding: 6px 14px; font-size: 12px; margin: 0; background: rgba(56, 139, 253, 0.15); border-color: var(--accent); color: var(--accent); font-weight: 500;">
+              <span class="btn-icon">🔄</span> Auto-Sync Model Prices (LiteLLM)
+            </button>
+          </div>
+          <div id="costSyncAlertCostsTab" class="proxy-alert" style="display: none; margin-bottom: 14px;"></div>
           <div class="table-responsive">
             <table id="costModelTable">
               <thead>
@@ -628,8 +634,8 @@
           </div>
         </div>
 
-        <!-- Two Column Layout: Configuration & Database Maintenance -->
-        <div class="gateway-two-col">
+        <!-- Three Column Layout: Configuration, Database Maintenance, & Model Pricing Catalog -->
+        <div class="gateway-three-col">
           <!-- Gateway Configuration Options -->
           <div class="section-card">
             <h2>Gateway Settings</h2>
@@ -669,6 +675,28 @@
                 ⚡ Run Database Compression (db_compress.py)
               </button>
             </div>
+          </div>
+
+          <!-- Model Pricing Sync -->
+          <div class="section-card">
+            <h2>Model Pricing Catalog</h2>
+            <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">Automated sync with LiteLLM catalog preserving historical interval tiers.</p>
+            <div class="db-maint-info">
+              <div class="diag-value-row">
+                <span class="diag-label">Config File</span>
+                <span class="diag-val code">model_costs.json</span>
+              </div>
+              <div class="diag-value-row">
+                <span class="diag-label">Pricing Source</span>
+                <span class="diag-val" style="color: var(--accent);">BerriAI / LiteLLM (GitHub)</span>
+              </div>
+            </div>
+            <div style="margin-top: 16px;">
+              <button id="syncCostsBtnControlPanel" class="btn-action" style="width: 100%; justify-content: center; padding: 10px 16px; background: rgba(35, 134, 54, 0.2); border-color: rgba(46, 160, 67, 0.6); color: #3fb950; font-weight: 600;">
+                🔄 Auto-Sync Prices (LiteLLM)
+              </button>
+            </div>
+            <div id="costSyncAlertControlPanel" class="proxy-alert" style="display: none; margin-top: 12px;"></div>
           </div>
         </div>
 

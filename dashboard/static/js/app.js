@@ -1415,6 +1415,68 @@ const App = (() => {
         }
       });
     }
+
+    // Auto-Sync Model Prices buttons (Control Panel & Cost Analyzer Tab)
+    async function triggerCostSync(btn, alertEl) {
+      if (!btn) return;
+      const origHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="btn-icon">⏳</span> Syncing with LiteLLM...';
+
+      if (alertEl) {
+        alertEl.className = 'proxy-alert info';
+        alertEl.textContent = 'Fetching latest model pricing from GitHub (BerriAI/litellm)...';
+        alertEl.style.display = 'block';
+      }
+
+      try {
+        const res = await TelemetryAPI.syncCosts();
+        if (res.status === 'ok') {
+          const msg = res.message || 'Cost sync completed.';
+          if (alertEl) {
+            alertEl.className = 'proxy-alert success';
+            alertEl.textContent = `✅ ${msg}`;
+            alertEl.style.display = 'block';
+            setTimeout(() => {
+              if (alertEl) alertEl.style.display = 'none';
+            }, 8000);
+          }
+          await loadCosts();
+          await refresh();
+        } else {
+          if (alertEl) {
+            alertEl.className = 'proxy-alert error';
+            alertEl.textContent = `❌ Sync failed: ${res.error || 'Unknown error'}`;
+            alertEl.style.display = 'block';
+          }
+        }
+      } catch (err) {
+        if (alertEl) {
+          alertEl.className = 'proxy-alert error';
+          alertEl.textContent = `❌ Sync error: ${err.message}`;
+          alertEl.style.display = 'block';
+        }
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
+    }
+
+    const syncCostsBtnControlPanel = document.getElementById('syncCostsBtnControlPanel');
+    const costSyncAlertControlPanel = document.getElementById('costSyncAlertControlPanel');
+    if (syncCostsBtnControlPanel) {
+      syncCostsBtnControlPanel.addEventListener('click', () => {
+        triggerCostSync(syncCostsBtnControlPanel, costSyncAlertControlPanel);
+      });
+    }
+
+    const syncCostsBtnCostsTab = document.getElementById('syncCostsBtnCostsTab');
+    const costSyncAlertCostsTab = document.getElementById('costSyncAlertCostsTab');
+    if (syncCostsBtnCostsTab) {
+      syncCostsBtnCostsTab.addEventListener('click', () => {
+        triggerCostSync(syncCostsBtnCostsTab, costSyncAlertCostsTab);
+      });
+    }
   }
 
   /**

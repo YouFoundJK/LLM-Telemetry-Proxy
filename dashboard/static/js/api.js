@@ -89,6 +89,18 @@ const TelemetryAPI = (() => {
   }
 
   /**
+   * POST /api/costs/sync — automatically fetches latest rates from LiteLLM and updates model_costs.json.
+   */
+  async function syncCosts() {
+    const url = `${BASE_URL}/api/costs/sync`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    return handleResponse(response);
+  }
+
+  /**
    * GET /health — retrieves SQLite database size, presence, and HTML state.
    */
   async function getHealth() {
@@ -224,6 +236,7 @@ const TelemetryAPI = (() => {
     query,
     getServerStatus,
     getCosts,
+    syncCosts,
     getHealth,
     getProxyStatus,
     startProxy,
