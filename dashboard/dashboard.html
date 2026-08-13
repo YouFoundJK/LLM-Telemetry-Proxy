@@ -52,7 +52,6 @@
         <button class="tab-btn active" data-tab="overviewTab">Overview</button>
         <button class="tab-btn" data-tab="tablesTab">Data Tables</button>
         <button class="tab-btn" data-tab="analyzerTab">Performance Analyzer</button>
-        <button class="tab-btn" data-tab="crossCheckTab">Cross-Check</button>
         <button class="tab-btn" data-tab="costsTab">Cost Analyzer</button>
         <button class="tab-btn" data-tab="controlPanelTab">Control Panel</button>
       </nav>
@@ -428,18 +427,7 @@
 
     </div>
 
-    <!-- Tab Section 3: Proxy Cross-Checking comparison -->
-    <div id="crossCheckTab" class="tab-content">
-      <div class="section-card">
-        <h2>Proxy Calls Sync & Integrity check</h2>
-        <div id="crossCheckSection" style="padding-top: 10px;">
-          <div class="loading-overlay">
-            <div class="spinner"></div>
-            <span>Evaluating database synchronization...</span>
-          </div>
-        </div>
-      </div>
-    </div>
+
 
     <!-- Tab Section 6: Cost Analyzer -->
     <div id="costsTab" class="tab-content">
@@ -738,6 +726,17 @@
           </div>
           <div class="terminal-container">
             <pre id="proxyLogTerminal" class="terminal-body">Loading logs...</pre>
+          </div>
+        </div>
+
+        <!-- Proxy Calls Sync & Integrity Check -->
+        <div class="section-card">
+          <h2>Proxy Calls Sync & Integrity check</h2>
+          <div id="crossCheckSection" style="padding-top: 10px;">
+            <div class="loading-overlay">
+              <div class="spinner"></div>
+              <span>Evaluating database synchronization...</span>
+            </div>
           </div>
         </div>
 

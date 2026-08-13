@@ -525,7 +525,7 @@ const App = (() => {
    */
   function switchTab(tabId) {
     // Map legacy tab IDs to controlPanelTab if needed
-    if (tabId === 'proxyTab' || tabId === 'diagnosticsTab') {
+    if (tabId === 'proxyTab' || tabId === 'diagnosticsTab' || tabId === 'crossCheckTab') {
       tabId = 'controlPanelTab';
     }
 
@@ -543,7 +543,7 @@ const App = (() => {
     saveFiltersToLocalStorage();
 
     // Only show telemetry filter controls and summary KPI cards on telemetry tabs
-    const isTelemetryTab = ['overviewTab', 'tablesTab', 'analyzerTab', 'crossCheckTab', 'costsTab'].includes(tabId);
+    const isTelemetryTab = ['overviewTab', 'tablesTab', 'analyzerTab', 'costsTab'].includes(tabId);
     const controlsCard = document.querySelector('.controls-card');
     const summaryBar = document.getElementById('summaryBar');
 
@@ -558,6 +558,7 @@ const App = (() => {
       loadHealth();
       loadProxyStatus();
       loadProxyLogs();
+      loadCrossCheck();
     }
   }
 
