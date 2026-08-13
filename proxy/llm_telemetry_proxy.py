@@ -201,10 +201,50 @@ def init_db():
     conn.close()
 
 
+# ── Real-Time Model Mapping Resolution (Held in Server RAM) ──────────────────
+_model_mapping_cache = {}
+_model_mapping_mtime = 0
+
+def load_model_mapping():
+    global _model_mapping_cache, _model_mapping_mtime
+    candidates = [
+        REPO_ROOT / "data" / "model_mapping.json",
+        REPO_ROOT / "model_mapping.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                mtime = p.stat().st_mtime
+                if mtime != _model_mapping_mtime or not _model_mapping_cache:
+                    with open(p, "r", encoding="utf-8") as f:
+                        _model_mapping_cache = json.load(f)
+                    _model_mapping_mtime = mtime
+                return _model_mapping_cache
+            except Exception:
+                pass
+    return _model_mapping_cache
+
+def resolve_canonical_model(model_name: str) -> str:
+    if not model_name:
+        return model_name
+    mapping = load_model_mapping()
+    if not mapping:
+        return model_name
+    m_lower = str(model_name).lower().strip()
+    for canonical, aliases in mapping.items():
+        if m_lower == canonical.lower().strip():
+            return canonical
+        for alias in aliases:
+            if m_lower == str(alias).lower().strip():
+                return canonical
+    return model_name
+
+
 def log_call(model, endpoint, input_tokens, output_tokens,
              ttfb_ms, total_ms, tokens_per_s,
              server_running, server_tok_s, server_model,
              status_code, error, call_type='chat'):
+    model = resolve_canonical_model(model)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("""
         INSERT INTO api_calls
@@ -226,6 +266,7 @@ def log_call(model, endpoint, input_tokens, output_tokens,
 
 def log_proxy_call(endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms):
     """Log EVERY request through the proxy — even ones that fail before logging to api_calls."""
+    model = resolve_canonical_model(model)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("""
         INSERT INTO proxy_calls
