@@ -258,15 +258,15 @@ const App = (() => {
       totalInput += c.input_tokens || 0;
       totalOutput += c.output_tokens || 0;
       
-      if (c.ttfb_ms) {
-        ttfbSum += c.ttfb_ms;
+      if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
+        ttfbSum += c.ttfb_ms * cnt;
         ttfbCount += cnt;
       }
-      if (c.total_ms) {
-        rttSum += c.total_ms;
+      if (c.total_ms !== null && c.total_ms !== undefined) {
+        rttSum += c.total_ms * cnt;
         rttCount += cnt;
       }
-      if (c.tokens_per_s) {
+      if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) {
         tpsSum += c.tokens_per_s * cnt;
         tpsCount += cnt;
       }
@@ -341,21 +341,21 @@ const App = (() => {
       g.total_input += c.input_tokens || 0;
       g.total_output += c.output_tokens || 0;
 
-      if (c.ttfb_ms) {
-        g.ttfbSum += c.ttfb_ms;
+      if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
+        g.ttfbSum += c.ttfb_ms * cnt;
         g.ttfbCount += cnt;
         if (c.ttfb_ms > g.ttfbMax) g.ttfbMax = c.ttfb_ms;
       }
-      if (c.total_ms) {
-        g.rttSum += c.total_ms;
+      if (c.total_ms !== null && c.total_ms !== undefined) {
+        g.rttSum += c.total_ms * cnt;
         g.rttCount += cnt;
         if (c.total_ms > g.rttMax) g.rttMax = c.total_ms;
       }
-      if (c.tokens_per_s) {
+      if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) {
         g.tpsSum += c.tokens_per_s * cnt;
         g.tpsCount += cnt;
       }
-      if (c.server_running) {
+      if (c.server_running !== null && c.server_running !== undefined) {
         g.loadSum += c.server_running * cnt;
         g.loadCount += cnt;
       }
@@ -614,7 +614,7 @@ const App = (() => {
         }
       }
       
-      if (!costConfig) {
+      if (!costConfig && modelKey) {
         for (const k of costKeys) {
           if (k.toLowerCase().includes(modelKey)) {
             costConfig = State.modelCosts[k];
@@ -962,7 +962,10 @@ const App = (() => {
           break;
         }
         
-        const oldestTime = Math.min(...newCalls.map(c => new Date(c.timestamp).getTime()));
+        const oldestTime = newCalls.reduce((min, c) => {
+          const t = new Date(c.timestamp).getTime();
+          return t < min ? t : min;
+        }, Infinity);
         currentToVal = new Date(oldestTime - 1).toISOString();
 
         // Throttle sequential loop requests slightly to protect database and stay under rate limiter caps
@@ -1087,21 +1090,12 @@ const App = (() => {
     const config = State.liveNodesConfig;
     const existingNames = new Set(config.map(n => n.name));
     
-    const defaultAllowed = [
-      'deepseek-v4', 'deep seek v4', 'deepseek v4', 'deepseek',
-      'gemma-4', 'gemma4',
-      'glm-5.2', 'glm 5.2',
-      'qwen3.5-int4', 'qwen 3.5 int 4', 'gwen 3.5 int 4', 'qwen3.5',
-      'gpt-oss-120b', 'gpt oss 120b', 'gpt-oss'
-    ];
-    
     let changed = false;
     allFetchedNames.forEach(name => {
       if (!existingNames.has(name)) {
-        const isDefault = defaultAllowed.some(a => name.toLowerCase().includes(a.toLowerCase()));
         config.push({
           name: name,
-          visible: isDefault
+          visible: true
         });
         changed = true;
       }

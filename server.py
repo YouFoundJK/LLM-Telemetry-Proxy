@@ -288,10 +288,16 @@ async def handle_query(request: web.Request) -> web.Response:
                 SELECT model, SUM(COALESCE(calls_count, 1)) as calls,
                        SUM(input_tokens) as total_input,
                        SUM(output_tokens) as total_output,
-                       SUM(ttfb_ms) / SUM(COALESCE(calls_count, 1)) as avg_ttfb, MAX(ttfb_ms) as max_ttfb,
-                       SUM(total_ms) / SUM(COALESCE(calls_count, 1)) as avg_rtt, MAX(total_ms) as max_rtt,
-                       SUM(tokens_per_s * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)) as avg_tps,
-                       SUM(server_running * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)) as avg_load,
+                       SUM(ttfb_ms * COALESCE(calls_count, 1)) as sum_ttfb,
+                       SUM(CASE WHEN ttfb_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as ttfb_count,
+                       MAX(ttfb_ms) as max_ttfb,
+                       SUM(total_ms * COALESCE(calls_count, 1)) as sum_rtt,
+                       SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as rtt_count,
+                       MAX(total_ms) as max_rtt,
+                       SUM(tokens_per_s * COALESCE(calls_count, 1)) as sum_tps,
+                       SUM(CASE WHEN tokens_per_s IS NOT NULL AND tokens_per_s > 0 THEN COALESCE(calls_count, 1) ELSE 0 END) as tps_count,
+                       SUM(server_running * COALESCE(calls_count, 1)) as sum_load,
+                       SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as load_count,
                        SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
                 FROM api_calls WHERE {where_clause}
                 GROUP BY model ORDER BY calls DESC
@@ -307,8 +313,10 @@ async def handle_query(request: web.Request) -> web.Response:
                         "total_input": 0,
                         "total_output": 0,
                         "sum_ttfb": 0.0,
+                        "ttfb_count": 0,
                         "max_ttfb": 0.0,
                         "sum_rtt": 0.0,
+                        "rtt_count": 0,
                         "max_rtt": 0.0,
                         "sum_tps": 0.0,
                         "tps_count": 0,
@@ -317,28 +325,29 @@ async def handle_query(request: web.Request) -> web.Response:
                         "errors": 0
                     }
                 g = grouped_res[resolved]
-                c_count = r["calls"]
-                g["calls"] += c_count
+                g["calls"] += r["calls"]
                 g["total_input"] += r["total_input"] if r["total_input"] else 0
                 g["total_output"] += r["total_output"] if r["total_output"] else 0
                 
-                if r["avg_ttfb"]:
-                    g["sum_ttfb"] += r["avg_ttfb"] * c_count
+                if r["sum_ttfb"]:
+                    g["sum_ttfb"] += r["sum_ttfb"]
+                    g["ttfb_count"] += r["ttfb_count"]
                 if r["max_ttfb"] and r["max_ttfb"] > g["max_ttfb"]:
                     g["max_ttfb"] = r["max_ttfb"]
                     
-                if r["avg_rtt"]:
-                    g["sum_rtt"] += r["avg_rtt"] * c_count
+                if r["sum_rtt"]:
+                    g["sum_rtt"] += r["sum_rtt"]
+                    g["rtt_count"] += r["rtt_count"]
                 if r["max_rtt"] and r["max_rtt"] > g["max_rtt"]:
                     g["max_rtt"] = r["max_rtt"]
                     
-                if r["avg_tps"]:
-                    g["sum_tps"] += r["avg_tps"] * c_count
-                    g["tps_count"] += c_count
+                if r["sum_tps"]:
+                    g["sum_tps"] += r["sum_tps"]
+                    g["tps_count"] += r["tps_count"]
                     
-                if r["avg_load"]:
-                    g["sum_load"] += r["avg_load"] * c_count
-                    g["load_count"] += c_count
+                if r["sum_load"]:
+                    g["sum_load"] += r["sum_load"]
+                    g["load_count"] += r["load_count"]
                     
                 g["errors"] += r["errors"] if r["errors"] else 0
                 
@@ -349,9 +358,9 @@ async def handle_query(request: web.Request) -> web.Response:
                     "calls": g["calls"],
                     "total_input": g["total_input"],
                     "total_output": g["total_output"],
-                    "avg_ttfb": round(g["sum_ttfb"] / g["calls"], 2) if g["calls"] > 0 else 0,
+                    "avg_ttfb": round(g["sum_ttfb"] / g["ttfb_count"], 2) if g["ttfb_count"] > 0 else 0,
                     "max_ttfb": g["max_ttfb"],
-                    "avg_rtt": round(g["sum_rtt"] / g["calls"], 2) if g["calls"] > 0 else 0,
+                    "avg_rtt": round(g["sum_rtt"] / g["rtt_count"], 2) if g["rtt_count"] > 0 else 0,
                     "max_rtt": g["max_rtt"],
                     "avg_tps": round(g["sum_tps"] / g["tps_count"], 2) if g["tps_count"] > 0 else None,
                     "avg_load": round(g["sum_load"] / g["load_count"], 2) if g["load_count"] > 0 else None,
@@ -366,10 +375,10 @@ async def handle_query(request: web.Request) -> web.Response:
                        SUM(COALESCE(calls_count, 1)) as calls,
                        SUM(input_tokens) as total_input,
                        SUM(output_tokens) as total_output,
-                       SUM(ttfb_ms) / SUM(COALESCE(calls_count, 1)) as avg_ttfb, 
-                       SUM(total_ms) / SUM(COALESCE(calls_count, 1)) as avg_rtt,
-                       SUM(tokens_per_s * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)) as avg_tps,
-                       SUM(server_running * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)) as avg_load,
+                       SUM(ttfb_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN ttfb_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_ttfb, 
+                       SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_rtt,
+                       SUM(tokens_per_s * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN tokens_per_s IS NOT NULL AND tokens_per_s > 0 THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_tps,
+                       SUM(server_running * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_load,
                        SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
                 FROM api_calls WHERE {where_clause}
                 GROUP BY hour ORDER BY hour
@@ -382,10 +391,10 @@ async def handle_query(request: web.Request) -> web.Response:
                        SUM(COALESCE(calls_count, 1)) as calls,
                        SUM(input_tokens) as total_input,
                        SUM(output_tokens) as total_output,
-                       SUM(ttfb_ms) / SUM(COALESCE(calls_count, 1)) as avg_ttfb, 
-                       SUM(total_ms) / SUM(COALESCE(calls_count, 1)) as avg_rtt,
-                       SUM(tokens_per_s * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)) as avg_tps,
-                       SUM(server_running * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)) as avg_load,
+                       SUM(ttfb_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN ttfb_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_ttfb, 
+                       SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_rtt,
+                       SUM(tokens_per_s * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN tokens_per_s IS NOT NULL AND tokens_per_s > 0 THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_tps,
+                       SUM(server_running * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_load,
                        SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
                 FROM api_calls WHERE {where_clause}
                 GROUP BY day ORDER BY day
@@ -397,7 +406,7 @@ async def handle_query(request: web.Request) -> web.Response:
                 SELECT call_type, SUM(COALESCE(calls_count, 1)) as calls,
                        SUM(input_tokens) as total_input,
                        SUM(output_tokens) as total_output,
-                       SUM(total_ms) / SUM(COALESCE(calls_count, 1)) as avg_rtt
+                       SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0) as avg_rtt
                 FROM api_calls WHERE {where_clause}
                 GROUP BY call_type ORDER BY calls DESC
             """, params).fetchall()
@@ -420,9 +429,9 @@ async def handle_query(request: web.Request) -> web.Response:
             SELECT SUM(COALESCE(calls_count, 1)) as calls,
                    COALESCE(SUM(input_tokens), 0) as total_input,
                    COALESCE(SUM(output_tokens), 0) as total_output,
-                   COALESCE(SUM(ttfb_ms) / SUM(COALESCE(calls_count, 1)), 0) as avg_ttfb,
-                   COALESCE(SUM(total_ms) / SUM(COALESCE(calls_count, 1)), 0) as avg_rtt,
-                   COALESCE(SUM(tokens_per_s * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)), 0) as avg_tps,
+                   COALESCE(SUM(ttfb_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN ttfb_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_ttfb,
+                   COALESCE(SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_rtt,
+                   COALESCE(SUM(tokens_per_s * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN tokens_per_s IS NOT NULL AND tokens_per_s > 0 THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_tps,
                    SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors,
                    MIN(timestamp) as first_call,
                    MAX(timestamp) as last_call

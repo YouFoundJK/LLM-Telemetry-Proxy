@@ -21,7 +21,7 @@ const UI = (() => {
   }
 
   function formatTps(tps) {
-    if (tps === null || tps === undefined || tps === 0) return '—';
+    if (tps === null || tps === undefined || tps === 0 || isNaN(tps) || !isFinite(tps)) return '—';
     return tps.toFixed(1);
   }
 
@@ -134,21 +134,6 @@ const UI = (() => {
     `).join('');
   }
 
-  function isAllowedLiveModel(name) {
-    if (!name) return false;
-    const n = name.toLowerCase();
-    
-    // Matches the specified models: deep seek v4, gemma 4, glm 5.2, qwen 3.5 int 4, gpt oss 120b
-    const allowed = [
-      'deepseek-v4', 'deep seek v4', 'deepseek v4', 'deepseek',
-      'gemma-4', 'gemma4',
-      'glm-5.2', 'glm 5.2',
-      'qwen3.5-int4', 'qwen 3.5 int 4', 'gwen 3.5 int 4', 'qwen3.5',
-      'gpt-oss-120b', 'gpt oss 120b', 'gpt-oss'
-    ];
-    return allowed.some(a => n.includes(a));
-  }
-
   /**
    * Render Live e-INFRA Model Nodes
    */
@@ -177,7 +162,7 @@ const UI = (() => {
       });
       models = visibleModels;
     } else {
-      models = allModels.filter(m => isAllowedLiveModel(m.name));
+      models = allModels;
     }
     
     if (!models.length) {
@@ -471,42 +456,78 @@ const UI = (() => {
     calls.forEach(c => {
       const m = c.model || 'System / Non-Inference';
       if (!byModel[m]) {
-        byModel[m] = { calls: 0, input: 0, output: 0, ttfb: [], rtt: [], tps: [], load: [], errors: 0 };
+        byModel[m] = {
+          calls: 0,
+          input: 0,
+          output: 0,
+          ttfbSum: 0,
+          ttfbCount: 0,
+          maxTtfb: 0,
+          rttSum: 0,
+          rttCount: 0,
+          maxRtt: 0,
+          tpsSum: 0,
+          tpsCount: 0,
+          loadSum: 0,
+          loadCount: 0,
+          errors: 0
+        };
       }
       const b = byModel[m];
-      b.calls++;
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
+      b.calls += cnt;
       b.input += c.input_tokens || 0;
       b.output += c.output_tokens || 0;
-      if (c.ttfb_ms) b.ttfb.push(c.ttfb_ms);
-      if (c.total_ms) b.rtt.push(c.total_ms);
-      if (c.tokens_per_s) b.tps.push(c.tokens_per_s);
-      if (c.server_running) b.load.push(c.server_running);
-      if (c.error) b.errors++;
-    });
 
-    const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
+      if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) {
+        b.ttfbSum += c.ttfb_ms * cnt;
+        b.ttfbCount += cnt;
+        if (c.ttfb_ms > b.maxTtfb) b.maxTtfb = c.ttfb_ms;
+      }
+      if (c.total_ms !== null && c.total_ms !== undefined) {
+        b.rttSum += c.total_ms * cnt;
+        b.rttCount += cnt;
+        if (c.total_ms > b.maxRtt) b.maxRtt = c.total_ms;
+      }
+      if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) {
+        b.tpsSum += c.tokens_per_s * cnt;
+        b.tpsCount += cnt;
+      }
+      if (c.server_running !== null && c.server_running !== undefined) {
+        b.loadSum += c.server_running * cnt;
+        b.loadCount += cnt;
+      }
+      if (c.error) b.errors += cnt;
+    });
 
     tbody.innerHTML = Object.entries(byModel)
       .sort((a, b) => b[1].calls - a[1].calls)
-      .map(([m, b]) => `
-        <tr>
-          <td><span class="tag ${getModelClass(m)}">${m}</span></td>
-          <td class="num">${b.calls}</td>
-          <td class="num">${formatNum(b.input)}</td>
-          <td class="num">${formatNum(b.output)}</td>
-          <td class="num">${formatMs(avg(b.ttfb))}</td>
-          <td class="num">${formatMs(Math.max(...b.ttfb, 0))}</td>
-          <td class="num">${formatMs(avg(b.rtt))}</td>
-          <td class="num">${formatMs(Math.max(...b.rtt, 0))}</td>
-          <td class="num">${formatTps(avg(b.tps))}</td>
-          <td class="num">${avg(b.load).toFixed(1)}</td>
-          <td class="num">
-            <span class="tag ${b.errors ? 'tag-error' : 'tag-success'}">
-              ${b.errors || '0'}
-            </span>
-          </td>
-        </tr>
-      `).join('');
+      .map(([m, b]) => {
+        const avgTtfb = b.ttfbCount > 0 ? (b.ttfbSum / b.ttfbCount) : 0;
+        const avgRtt = b.rttCount > 0 ? (b.rttSum / b.rttCount) : 0;
+        const avgTps = b.tpsCount > 0 ? (b.tpsSum / b.tpsCount) : 0;
+        const avgLoad = b.loadCount > 0 ? (b.loadSum / b.loadCount) : 0;
+
+        return `
+          <tr>
+            <td><span class="tag ${getModelClass(m)}">${m}</span></td>
+            <td class="num">${b.calls}</td>
+            <td class="num">${formatNum(b.input)}</td>
+            <td class="num">${formatNum(b.output)}</td>
+            <td class="num">${formatMs(avgTtfb)}</td>
+            <td class="num">${formatMs(b.maxTtfb)}</td>
+            <td class="num">${formatMs(avgRtt)}</td>
+            <td class="num">${formatMs(b.maxRtt)}</td>
+            <td class="num">${formatTps(avgTps)}</td>
+            <td class="num">${b.loadCount > 0 ? avgLoad.toFixed(1) : '—'}</td>
+            <td class="num">
+              <span class="tag ${b.errors ? 'tag-error' : 'tag-success'}">
+                ${b.errors || '0'}
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
   }
 
   /**
@@ -734,160 +755,200 @@ const UI = (() => {
   }
   /**
    * Render Performance Analyzer Tab
-   * Aggregates stats by hour-of-day and compares DeepSeek vs GLM 5.2
+   * Aggregates stats by hour-of-day and dynamically compares top 2 most active models
    */
   function renderPerformanceAnalyzer(calls) {
     const duelEl = document.getElementById('modelDuelContainer');
     if (!duelEl) return null;
 
+    const duelTitle = document.getElementById('modelDuelTitle');
+
     if (!calls || !calls.length) {
+      if (duelTitle) duelTitle.textContent = 'Model Performance Duel';
       duelEl.innerHTML = '<div class="loading-overlay">No telemetry data available for analysis. Adjust your date filters.</div>';
       return null;
     }
 
-    // 1. Group calls by model group (DeepSeek vs GLM)
-    const duelData = {
-      deepseek: { name: 'DeepSeek', calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tps: [], errors: 0 },
-      glm: { name: 'GLM 5.2', calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tps: [], errors: 0 }
-    };
-
+    // 1. Determine top 2 most-used models dynamically
+    const modelVolume = {};
     calls.forEach(c => {
-      if (!c.model) return;
-      const m = c.model.toLowerCase();
-      
-      let grp = null;
-      if (m.includes('deepseek')) grp = duelData.deepseek;
-      else if (m.includes('glm')) grp = duelData.glm;
-
-      if (grp) {
-        grp.calls++;
-        grp.inputTok += c.input_tokens || 0;
-        grp.outputTok += c.output_tokens || 0;
-        if (c.ttfb_ms) grp.ttfb.push(c.ttfb_ms);
-        if (c.total_ms) grp.rtt.push(c.total_ms);
-        if (c.tokens_per_s) grp.tps.push(c.tokens_per_s);
-        if (c.error) grp.errors++;
-      }
+      if (!c.model || c.model === 'unknown' || c.model === 'System / Non-Inference') return;
+      const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
+      modelVolume[c.model] = (modelVolume[c.model] || 0) + cnt;
     });
 
-    const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
-    const calcPct = (part, total) => total ? (part / total * 100) : 100;
+    const sortedModels = Object.keys(modelVolume).sort((a, b) => modelVolume[b] - modelVolume[a]);
 
-    // Compile summary cards for duel
-    const ds = duelData.deepseek;
-    const gl = duelData.glm;
-
-    const dsSummary = {
-      calls: ds.calls,
-      avgTtfb: avg(ds.ttfb),
-      avgRtt: avg(ds.rtt),
-      avgTps: avg(ds.tps),
-      successRate: 100 - calcPct(ds.errors, ds.calls),
-      totalTokens: ds.inputTok + ds.outputTok
-    };
-
-    const glSummary = {
-      calls: gl.calls,
-      avgTtfb: avg(gl.ttfb),
-      avgRtt: avg(gl.rtt),
-      avgTps: avg(gl.tps),
-      successRate: 100 - calcPct(gl.errors, gl.calls),
-      totalTokens: gl.inputTok + gl.outputTok
-    };
-
-    // Determine winners for each metric
-    const winner = {};
-    if (dsSummary.calls && glSummary.calls) {
-      winner.ttfb = dsSummary.avgTtfb < glSummary.avgTtfb ? 'deepseek' : 'glm';
-      winner.rtt = dsSummary.avgRtt < glSummary.avgRtt ? 'deepseek' : 'glm';
-      winner.tps = dsSummary.avgTps > glSummary.avgTps ? 'deepseek' : 'glm';
-      winner.success = dsSummary.successRate > glSummary.successRate ? 'deepseek' : (dsSummary.successRate === glSummary.successRate ? 'draw' : 'glm');
-    }
-
-    // Build Duel Scorecard Table
-    let html = `
-      <div class="duel-layout">
-        <div>
-          <table style="width: 100%; font-size: 13px;">
-            <thead>
-              <tr>
-                <th>Performance Metric</th>
-                <th style="color:var(--accent);">DeepSeek</th>
-                <th style="color:var(--purple);">GLM 5.2</th>
-                <th>Winner</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><b>Total Requests</b></td>
-                <td class="num">${formatNum(dsSummary.calls)}</td>
-                <td class="num">${formatNum(glSummary.calls)}</td>
-                <td>${dsSummary.calls > glSummary.calls ? '🔥 DeepSeek (More data)' : glSummary.calls > dsSummary.calls ? '🔥 GLM 5.2 (More data)' : 'Draw'}</td>
-              </tr>
-              <tr>
-                <td><b>Avg Time to First Token (TTFT)</b></td>
-                <td class="num" style="${winner.ttfb === 'deepseek' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(dsSummary.avgTtfb)}</td>
-                <td class="num" style="${winner.ttfb === 'glm' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(glSummary.avgTtfb)}</td>
-                <td>${winner.ttfb === 'deepseek' ? '🏆 DeepSeek' : winner.ttfb === 'glm' ? '🏆 GLM 5.2' : '—'}</td>
-              </tr>
-              <tr>
-                <td><b>Avg Latency (RTT)</b></td>
-                <td class="num" style="${winner.rtt === 'deepseek' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(dsSummary.avgRtt)}</td>
-                <td class="num" style="${winner.rtt === 'glm' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(glSummary.avgRtt)}</td>
-                <td>${winner.rtt === 'deepseek' ? '🏆 DeepSeek' : winner.rtt === 'glm' ? '🏆 GLM 5.2' : '—'}</td>
-              </tr>
-              <tr>
-                <td><b>Avg Generation Speed (tok/s)</b></td>
-                <td class="num" style="${winner.tps === 'deepseek' ? 'color:var(--green); font-weight:600;' : ''}">${formatTps(dsSummary.avgTps)}</td>
-                <td class="num" style="${winner.tps === 'glm' ? 'color:var(--green); font-weight:600;' : ''}">${formatTps(glSummary.avgTps)}</td>
-                <td>${winner.tps === 'deepseek' ? '🏆 DeepSeek' : winner.tps === 'glm' ? '🏆 GLM 5.2' : '—'}</td>
-              </tr>
-              <tr>
-                <td><b>Success Rate (Reliability)</b></td>
-                <td class="num" style="${winner.success === 'deepseek' ? 'color:var(--green); font-weight:600;' : ''}">${dsSummary.successRate.toFixed(1)}%</td>
-                <td class="num" style="${winner.success === 'glm' ? 'color:var(--green); font-weight:600;' : ''}">${glSummary.successRate.toFixed(1)}%</td>
-                <td>${winner.success === 'deepseek' ? '🏆 DeepSeek' : winner.success === 'glm' ? '🏆 GLM 5.2' : winner.success === 'draw' ? '🤝 Draw' : '—'}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-    `;
-
-    // Generate intelligence analysis recommendation text
-    let recommendation = '';
-    if (!dsSummary.calls || !glSummary.calls) {
-      recommendation = '<p style="color:var(--text-muted)">Need data from both DeepSeek and GLM models to construct detailed recommendations. Ensure both are selected in your model filter and have active logs.</p>';
+    if (sortedModels.length < 2) {
+      const singleModel = sortedModels[0] || 'Unknown';
+      if (duelTitle) duelTitle.textContent = `Model Performance: ${singleModel}`;
+      duelEl.innerHTML = `<div class="loading-overlay" style="padding: 24px; text-align: center; color: var(--text-muted);">A performance duel requires at least 2 distinct active models. Currently only <b>${singleModel}</b> is active in this time filter. Select additional models in the filter to compare head-to-head.</div>`;
     } else {
-      const speedWinner = winner.ttfb === 'deepseek' ? 'DeepSeek' : 'GLM 5.2';
-      const speedPct = winner.ttfb === 'deepseek' 
-        ? ((glSummary.avgTtfb - dsSummary.avgTtfb) / glSummary.avgTtfb * 100).toFixed(0)
-        : ((dsSummary.avgTtfb - glSummary.avgTtfb) / dsSummary.avgTtfb * 100).toFixed(0);
+      const modelA = sortedModels[0];
+      const modelB = sortedModels[1];
 
-      const genWinner = winner.tps === 'deepseek' ? 'DeepSeek' : 'GLM 5.2';
-      const genPct = winner.tps === 'deepseek'
-        ? ((dsSummary.avgTps - glSummary.avgTps) / glSummary.avgTps * 100).toFixed(0)
-        : ((glSummary.avgTps - dsSummary.avgTps) / dsSummary.avgTps * 100).toFixed(0);
+      if (duelTitle) duelTitle.textContent = `Model Performance Duel: ${modelA} vs ${modelB}`;
 
-      recommendation = `
+      const duelData = {
+        modelA: { name: modelA, calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tps: [], errors: 0 },
+        modelB: { name: modelB, calls: 0, inputTok: 0, outputTok: 0, ttfb: [], rtt: [], tps: [], errors: 0 }
+      };
+
+      calls.forEach(c => {
+        if (!c.model) return;
+        let grp = null;
+        if (c.model === modelA) grp = duelData.modelA;
+        else if (c.model === modelB) grp = duelData.modelB;
+
+        if (grp) {
+          const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
+          grp.calls += cnt;
+          grp.inputTok += (c.input_tokens || 0) * cnt;
+          grp.outputTok += (c.output_tokens || 0) * cnt;
+          if (c.ttfb_ms !== null && c.ttfb_ms !== undefined) grp.ttfb.push(c.ttfb_ms);
+          if (c.total_ms !== null && c.total_ms !== undefined) grp.rtt.push(c.total_ms);
+          if (c.tokens_per_s !== null && c.tokens_per_s !== undefined && c.tokens_per_s > 0) grp.tps.push(c.tokens_per_s);
+          if (c.error) grp.errors += cnt;
+        }
+      });
+
+      const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
+      const calcPct = (part, total) => total ? (part / total * 100) : 100;
+
+      const summaryA = {
+        calls: duelData.modelA.calls,
+        avgTtfb: avg(duelData.modelA.ttfb),
+        avgRtt: avg(duelData.modelA.rtt),
+        avgTps: avg(duelData.modelA.tps),
+        successRate: 100 - calcPct(duelData.modelA.errors, duelData.modelA.calls),
+        totalTokens: duelData.modelA.inputTok + duelData.modelA.outputTok
+      };
+
+      const summaryB = {
+        calls: duelData.modelB.calls,
+        avgTtfb: avg(duelData.modelB.ttfb),
+        avgRtt: avg(duelData.modelB.rtt),
+        avgTps: avg(duelData.modelB.tps),
+        successRate: 100 - calcPct(duelData.modelB.errors, duelData.modelB.calls),
+        totalTokens: duelData.modelB.inputTok + duelData.modelB.outputTok
+      };
+
+      const winner = {};
+      if (summaryA.calls && summaryB.calls) {
+        if (summaryA.avgTtfb > 0 && summaryB.avgTtfb > 0) {
+          winner.ttfb = summaryA.avgTtfb < summaryB.avgTtfb ? 'modelA' : (summaryA.avgTtfb > summaryB.avgTtfb ? 'modelB' : 'draw');
+        } else if (summaryA.avgTtfb > 0) {
+          winner.ttfb = 'modelA';
+        } else if (summaryB.avgTtfb > 0) {
+          winner.ttfb = 'modelB';
+        } else {
+          winner.ttfb = 'draw';
+        }
+
+        if (summaryA.avgRtt > 0 && summaryB.avgRtt > 0) {
+          winner.rtt = summaryA.avgRtt < summaryB.avgRtt ? 'modelA' : (summaryA.avgRtt > summaryB.avgRtt ? 'modelB' : 'draw');
+        } else if (summaryA.avgRtt > 0) {
+          winner.rtt = 'modelA';
+        } else if (summaryB.avgRtt > 0) {
+          winner.rtt = 'modelB';
+        } else {
+          winner.rtt = 'draw';
+        }
+
+        if (summaryA.avgTps > 0 || summaryB.avgTps > 0) {
+          winner.tps = summaryA.avgTps > summaryB.avgTps ? 'modelA' : (summaryA.avgTps < summaryB.avgTps ? 'modelB' : 'draw');
+        } else {
+          winner.tps = 'draw';
+        }
+
+        winner.success = summaryA.successRate > summaryB.successRate ? 'modelA' : (summaryA.successRate === summaryB.successRate ? 'draw' : 'modelB');
+      }
+
+      const colorA = TelemetryCharts.getModelColor(modelA);
+      const colorB = TelemetryCharts.getModelColor(modelB);
+
+      let html = `
+        <div class="duel-layout">
+          <div>
+            <table style="width: 100%; font-size: 13px;">
+              <thead>
+                <tr>
+                  <th>Performance Metric</th>
+                  <th style="color:${colorA};">${modelA}</th>
+                  <th style="color:${colorB};">${modelB}</th>
+                  <th>Winner</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><b>Total Requests</b></td>
+                  <td class="num">${formatNum(summaryA.calls)}</td>
+                  <td class="num">${formatNum(summaryB.calls)}</td>
+                  <td>${summaryA.calls > summaryB.calls ? `🔥 ${modelA} (More data)` : summaryB.calls > summaryA.calls ? `🔥 ${modelB} (More data)` : 'Draw'}</td>
+                </tr>
+                <tr>
+                  <td><b>Avg Time to First Token (TTFT)</b></td>
+                  <td class="num" style="${winner.ttfb === 'modelA' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(summaryA.avgTtfb)}</td>
+                  <td class="num" style="${winner.ttfb === 'modelB' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(summaryB.avgTtfb)}</td>
+                  <td>${winner.ttfb === 'modelA' ? `🏆 ${modelA}` : winner.ttfb === 'modelB' ? `🏆 ${modelB}` : '—'}</td>
+                </tr>
+                <tr>
+                  <td><b>Avg Latency (RTT)</b></td>
+                  <td class="num" style="${winner.rtt === 'modelA' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(summaryA.avgRtt)}</td>
+                  <td class="num" style="${winner.rtt === 'modelB' ? 'color:var(--green); font-weight:600;' : ''}">${formatMs(summaryB.avgRtt)}</td>
+                  <td>${winner.rtt === 'modelA' ? `🏆 ${modelA}` : winner.rtt === 'modelB' ? `🏆 ${modelB}` : '—'}</td>
+                </tr>
+                <tr>
+                  <td><b>Avg Generation Speed (tok/s)</b></td>
+                  <td class="num" style="${winner.tps === 'modelA' ? 'color:var(--green); font-weight:600;' : ''}">${formatTps(summaryA.avgTps)}</td>
+                  <td class="num" style="${winner.tps === 'modelB' ? 'color:var(--green); font-weight:600;' : ''}">${formatTps(summaryB.avgTps)}</td>
+                  <td>${winner.tps === 'modelA' ? `🏆 ${modelA}` : winner.tps === 'modelB' ? `🏆 ${modelB}` : '—'}</td>
+                </tr>
+                <tr>
+                  <td><b>Success Rate (Reliability)</b></td>
+                  <td class="num" style="${winner.success === 'modelA' ? 'color:var(--green); font-weight:600;' : ''}">${summaryA.successRate.toFixed(1)}%</td>
+                  <td class="num" style="${winner.success === 'modelB' ? 'color:var(--green); font-weight:600;' : ''}">${summaryB.successRate.toFixed(1)}%</td>
+                  <td>${winner.success === 'modelA' ? `🏆 ${modelA}` : winner.success === 'modelB' ? `🏆 ${modelB}` : winner.success === 'draw' ? '🤝 Draw' : '—'}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+      `;
+
+      const speedWinner = winner.ttfb === 'modelA' ? modelA : (winner.ttfb === 'modelB' ? modelB : null);
+      let speedPct = '0';
+      if (speedWinner && summaryA.avgTtfb > 0 && summaryB.avgTtfb > 0) {
+        const higherTtfb = Math.max(summaryA.avgTtfb, summaryB.avgTtfb);
+        const lowerTtfb = Math.min(summaryA.avgTtfb, summaryB.avgTtfb);
+        speedPct = ((higherTtfb - lowerTtfb) / higherTtfb * 100).toFixed(0);
+      }
+
+      const genWinner = winner.tps === 'modelA' ? modelA : (winner.tps === 'modelB' ? modelB : null);
+      let genPct = '0';
+      if (genWinner && Math.min(summaryA.avgTps, summaryB.avgTps) > 0) {
+        const higherTps = Math.max(summaryA.avgTps, summaryB.avgTps);
+        const lowerTps = Math.min(summaryA.avgTps, summaryB.avgTps);
+        genPct = ((higherTps - lowerTps) / lowerTps * 100).toFixed(0);
+      }
+
+      const recommendation = `
         <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display:flex; flex-direction:column; gap:12px;">
           <h4 style="font-size:13px; text-transform:uppercase; color:var(--accent); margin-bottom:4px;">💡 Telemetry Recommendation Report</h4>
           <p style="font-size:13px; line-height: 1.6;">
-            • <b>Latency & Startup (TTFT)</b>: <b>${speedWinner}</b> starts generating text faster, leading by <b>${speedPct}%</b> in average Time to First Token. 
-            Use ${speedWinner} for interactive UI prompts or real-time autocomplete tasks where immediate response is critical.
+            • <b>Latency & Startup (TTFT)</b>: ${speedWinner ? `<b>${speedWinner}</b> starts generating text faster, leading by <b>${speedPct}%</b> in average Time to First Token. Use ${speedWinner} for interactive UI prompts or real-time autocomplete tasks where immediate response is critical.` : 'Both models show comparable startup latency.'}
           </p>
           <p style="font-size:13px; line-height: 1.6;">
-            • <b>Generation Speed</b>: <b>${genWinner}</b> prints tokens at a higher velocity, winning by <b>${genPct}%</b> in raw generation throughput (${formatTps(Math.max(dsSummary.avgTps, glSummary.avgTps))} vs ${formatTps(Math.min(dsSummary.avgTps, glSummary.avgTps))} tok/s). 
-            Use ${genWinner} for bulk agent summaries, code generation, or long reasoning tasks.
+            • <b>Generation Speed</b>: ${genWinner ? `<b>${genWinner}</b> prints tokens at a higher velocity, winning by <b>${genPct}%</b> in raw generation throughput (${formatTps(Math.max(summaryA.avgTps, summaryB.avgTps))} vs ${formatTps(Math.min(summaryA.avgTps, summaryB.avgTps))} tok/s). Use ${genWinner} for bulk agent summaries, code generation, or long reasoning tasks.` : 'Both models show comparable token generation speeds.'}
           </p>
           <p style="font-size:13px; line-height: 1.5; color:var(--text-muted); font-size:12px; margin-top:8px;">
-            * Analysis is computed over the selected time range using ${dsSummary.calls} DeepSeek calls and ${glSummary.calls} GLM calls.
+            * Analysis is computed dynamically comparing the top 2 active models over the selected time range (${summaryA.calls} ${modelA} calls vs ${summaryB.calls} ${modelB} calls).
           </p>
         </div>
       `;
-    }
 
-    html += recommendation + '</div>';
-    duelEl.innerHTML = html;
+      html += recommendation + '</div>';
+      duelEl.innerHTML = html;
+    }
 
     // Compute Token Efficiency by Model
     const modelTokenStats = {};
