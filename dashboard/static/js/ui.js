@@ -1577,6 +1577,12 @@ const UI = (() => {
       b.inputCost += c.input_cost || 0;
       b.outputCost += c.output_cost || 0;
       b.totalCost += c.total_cost || 0;
+      if (c.provider_source && c.provider_source !== 'Unknown') {
+        b.providerSource = c.provider_source;
+      }
+      if (c.last_updated && (!b.lastUpdated || b.lastUpdated === '—' || c.last_updated > b.lastUpdated)) {
+        b.lastUpdated = c.last_updated;
+      }
     });
 
     tbody.innerHTML = Object.entries(byModel)

@@ -614,11 +614,121 @@ const App = (() => {
   }
 
   /**
+   * Normalizes model costs config into a lookup structure with pre-sorted, epoch-parsed tiers.
+   */
+  function normalizeModelCostsConfig(rawCosts) {
+    if (!rawCosts || typeof rawCosts !== 'object') return {};
+    const normalized = {};
+    for (const [k, val] of Object.entries(rawCosts)) {
+      if (Array.isArray(val)) {
+        const tiers = val.map(entry => {
+          const dateStr = entry.effective_date || entry.last_updated || '1970-01-01';
+          const fullIso = dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00Z`;
+          let epoch = new Date(fullIso).getTime();
+          if (isNaN(epoch)) epoch = 0;
+          return {
+            epoch,
+            effective_date: dateStr,
+            input_cost_per_million: Number(entry.input_cost_per_million) || 0,
+            output_cost_per_million: Number(entry.output_cost_per_million) || 0,
+            provider_source: entry.provider_source || 'Unknown',
+            last_updated: entry.last_updated || dateStr
+          };
+        }).sort((a, b) => a.epoch - b.epoch);
+        normalized[k] = tiers;
+      } else if (val && typeof val === 'object') {
+        // Legacy single-tier object support
+        const dateStr = val.effective_date || val.last_updated || '1970-01-01';
+        const fullIso = dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00Z`;
+        let epoch = new Date(fullIso).getTime();
+        if (isNaN(epoch)) epoch = 0;
+        normalized[k] = [{
+          epoch,
+          effective_date: dateStr,
+          input_cost_per_million: Number(val.input_cost_per_million) || 0,
+          output_cost_per_million: Number(val.output_cost_per_million) || 0,
+          provider_source: val.provider_source || 'Unknown',
+          last_updated: val.last_updated || dateStr
+        }];
+      }
+    }
+    return normalized;
+  }
+
+  /**
+   * Resolves the active model cost tier for a given model and call timestamp based on intervals.
+   */
+  function getModelCostForCall(normalizedCosts, rawModel, callTimestamp) {
+    if (!normalizedCosts || !rawModel) return null;
+    const modelKey = String(rawModel).trim().toLowerCase();
+    const costKeys = Object.keys(normalizedCosts);
+    if (!costKeys.length) return null;
+
+    let matchedKey = null;
+    // 1. Exact match
+    for (const k of costKeys) {
+      if (modelKey === k.toLowerCase()) {
+        matchedKey = k;
+        break;
+      }
+    }
+    // 2. Longest substring match
+    if (!matchedKey) {
+      const sortedKeys = [...costKeys].sort((a, b) => b.length - a.length);
+      for (const k of sortedKeys) {
+        if (modelKey.includes(k.toLowerCase())) {
+          matchedKey = k;
+          break;
+        }
+      }
+    }
+    // 3. Reverse substring match
+    if (!matchedKey) {
+      for (const k of costKeys) {
+        if (k.toLowerCase().includes(modelKey)) {
+          matchedKey = k;
+          break;
+        }
+      }
+    }
+
+    if (!matchedKey) return null;
+    const tiers = normalizedCosts[matchedKey];
+    if (!tiers || !tiers.length) return null;
+
+    // Parse call timestamp
+    let callEpoch = NaN;
+    if (callTimestamp) {
+      callEpoch = new Date(callTimestamp).getTime();
+    }
+
+    // If timestamp is invalid or missing, default to latest tier
+    if (isNaN(callEpoch)) {
+      return tiers[tiers.length - 1];
+    }
+
+    // If call happened before earliest tier, clamp to earliest tier
+    if (callEpoch < tiers[0].epoch) {
+      return tiers[0];
+    }
+
+    // Find the latest tier where tier.epoch <= callEpoch
+    for (let i = tiers.length - 1; i >= 0; i--) {
+      if (callEpoch >= tiers[i].epoch) {
+        return tiers[i];
+      }
+    }
+
+    return tiers[0];
+  }
+
+  /**
    * Performs the initial full loading pipeline
    */
   async function loadCosts() {
     try {
       State.modelCosts = await TelemetryAPI.getCosts();
+      State.normalizedModelCosts = normalizeModelCostsConfig(State.modelCosts);
     } catch (e) {
       console.error('Failed to load model costs config', e);
     }
@@ -626,49 +736,28 @@ const App = (() => {
 
   function enrichCallsWithCosts(calls) {
     if (!calls || !State.modelCosts) return;
+    if (!State.normalizedModelCosts) {
+      State.normalizedModelCosts = normalizeModelCostsConfig(State.modelCosts);
+    }
+
     calls.forEach(c => {
-      const modelKey = c.model ? c.model.toLowerCase() : '';
-      let costConfig = null;
-      const costKeys = Object.keys(State.modelCosts);
-      
-      for (const k of costKeys) {
-        if (modelKey === k.toLowerCase()) {
-          costConfig = State.modelCosts[k];
-          break;
-        }
-      }
-      
-      if (!costConfig) {
-        const sortedKeys = [...costKeys].sort((a, b) => b.length - a.length);
-        for (const k of sortedKeys) {
-          if (modelKey.includes(k.toLowerCase())) {
-            costConfig = State.modelCosts[k];
-            break;
-          }
-        }
-      }
-      
-      if (!costConfig && modelKey) {
-        for (const k of costKeys) {
-          if (k.toLowerCase().includes(modelKey)) {
-            costConfig = State.modelCosts[k];
-            break;
-          }
-        }
-      }
-      const callsCount = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
+      const costConfig = getModelCostForCall(State.normalizedModelCosts, c.model, c.timestamp);
+      const callsCount = (c.calls_count !== undefined && c.calls_count !== null) ? c.calls_count : 1;
+
       if (costConfig) {
         c.input_cost = ((c.input_tokens || 0) / 1e6) * (costConfig.input_cost_per_million || 0) * callsCount;
         c.output_cost = ((c.output_tokens || 0) / 1e6) * (costConfig.output_cost_per_million || 0) * callsCount;
         c.total_cost = c.input_cost + c.output_cost;
         c.provider_source = costConfig.provider_source || 'Unknown';
-        c.last_updated = costConfig.last_updated || '';
+        c.last_updated = costConfig.effective_date || costConfig.last_updated || '';
+        c.effective_date = costConfig.effective_date || costConfig.last_updated || '';
       } else {
         c.input_cost = 0;
         c.output_cost = 0;
         c.total_cost = 0;
         c.provider_source = 'Unknown';
         c.last_updated = '';
+        c.effective_date = '';
       }
     });
   }

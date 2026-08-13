@@ -562,12 +562,12 @@ async def handle_costs(request: web.Request) -> web.Response:
             return web.json_response({"error": f"Failed to parse model_costs.json: {str(e)}"}, status=500)
     else:
         fallback = {
-            "deepseek": {"input_cost_per_million": 0.14, "output_cost_per_million": 0.28, "provider_source": "DeepSeek API (Official)", "last_updated": "2026-07-04"},
-            "gemma-4": {"input_cost_per_million": 0.07, "output_cost_per_million": 0.27, "provider_source": "Google AI Studio", "last_updated": "2026-07-04"},
-            "glm-5.2": {"input_cost_per_million": 1.40, "output_cost_per_million": 4.40, "provider_source": "Zhipu AI Developer Platform", "last_updated": "2026-07-04"},
-            "gpt-oss-120b": {"input_cost_per_million": 0.60, "output_cost_per_million": 0.60, "provider_source": "Together AI (Hosted)", "last_updated": "2026-07-04"},
-            "qwen3-embedding-4b": {"input_cost_per_million": 0.01, "output_cost_per_million": 0.00, "provider_source": "Alibaba Cloud Model Studio", "last_updated": "2026-07-04"},
-            "qwen3.5-int4": {"input_cost_per_million": 0.05, "output_cost_per_million": 0.10, "provider_source": "Alibaba Cloud / self-hosted", "last_updated": "2026-07-04"}
+            "deepseek": [{"effective_date": "2026-07-04", "input_cost_per_million": 0.14, "output_cost_per_million": 0.28, "provider_source": "DeepSeek API (Official)"}],
+            "gemma-4": [{"effective_date": "2026-07-04", "input_cost_per_million": 0.07, "output_cost_per_million": 0.27, "provider_source": "Google AI Studio"}],
+            "glm-5.2": [{"effective_date": "2026-07-04", "input_cost_per_million": 1.40, "output_cost_per_million": 4.40, "provider_source": "Zhipu AI Developer Platform"}],
+            "gpt-oss-120b": [{"effective_date": "2026-07-04", "input_cost_per_million": 0.60, "output_cost_per_million": 0.60, "provider_source": "Together AI (Hosted)"}],
+            "qwen3-embedding-4b": [{"effective_date": "2026-07-04", "input_cost_per_million": 0.01, "output_cost_per_million": 0.00, "provider_source": "Alibaba Cloud Model Studio"}],
+            "qwen3.5-int4": [{"effective_date": "2026-07-04", "input_cost_per_million": 0.05, "output_cost_per_million": 0.10, "provider_source": "Alibaba Cloud / self-hosted"}]
         }
         return web.json_response(fallback)
 
