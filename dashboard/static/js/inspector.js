@@ -11,7 +11,7 @@
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch (_) {}
     return null; // null represents "All Models"
@@ -156,9 +156,19 @@
         applyClientFilters();
       });
     }
+
+    window.addEventListener('resize', updateHeaderHeight);
+  }
+
+  function updateHeaderHeight() {
+    const nav = document.querySelector('.inspector-header');
+    if (nav) {
+      document.documentElement.style.setProperty('--inspector-header-height', `${nav.offsetHeight}px`);
+    }
   }
 
   async function initInspector() {
+    updateHeaderHeight();
     await updateStatusMeta();
     await loadRecentEvents();
     connectSSE();
@@ -173,6 +183,7 @@
   async function updateStatusMeta() {
     try {
       const status = await TelemetryAPI.getRawLogStatus();
+      const prevLoggingState = State.isLoggingEnabled;
       State.isLoggingEnabled = Boolean(status.enabled);
 
       if (els.metaFilePath) {
@@ -195,6 +206,11 @@
           els.toggleBtnText.textContent = 'Enable Logging';
         }
       }
+
+      // Re-render empty state if logging state changed and no events exist yet
+      if (State.events.length === 0 && prevLoggingState !== State.isLoggingEnabled) {
+        renderFeed();
+      }
     } catch (e) {
       console.warn('Failed to update status meta', e);
     }
@@ -207,6 +223,9 @@
     try {
       const res = await TelemetryAPI.toggleRawLog();
       await updateStatusMeta();
+      if (State.events.length === 0) {
+        renderFeed();
+      }
     } catch (e) {
       alert('Error toggling logging: ' + e.message);
     }
@@ -224,10 +243,11 @@
           appendEvent(entry, false);
         }
         updateModelDropdown();
-        renderFeed();
       }
     } catch (e) {
       console.warn('Failed to load recent logs', e);
+    } finally {
+      renderFeed();
     }
   }
 
@@ -474,16 +494,36 @@
     if (!els.feed) return;
 
     if (State.events.length === 0) {
-      els.feed.innerHTML = `
-        <div class="empty-state" id="initialEmptyState">
-          <h3>Awaiting Live Telemetry Payload Logs</h3>
-          <p>Ensure Raw Payload Logging is toggled <strong>ON</strong>. As requests pass through the proxy, complete incoming & outgoing JSON schemas will stream here in real-time.</p>
-          <button id="emptyStateEnableBtn" class="btn-mini btn-mini-primary" style="padding: 6px 16px; font-size: 13px;">
-            ⚡ Turn ON Raw Payload Logging
-          </button>
-        </div>
-      `;
-      els.feed.querySelector('#emptyStateEnableBtn')?.addEventListener('click', handleToggleLogging);
+      if (State.isLoggingEnabled) {
+        els.feed.innerHTML = `
+          <div class="empty-state" id="initialEmptyState">
+            <div style="font-size: 32px; margin-bottom: 10px;">📡</div>
+            <h3 style="color: #3fb950; margin-bottom: 8px;">Live Payload Logging is Active</h3>
+            <p style="color: #8b949e; max-width: 540px; margin: 0 auto 16px; line-height: 1.6;">
+              The proxy is actively recording incoming & outgoing LLM payloads. Send requests through the proxy (e.g. <code>/v1/chat/completions</code>) to stream payloads here live.
+            </p>
+            <div style="display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; background: rgba(63, 185, 80, 0.1); border: 1px solid rgba(63, 185, 80, 0.3); border-radius: 20px; font-size: 12px; color: #3fb950;">
+              <span class="live-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #3fb950; display: inline-block; box-shadow: 0 0 8px rgba(63, 185, 80, 0.8);"></span>
+              <span>Awaiting incoming requests...</span>
+            </div>
+          </div>
+        `;
+      } else {
+        els.feed.innerHTML = `
+          <div class="empty-state" id="initialEmptyState">
+            <div style="font-size: 32px; margin-bottom: 10px;">⏸️</div>
+            <h3 style="margin-bottom: 8px;">Raw Payload Logging is Paused</h3>
+            <p style="color: #8b949e; max-width: 540px; margin: 0 auto 16px; line-height: 1.6;">
+              Ensure Raw Payload Logging is toggled <strong>ON</strong>. As requests pass through the proxy, complete incoming & outgoing JSON schemas will stream here in real-time.
+            </p>
+            <button id="emptyStateEnableBtn" class="btn-mini btn-mini-primary" style="padding: 7px 18px; font-size: 13px;">
+              ⚡ Turn ON Raw Payload Logging
+            </button>
+          </div>
+        `;
+        els.feed.querySelector('#emptyStateEnableBtn')?.addEventListener('click', handleToggleLogging);
+      }
+
       if (els.metaTotalCalls) els.metaTotalCalls.textContent = '0';
       return;
     }
@@ -699,35 +739,142 @@
       let roleClass = 'msg-user';
       let roleColor = '#58a6ff';
 
+      const isToolMessage = (role === 'tool' || role === 'function');
+      const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+
       if (role === 'system') {
         roleClass = 'msg-system';
         roleColor = '#bc8cff';
       } else if (role === 'assistant') {
         roleClass = 'msg-assistant';
         roleColor = '#3fb950';
-      } else if (role === 'tool' || role === 'function') {
+      } else if (isToolMessage) {
         roleClass = 'msg-tool';
         roleColor = '#d29922';
       }
 
       const msgCard = document.createElement('div');
-      msgCard.className = `msg-card ${roleClass}`;
       
-      const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2);
-      
-      msgCard.innerHTML = `
-        <div class="msg-header">
-          <span style="color: ${roleColor}; font-weight: 700;">#${idx + 1} ${role.toUpperCase()}</span>
-          <button class="btn-mini btn-copy-msg">Copy</button>
-        </div>
-        <div class="msg-text">${escapeHtml(text || '')}</div>
-      `;
+      const contentText = msg.content !== null && msg.content !== undefined
+        ? (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2))
+        : '';
 
-      msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', () => {
-        navigator.clipboard.writeText(text || '');
-      });
+      if (isToolMessage) {
+        // Tool Message Turn (collapsed by default so inspector stays concise)
+        msgCard.className = `msg-card ${roleClass} msg-card-collapsible`;
+        const toolName = msg.name || msg.tool_call_id || '';
+        const toolLabel = toolName ? `#${idx + 1} ${role.toUpperCase()} [${escapeHtml(toolName)}]` : `#${idx + 1} ${role.toUpperCase()}`;
+        const charCount = contentText.length;
 
-      content.appendChild(msgCard);
+        msgCard.innerHTML = `
+          <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
+            <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
+              <span style="color: ${roleColor}; font-weight: 700; flex-shrink: 0;">${toolLabel}</span>
+              <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${charCount.toLocaleString()} chars)</span>
+            </div>
+            <button class="btn-mini btn-copy-msg" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
+          </div>
+          <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(contentText)}</div>
+        `;
+
+        const mHeader = msgCard.querySelector('.msg-header');
+        const mText = msgCard.querySelector('.msg-text');
+        const mFoldIcon = msgCard.querySelector('.msg-fold-icon');
+
+        mHeader.addEventListener('click', (e) => {
+          if (e.target.closest('.btn-copy-msg')) return;
+          const isHidden = mText.style.display === 'none';
+          mText.style.display = isHidden ? 'block' : 'none';
+          mFoldIcon.textContent = isHidden ? '▼' : '▶';
+          mHeader.style.marginBottom = isHidden ? '6px' : '0';
+        });
+
+        msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          navigator.clipboard.writeText(contentText);
+          const btn = e.target;
+          const orig = btn.textContent;
+          btn.textContent = '✓ Copied';
+          setTimeout(() => btn.textContent = orig, 1500);
+        });
+
+        content.appendChild(msgCard);
+      } else {
+        // Normal message turn (user, system, assistant)
+        msgCard.className = `msg-card ${roleClass}`;
+        
+        let headerHtml = `
+          <div class="msg-header">
+            <span style="color: ${roleColor}; font-weight: 700;">#${idx + 1} ${role.toUpperCase()}</span>
+            <button class="btn-mini btn-copy-msg">Copy</button>
+          </div>
+        `;
+
+        let bodyHtml = '';
+        if (contentText) {
+          bodyHtml += `<div class="msg-text">${escapeHtml(contentText)}</div>`;
+        }
+
+        msgCard.innerHTML = headerHtml + bodyHtml;
+
+        msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const copyText = contentText || (hasToolCalls ? JSON.stringify(msg.tool_calls, null, 2) : '');
+          navigator.clipboard.writeText(copyText);
+          const btn = e.target;
+          const orig = btn.textContent;
+          btn.textContent = '✓ Copied';
+          setTimeout(() => btn.textContent = orig, 1500);
+        });
+
+        // If message has historical tool_calls, render them as a collapsed sub-box
+        if (hasToolCalls) {
+          const toolJson = JSON.stringify(msg.tool_calls, null, 2);
+          const toolNames = msg.tool_calls.map(t => t?.function?.name || t?.name || t?.type).filter(Boolean).join(', ');
+          const toolLabel = toolNames ? `Tool Calls: ${toolNames} (${msg.tool_calls.length})` : `Tool Calls (${msg.tool_calls.length})`;
+
+          const toolCallsBox = document.createElement('div');
+          toolCallsBox.className = 'msg-card msg-tool msg-card-collapsible';
+          toolCallsBox.style.marginTop = contentText ? '8px' : '0';
+          toolCallsBox.innerHTML = `
+            <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
+              <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
+                <span style="color: #d29922; font-weight: 700; flex-shrink: 0;">🔧 ${escapeHtml(toolLabel)}</span>
+                <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${toolJson.length.toLocaleString()} chars)</span>
+              </div>
+              <button class="btn-mini btn-copy-nested-tool" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
+            </div>
+            <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(toolJson)}</div>
+          `;
+
+          const tcHeader = toolCallsBox.querySelector('.msg-header');
+          const tcText = toolCallsBox.querySelector('.msg-text');
+          const tcFoldIcon = toolCallsBox.querySelector('.msg-fold-icon');
+
+          tcHeader.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-copy-nested-tool')) return;
+            const isHidden = tcText.style.display === 'none';
+            tcText.style.display = isHidden ? 'block' : 'none';
+            tcFoldIcon.textContent = isHidden ? '▼' : '▶';
+            tcHeader.style.marginBottom = isHidden ? '6px' : '0';
+          });
+
+          toolCallsBox.querySelector('.btn-copy-nested-tool')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(toolJson);
+            const btn = e.target;
+            const orig = btn.textContent;
+            btn.textContent = '✓ Copied';
+            setTimeout(() => btn.textContent = orig, 1500);
+          });
+
+          msgCard.appendChild(toolCallsBox);
+        }
+
+        content.appendChild(msgCard);
+      }
     });
 
     header.addEventListener('click', () => {
@@ -837,16 +984,47 @@
       content.appendChild(outCard);
     }
 
-    // Tool Calls
+    // Tool Calls (Collapsed by default so inspector stays concise)
     if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
       const toolCard = document.createElement('div');
-      toolCard.className = 'msg-card msg-tool';
+      toolCard.className = 'msg-card msg-tool msg-card-collapsible';
+      const toolJson = JSON.stringify(toolCalls, null, 2);
+      const toolNames = toolCalls.map(t => t?.function?.name || t?.name || t?.type).filter(Boolean).join(', ');
+      const toolLabel = toolNames ? `Tool Calls: ${toolNames} (${toolCalls.length})` : `Tool / Function Calls (${toolCalls.length})`;
+
       toolCard.innerHTML = `
-        <div class="msg-header">
-          <span style="color: #d29922; font-weight: 700;">Tool / Function Calls (${toolCalls.length})</span>
+        <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
+          <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
+            <span style="color: #d29922; font-weight: 700; flex-shrink: 0;">🔧 ${escapeHtml(toolLabel)}</span>
+            <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${toolJson.length.toLocaleString()} chars)</span>
+          </div>
+          <button class="btn-mini btn-copy-tool-resp" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
         </div>
-        <div class="msg-text">${escapeHtml(JSON.stringify(toolCalls, null, 2))}</div>
+        <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(toolJson)}</div>
       `;
+
+      const tHeader = toolCard.querySelector('.msg-header');
+      const tText = toolCard.querySelector('.msg-text');
+      const tFoldIcon = toolCard.querySelector('.msg-fold-icon');
+
+      tHeader.addEventListener('click', (e) => {
+        if (e.target.closest('.btn-copy-tool-resp')) return;
+        const isHidden = tText.style.display === 'none';
+        tText.style.display = isHidden ? 'block' : 'none';
+        tFoldIcon.textContent = isHidden ? '▼' : '▶';
+        tHeader.style.marginBottom = isHidden ? '6px' : '0';
+      });
+
+      toolCard.querySelector('.btn-copy-tool-resp')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(toolJson);
+        const btn = e.target;
+        const orig = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = orig, 1500);
+      });
+
       content.appendChild(toolCard);
     }
 

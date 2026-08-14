@@ -5,7 +5,7 @@
 # Usage:
 #   ./dashboard.sh start [port] [--with-proxy] — start dashboard server (default port 9118)
 #   ./dashboard.sh stop [--all]                — kill dashboard server (and proxy if --all)
-#   ./dashboard.sh restart [port] [--with-proxy] — restart dashboard server
+#   ./dashboard.sh restart [port]             — restart dashboard (and proxy if it was running)
 #   ./dashboard.sh status                     — check status of dashboard and proxy
 #   ./dashboard.sh url                        — print the dashboard URL
 #   ./dashboard.sh proxy {start|stop|restart|status|logs} — proxy subcommands
@@ -329,20 +329,22 @@ case "$COMMAND" in
         ;;
 
     restart)
-        STOP_ALL=false
-        for arg in "$@"; do
-            if [[ "$arg" == "--all" ]]; then
-                STOP_ALL=true
-            fi
-        done
+        was_proxy_running=false
+        if is_proxy_running; then
+            was_proxy_running=true
+        fi
 
         stop_dashboard
-        if [[ "$STOP_ALL" == true ]]; then
+        if [[ "$was_proxy_running" == true ]]; then
             stop_proxy
         fi
 
         sleep 1
         start_dashboard "$@"
+
+        if [[ "$was_proxy_running" == true ]] && ! is_proxy_running; then
+            start_proxy "$PROXY_PORT"
+        fi
         ;;
 
     status)
@@ -407,7 +409,7 @@ case "$COMMAND" in
         ;;
 
     *)
-        echo "Usage: ./dashboard.sh {start [port] [--with-proxy]|stop [--all]|restart [port] [--with-proxy]|status|url|proxy {start|stop|restart|status|logs}}"
+        echo "Usage: ./dashboard.sh {start [port] [--with-proxy]|stop [--all]|restart [port]|status|url|proxy {start|stop|restart|status|logs}}"
         exit 1
         ;;
 esac

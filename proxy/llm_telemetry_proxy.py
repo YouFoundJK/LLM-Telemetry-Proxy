@@ -244,40 +244,46 @@ def log_call(model, endpoint, input_tokens, output_tokens,
              ttfb_ms, total_ms, tokens_per_s,
              server_running, server_tok_s, server_model,
              status_code, error, call_type='chat'):
-    model = resolve_canonical_model(model)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("""
-        INSERT INTO api_calls
-            (timestamp, model, endpoint, input_tokens, output_tokens,
-             ttfb_ms, total_ms, tokens_per_s,
-             server_running, server_tok_s, server_model,
-             status_code, error, call_type, calls_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    """, (
-        datetime.now(timezone.utc).isoformat(),
-        model, endpoint, input_tokens, output_tokens,
-        ttfb_ms, total_ms, tokens_per_s,
-        server_running, server_tok_s, server_model,
-        status_code, error, call_type,
-    ))
-    conn.commit()
-    conn.close()
+    try:
+        model = resolve_canonical_model(model)
+        conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+        conn.execute("""
+            INSERT INTO api_calls
+                (timestamp, model, endpoint, input_tokens, output_tokens,
+                 ttfb_ms, total_ms, tokens_per_s,
+                 server_running, server_tok_s, server_model,
+                 status_code, error, call_type, calls_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            model, endpoint, input_tokens, output_tokens,
+            ttfb_ms, total_ms, tokens_per_s,
+            server_running, server_tok_s, server_model,
+            status_code, error, call_type,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[telemetry] log_call error: {e}", file=sys.stderr)
 
 
 def log_proxy_call(endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms):
     """Log EVERY request through the proxy — even ones that fail before logging to api_calls."""
-    model = resolve_canonical_model(model)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("""
-        INSERT INTO proxy_calls
-            (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    """, (
-        datetime.now(timezone.utc).isoformat(),
-        endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
-    ))
-    conn.commit()
-    conn.close()
+    try:
+        model = resolve_canonical_model(model)
+        conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+        conn.execute("""
+            INSERT INTO proxy_calls
+                (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[telemetry] log_proxy_call error: {e}", file=sys.stderr)
 
 
 def classify_endpoint(path):
@@ -318,19 +324,23 @@ async def fetch_server_load(model_hint=None):
                             raw = await resp.json()
                     data = {}
                     for m in raw:
+                        if not isinstance(m, dict):
+                            continue
                         name = m.get("model_name") or m.get("container", "?")
-                        latest = m.get("latest", {})
+                        latest = m.get("latest")
+                        if not isinstance(latest, dict):
+                            latest = {}
                         if isinstance(latest.get("num_requests_running"), dict):
                             running, tok_s = 0, 0.0
                         else:
-                            running = latest.get("num_requests_running", 0)
-                            tok_s = latest.get("generation_tokens_rate", 0.0)
+                            running = latest.get("num_requests_running", 0) or 0
+                            tok_s = latest.get("generation_tokens_rate", 0.0) or 0.0
                         data[name] = {
                             "status": m.get("status", "unknown"),
                             "running": running,
                             "tok_s": tok_s,
-                            "kv_cache": latest.get("kv_cache_usage_perc", 0),
-                            "waiting": latest.get("num_requests_waiting", 0),
+                            "kv_cache": latest.get("kv_cache_usage_perc", 0) or 0,
+                            "waiting": latest.get("num_requests_waiting", 0) or 0,
                         }
                     _load_cache["data"] = data
                     _load_cache["ts"] = time.time()
@@ -427,9 +437,10 @@ def make_raw_payload_record(
             "payload": payload_obj,
             "messages": payload_obj.get("messages") if isinstance(payload_obj, dict) else None,
             "prompt": payload_obj.get("prompt") if isinstance(payload_obj, dict) else None,
+            "input": payload_obj.get("input") if isinstance(payload_obj, dict) else None,
             "parameters": {
                 k: v for k, v in payload_obj.items()
-                if k not in ("messages", "prompt")
+                if k not in ("messages", "prompt", "input")
             } if isinstance(payload_obj, dict) else {},
         },
         "response": {
@@ -570,22 +581,27 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     if line.startswith("data: ") and line.strip() != "data: [DONE]":
                                         try:
                                             chunk_data = json.loads(line[6:])
-                                            if chunk_data.get("usage"):
-                                                collected_usage = chunk_data["usage"]
-                                            for choice in chunk_data.get("choices", []):
-                                                delta = choice.get("delta", {})
-                                                if delta.get("content"):
-                                                    content_chars += len(delta["content"])
-                                                    collected_content += delta["content"]
-                                                if delta.get("reasoning_content"):
-                                                    content_chars += len(delta["reasoning_content"])
-                                                    collected_reasoning += delta["reasoning_content"]
-                                            if chunk_data.get("error"):
-                                                err_obj = chunk_data["error"]
-                                                if isinstance(err_obj, dict):
-                                                    error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
-                                                else:
-                                                    error = str(err_obj)
+                                            if isinstance(chunk_data, dict):
+                                                if chunk_data.get("usage") and isinstance(chunk_data["usage"], dict):
+                                                    collected_usage = chunk_data["usage"]
+                                                choices = chunk_data.get("choices")
+                                                if isinstance(choices, list):
+                                                    for choice in choices:
+                                                        if isinstance(choice, dict):
+                                                            delta = choice.get("delta")
+                                                            if isinstance(delta, dict):
+                                                                if delta.get("content"):
+                                                                    content_chars += len(delta["content"])
+                                                                    collected_content += delta["content"]
+                                                                if delta.get("reasoning_content"):
+                                                                    content_chars += len(delta["reasoning_content"])
+                                                                    collected_reasoning += delta["reasoning_content"]
+                                                if chunk_data.get("error"):
+                                                    err_obj = chunk_data["error"]
+                                                    if isinstance(err_obj, dict):
+                                                        error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
+                                                    else:
+                                                        error = str(err_obj)
                                         except json.JSONDecodeError:
                                             pass
                             except Exception:
@@ -593,192 +609,189 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
                         await response.write_eof()
 
-                        if status_code and (status_code < 200 or status_code >= 300) and not error:
-                            error = f"HTTP {status_code}"
+                        # Telemetry post-processing (isolated: errors here will never affect the client)
+                        try:
+                            if status_code and (status_code < 200 or status_code >= 300) and not error:
+                                error = f"HTTP {status_code}"
 
-                        if collected_usage:
-                            input_tokens = collected_usage.get("prompt_tokens", input_tokens)
-                            output_tokens = collected_usage.get("completion_tokens")
-                            reasoning_tokens = (
-                                collected_usage.get("completion_tokens_details", {}).get("reasoning_tokens")
-                                or collected_usage.get("reasoning_tokens")
+                            if collected_usage and isinstance(collected_usage, dict):
+                                input_tokens = collected_usage.get("prompt_tokens", input_tokens)
+                                output_tokens = collected_usage.get("completion_tokens")
+                                details = collected_usage.get("completion_tokens_details")
+                                if isinstance(details, dict):
+                                    reasoning_tokens = details.get("reasoning_tokens")
+                                else:
+                                    reasoning_tokens = collected_usage.get("reasoning_tokens")
+                                if not output_tokens or output_tokens == 0:
+                                    output_tokens = max(1, content_chars // 4)
+
+                            # Record token budget
+                            try:
+                                _token_budget.record_and_check(input_tokens or 0, output_tokens or 0)
+                            except Exception as b_err:
+                                print(f"[telemetry] token budget record error: {b_err}", file=sys.stderr)
+
+                            t_total = (time.monotonic() - t_start) * 1000
+                            if ttfb_ms is None:
+                                ttfb_ms = t_total
+                            if output_tokens and t_total > 0:
+                                tokens_per_s = output_tokens / (t_total / 1000)
+
+                            log_call(model, path, input_tokens, output_tokens,
+                                     ttfb_ms, t_total, tokens_per_s,
+                                     server_running, server_tok_s, server_model,
+                                     status_code, error, call_type)
+                            logged = True
+                            log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
+
+                            raw_record = make_raw_payload_record(
+                                req_id=req_id,
+                                path=path,
+                                method=method,
+                                call_type=call_type,
+                                model=model,
+                                client_ip=request.remote,
+                                req_headers=dict(request.headers),
+                                payload_obj=payload,
+                                status_code=status_code,
+                                resp_headers=dict(upstream_resp.headers),
+                                is_stream=True,
+                                ttfb_ms=ttfb_ms,
+                                total_ms=t_total,
+                                tokens_per_s=tokens_per_s,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                reasoning_tokens=reasoning_tokens,
+                                content_text=collected_content,
+                                reasoning_text=collected_reasoning,
+                                tool_calls=collected_tool_calls if collected_tool_calls else None,
+                                raw_resp_json=None,
+                                error=error,
                             )
-                            if not output_tokens or output_tokens == 0:
-                                output_tokens = max(1, content_chars // 4)
+                            if _raw_logging_enabled:
+                                append_raw_payload(raw_record)
+                            if _raw_subscribers:
+                                asyncio.create_task(broadcast_raw_payload(raw_record))
+                        except Exception as tel_err:
+                            print(f"[telemetry] streaming telemetry error: {tel_err}", file=sys.stderr)
 
-                        # Check token budget after getting usage data
-                        allowed, budget_status = _token_budget.record_and_check(
-                            input_tokens or 0, output_tokens or 0
-                        )
-
-                        # Add budget status to response headers for all responses
-                        budget_headers = {
-                            "X-Token-Budget-Used": str(budget_status["total_used"]),
-                            "X-Token-Budget-Remaining": str(budget_status["remaining"]),
-                            "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
-                            "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
-                        }
-
-                        t_total = (time.monotonic() - t_start) * 1000
-                        if ttfb_ms is None:
-                            ttfb_ms = t_total
-                        if output_tokens and t_total > 0:
-                            tokens_per_s = output_tokens / (t_total / 1000)
-
-                        if not allowed:
-                            error_msg = (
-                                f"🚫 DAILY TOKEN BUDGET EXCEEDED\n\n"
-                                f"Used: {budget_status['total_used']:,} tokens "
-                                f"({budget_status['percentage_used']:.1f}% of daily limit)\n"
-                                f"Limit: {budget_status['daily_limit']:,} tokens/day\n"
-                                f"Remaining: {budget_status['remaining']:,} tokens\n\n"
-                                f"Token cap enforced by proxy. Requests blocked until 24h window rolls."
-                            )
-                            error = "token_budget_exceeded"
-
-                        log_call(model, path, input_tokens, output_tokens,
-                                 ttfb_ms, t_total, tokens_per_s,
-                                 server_running, server_tok_s, server_model,
-                                 status_code, error, call_type)
-                        logged = True
-                        log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
-
-                        # Raw Payload Record for live inspection & file dump
-                        raw_record = make_raw_payload_record(
-                            req_id=req_id,
-                            path=path,
-                            method=method,
-                            call_type=call_type,
-                            model=model,
-                            client_ip=request.remote,
-                            req_headers=dict(request.headers),
-                            payload_obj=payload,
-                            status_code=status_code,
-                            resp_headers=dict(upstream_resp.headers),
-                            is_stream=True,
-                            ttfb_ms=ttfb_ms,
-                            total_ms=t_total,
-                            tokens_per_s=tokens_per_s,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            reasoning_tokens=reasoning_tokens,
-                            content_text=collected_content,
-                            reasoning_text=collected_reasoning,
-                            tool_calls=collected_tool_calls if collected_tool_calls else None,
-                            raw_resp_json=None,
-                            error=error,
-                        )
-                        if _raw_logging_enabled:
-                            append_raw_payload(raw_record)
-                        if _raw_subscribers:
-                            asyncio.create_task(broadcast_raw_payload(raw_record))
-
-                        # Add budget headers to successful response
-                        for key, value in budget_headers.items():
-                            response.headers[key] = value
                         return response
 
                     else:
                         resp_body = await upstream_resp.read()
                         t_first_byte = time.monotonic()
                         ttfb_ms = (t_first_byte - t_start) * 1000
-
-                        resp_data = None
-                        resp_text = None
-                        resp_reasoning = None
-                        resp_tool_calls = None
-                        try:
-                            resp_data = json.loads(resp_body)
-                            if resp_data.get("usage"):
-                                u = resp_data["usage"]
-                                input_tokens = u.get("prompt_tokens", input_tokens)
-                                output_tokens = u.get("completion_tokens")
-                                reasoning_tokens = (
-                                    u.get("completion_tokens_details", {}).get("reasoning_tokens")
-                                    or u.get("reasoning_tokens")
-                                )
-                            choices = resp_data.get("choices", [])
-                            if choices and isinstance(choices, list):
-                                msg = choices[0].get("message", {})
-                                resp_text = msg.get("content")
-                                resp_reasoning = msg.get("reasoning_content")
-                                resp_tool_calls = msg.get("tool_calls")
-                                if not resp_text and "text" in choices[0]:
-                                    resp_text = choices[0].get("text")
-                            if resp_data.get("error"):
-                                err_obj = resp_data["error"]
-                                if isinstance(err_obj, dict):
-                                    error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
-                                else:
-                                    error = str(err_obj)
-                            elif resp_data.get("message") and status_code and (status_code < 200 or status_code >= 300):
-                                error = str(resp_data["message"])
-                            elif resp_data.get("detail") and status_code and (status_code < 200 or status_code >= 300):
-                                error = str(resp_data["detail"])
-                        except (json.JSONDecodeError, KeyError):
-                            if status_code and (status_code < 200 or status_code >= 300):
-                                error = resp_body.decode("utf-8", errors="replace")[:200].strip()
-
-                        if not error and status_code and (status_code < 200 or status_code >= 300):
-                            error = f"HTTP {status_code}"
-
-                        # Check token budget after getting usage data
-                        allowed, budget_status = _token_budget.record_and_check(
-                            input_tokens or 0, output_tokens or 0
-                        )
-
-                        # Add budget status to response headers for all responses
-                        budget_headers = {
-                            "X-Token-Budget-Used": str(budget_status["total_used"]),
-                            "X-Token-Budget-Remaining": str(budget_status["remaining"]),
-                            "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
-                            "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
-                        }
-
                         t_total = (time.monotonic() - t_start) * 1000
-                        if ttfb_ms is None:
-                            ttfb_ms = t_total
-                        if output_tokens and t_total > 0:
-                            tokens_per_s = output_tokens / (t_total / 1000)
 
-                        if not allowed:
-                            error = "token_budget_exceeded"
+                        resp_headers = {}
+                        for k, v in upstream_resp.headers.items():
+                            if k.lower() not in ("content-length", "content-encoding", "transfer-encoding"):
+                                resp_headers[k] = v
 
-                        log_call(model, path, input_tokens, output_tokens,
-                                 ttfb_ms, t_total, tokens_per_s,
-                                 server_running, server_tok_s, server_model,
-                                 status_code, error, call_type)
-                        logged = True
-                        log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
+                        # Telemetry post-processing (isolated: errors here will never affect the client response)
+                        budget_headers = {}
+                        allowed = True
+                        try:
+                            resp_data = None
+                            resp_text = None
+                            resp_reasoning = None
+                            resp_tool_calls = None
+                            try:
+                                resp_data = json.loads(resp_body)
+                                if isinstance(resp_data, dict):
+                                    u = resp_data.get("usage")
+                                    if isinstance(u, dict):
+                                        input_tokens = u.get("prompt_tokens", input_tokens)
+                                        output_tokens = u.get("completion_tokens")
+                                        details = u.get("completion_tokens_details")
+                                        if isinstance(details, dict):
+                                            reasoning_tokens = details.get("reasoning_tokens")
+                                        else:
+                                            reasoning_tokens = u.get("reasoning_tokens")
+                                    choices = resp_data.get("choices")
+                                    if isinstance(choices, list) and len(choices) > 0 and isinstance(choices[0], dict):
+                                        msg = choices[0].get("message")
+                                        if isinstance(msg, dict):
+                                            resp_text = msg.get("content")
+                                            resp_reasoning = msg.get("reasoning_content")
+                                            resp_tool_calls = msg.get("tool_calls")
+                                        if not resp_text and "text" in choices[0]:
+                                            resp_text = choices[0].get("text")
+                                    if resp_data.get("error"):
+                                        err_obj = resp_data["error"]
+                                        if isinstance(err_obj, dict):
+                                            error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
+                                        else:
+                                            error = str(err_obj)
+                                    elif resp_data.get("message") and status_code and (status_code < 200 or status_code >= 300):
+                                        error = str(resp_data["message"])
+                                    elif resp_data.get("detail") and status_code and (status_code < 200 or status_code >= 300):
+                                        error = str(resp_data["detail"])
+                            except Exception:
+                                if status_code and (status_code < 200 or status_code >= 300):
+                                    error = resp_body.decode("utf-8", errors="replace")[:200].strip()
 
-                        raw_record = make_raw_payload_record(
-                            req_id=req_id,
-                            path=path,
-                            method=method,
-                            call_type=call_type,
-                            model=model,
-                            client_ip=request.remote,
-                            req_headers=dict(request.headers),
-                            payload_obj=payload,
-                            status_code=status_code,
-                            resp_headers=dict(upstream_resp.headers),
-                            is_stream=False,
-                            ttfb_ms=ttfb_ms,
-                            total_ms=t_total,
-                            tokens_per_s=tokens_per_s,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            reasoning_tokens=reasoning_tokens,
-                            content_text=resp_text,
-                            reasoning_text=resp_reasoning,
-                            tool_calls=resp_tool_calls,
-                            raw_resp_json=resp_data,
-                            error=error,
-                        )
-                        if _raw_logging_enabled:
-                            append_raw_payload(raw_record)
-                        if _raw_subscribers:
-                            asyncio.create_task(broadcast_raw_payload(raw_record))
+                            if not error and status_code and (status_code < 200 or status_code >= 300):
+                                error = f"HTTP {status_code}"
+
+                            # Check token budget
+                            try:
+                                allowed, budget_status = _token_budget.record_and_check(
+                                    input_tokens or 0, output_tokens or 0
+                                )
+                                budget_headers = {
+                                    "X-Token-Budget-Used": str(budget_status["total_used"]),
+                                    "X-Token-Budget-Remaining": str(budget_status["remaining"]),
+                                    "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
+                                    "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
+                                }
+                                resp_headers.update(budget_headers)
+                            except Exception as b_err:
+                                print(f"[telemetry] token budget check error: {b_err}", file=sys.stderr)
+
+                            if output_tokens and t_total > 0:
+                                tokens_per_s = output_tokens / (t_total / 1000)
+
+                            if not allowed:
+                                error = "token_budget_exceeded"
+
+                            log_call(model, path, input_tokens, output_tokens,
+                                     ttfb_ms, t_total, tokens_per_s,
+                                     server_running, server_tok_s, server_model,
+                                     status_code, error, call_type)
+                            logged = True
+                            log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
+
+                            raw_record = make_raw_payload_record(
+                                req_id=req_id,
+                                path=path,
+                                method=method,
+                                call_type=call_type,
+                                model=model,
+                                client_ip=request.remote,
+                                req_headers=dict(request.headers),
+                                payload_obj=payload,
+                                status_code=status_code,
+                                resp_headers=dict(upstream_resp.headers),
+                                is_stream=False,
+                                ttfb_ms=ttfb_ms,
+                                total_ms=t_total,
+                                tokens_per_s=tokens_per_s,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                reasoning_tokens=reasoning_tokens,
+                                content_text=resp_text,
+                                reasoning_text=resp_reasoning,
+                                tool_calls=resp_tool_calls,
+                                raw_resp_json=resp_data,
+                                error=error,
+                            )
+                            if _raw_logging_enabled:
+                                append_raw_payload(raw_record)
+                            if _raw_subscribers:
+                                asyncio.create_task(broadcast_raw_payload(raw_record))
+                        except Exception as tel_err:
+                            print(f"[telemetry] batch telemetry error: {tel_err}", file=sys.stderr)
 
                         if not allowed:
                             error_msg = (
@@ -798,52 +811,35 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         return web.Response(
                             status=upstream_resp.status,
                             body=resp_body,
+                            headers=resp_headers,
                             content_type=upstream_resp.content_type,
                         )
 
     except asyncio.TimeoutError:
         error = "timeout"
         t_total = (time.monotonic() - t_start) * 1000
-        log_call(model, path, input_tokens, output_tokens,
-                 ttfb_ms, t_total, None,
-                 server_running, server_tok_s, server_model,
-                 None, error, call_type)
-        log_proxy_call(path, method, call_type, model, None, error, 1 if logged else 0, ttfb_ms, t_total)
-
-        raw_record = make_raw_payload_record(
-            req_id=req_id, path=path, method=method, call_type=call_type, model=model,
-            client_ip=request.remote, req_headers=dict(request.headers), payload_obj=payload,
-            status_code=504, resp_headers={}, is_stream=False, ttfb_ms=ttfb_ms, total_ms=t_total,
-            tokens_per_s=None, input_tokens=input_tokens, output_tokens=None, reasoning_tokens=None,
-            content_text=None, reasoning_text=None, tool_calls=None, raw_resp_json=None, error=error
-        )
-        if _raw_logging_enabled:
-            append_raw_payload(raw_record)
-        if _raw_subscribers:
-            asyncio.create_task(broadcast_raw_payload(raw_record))
+        try:
+            log_call(model, path, input_tokens, output_tokens,
+                     ttfb_ms, t_total, None,
+                     server_running, server_tok_s, server_model,
+                     None, error, call_type)
+            log_proxy_call(path, method, call_type, model, None, error, 1 if logged else 0, ttfb_ms, t_total)
+        except Exception:
+            pass
 
         return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
 
     except Exception as e:
         error = str(e)[:200]
         t_total = (time.monotonic() - t_start) * 1000
-        log_call(model, path, input_tokens, output_tokens,
-                 ttfb_ms, t_total, None,
-                 server_running, server_tok_s, server_model,
-                 status_code, error, call_type)
-        log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total)
-
-        raw_record = make_raw_payload_record(
-            req_id=req_id, path=path, method=method, call_type=call_type, model=model,
-            client_ip=request.remote, req_headers=dict(request.headers), payload_obj=payload,
-            status_code=status_code or 502, resp_headers={}, is_stream=False, ttfb_ms=ttfb_ms, total_ms=t_total,
-            tokens_per_s=None, input_tokens=input_tokens, output_tokens=None, reasoning_tokens=None,
-            content_text=None, reasoning_text=None, tool_calls=None, raw_resp_json=None, error=error
-        )
-        if _raw_logging_enabled:
-            append_raw_payload(raw_record)
-        if _raw_subscribers:
-            asyncio.create_task(broadcast_raw_payload(raw_record))
+        try:
+            log_call(model, path, input_tokens, output_tokens,
+                     ttfb_ms, t_total, None,
+                     server_running, server_tok_s, server_model,
+                     status_code, error, call_type)
+            log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total)
+        except Exception:
+            pass
 
         return web.json_response({"error": {"message": str(e)}}, status=502)
 
@@ -872,17 +868,30 @@ async def _simple_forward(request, path, method):
                     t_total = (time.monotonic() - t_start) * 1000
                     if status_code and (status_code < 200 or status_code >= 300):
                         error = f"HTTP {status_code}"
-                    # Still count these in proxy_calls for cross-checking
-                    log_proxy_call(path, method, classify_endpoint(path), None, status_code, error, 0, None, t_total)
+                    
+                    try:
+                        log_proxy_call(path, method, classify_endpoint(path), None, status_code, error, 0, None, t_total)
+                    except Exception as tel_err:
+                        print(f"[telemetry] _simple_forward log error: {tel_err}", file=sys.stderr)
+
                     return web.Response(
                         status=upstream_resp.status,
                         body=body,
                         content_type=upstream_resp.content_type,
                     )
+    except asyncio.TimeoutError:
+        try:
+            log_proxy_call(path, method, classify_endpoint(path), None, 504, "timeout", 0, None, (time.monotonic() - t_start) * 1000)
+        except Exception:
+            pass
+        return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
     except Exception as e:
         error = str(e)[:200]
         t_total = (time.monotonic() - t_start) * 1000
-        log_proxy_call(path, method, classify_endpoint(path), None, None, error, 0, None, t_total)
+        try:
+            log_proxy_call(path, method, classify_endpoint(path), None, None, error, 0, None, t_total)
+        except Exception:
+            pass
         return web.json_response({"error": {"message": str(e)}}, status=502)
 
 

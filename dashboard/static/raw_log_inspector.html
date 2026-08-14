@@ -242,7 +242,6 @@
       background: rgba(22, 27, 34, 0.75);
       border: 1px solid rgba(48, 54, 61, 0.7);
       border-radius: 10px;
-      overflow: hidden;
       transition: all 0.2s ease;
     }
 
@@ -259,8 +258,15 @@
     }
 
     .payload-card-header {
+      position: sticky;
+      top: var(--inspector-header-height, 53px);
+      z-index: 20;
       padding: 12px 18px;
-      background: rgba(13, 17, 23, 0.6);
+      background: rgba(13, 17, 23, 0.95);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-top-left-radius: 8px;
+      border-top-right-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -268,10 +274,11 @@
       user-select: none;
       flex-wrap: wrap;
       gap: 10px;
+      transition: background 0.15s ease, box-shadow 0.15s ease;
     }
 
     .payload-card-header:hover {
-      background: rgba(22, 27, 34, 0.9);
+      background: rgba(22, 27, 34, 0.98);
     }
 
     .card-title-left {
@@ -354,6 +361,8 @@
       gap: 16px;
       border-top: 1px solid rgba(48, 54, 61, 0.6);
       background: rgba(13, 17, 23, 0.4);
+      border-bottom-left-radius: 9px;
+      border-bottom-right-radius: 9px;
     }
 
     /* Subsections */
@@ -416,6 +425,14 @@
     .msg-tool {
       background: rgba(210, 153, 34, 0.06);
       border-color: rgba(210, 153, 34, 0.25);
+    }
+
+    .msg-card-collapsible {
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    .msg-card-collapsible .msg-header:hover {
+      opacity: 0.9;
     }
 
     .msg-header {
@@ -695,11 +712,15 @@
     <!-- Live Event Stream Feed -->
     <div id="payloadFeed" class="payload-feed">
       <div class="empty-state" id="initialEmptyState">
-        <h3>Awaiting Live Telemetry Payload Logs</h3>
-        <p>Ensure Raw Payload Logging is toggled <strong>ON</strong>. As requests pass through the proxy, complete incoming & outgoing JSON schemas will stream here in real-time.</p>
-        <button id="emptyStateEnableBtn" class="btn-mini btn-mini-primary" style="padding: 6px 16px; font-size: 13px;">
-          ⚡ Turn ON Raw Payload Logging
-        </button>
+        <div style="font-size: 32px; margin-bottom: 10px;">📡</div>
+        <h3 style="color: #3fb950; margin-bottom: 8px;">Live Payload Logging is Active</h3>
+        <p style="color: #8b949e; max-width: 540px; margin: 0 auto 16px; line-height: 1.6;">
+          The proxy is actively recording incoming & outgoing LLM payloads. Send requests through the proxy (e.g. <code>/v1/chat/completions</code>) to stream payloads here live.
+        </p>
+        <div style="display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; background: rgba(63, 185, 80, 0.1); border: 1px solid rgba(63, 185, 80, 0.3); border-radius: 20px; font-size: 12px; color: #3fb950;">
+          <span class="live-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #3fb950; display: inline-block; box-shadow: 0 0 8px rgba(63, 185, 80, 0.8);"></span>
+          <span>Awaiting incoming requests...</span>
+        </div>
       </div>
     </div>
 
