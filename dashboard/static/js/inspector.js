@@ -705,21 +705,47 @@
   function buildMessagesSection(record) {
     const messages = record.request?.messages || [];
     const prompt = record.request?.prompt;
+    const input = record.request?.input;
 
-    if (!messages.length && !prompt) return null;
+    if (!messages.length && !prompt && !input) return null;
 
     const container = document.createElement('div');
     container.className = 'foldable-section';
 
     const header = document.createElement('div');
     header.className = 'foldable-header';
+    const totalCount = messages.length || (Array.isArray(input) ? input.length : 1);
     header.innerHTML = `
-      <span>💬 Incoming Prompt & Messages (${messages.length || 1})</span>
+      <span>💬 Incoming Prompt & Input (${totalCount})</span>
       <span class="fold-icon">▼</span>
     `;
 
     const content = document.createElement('div');
     content.className = 'foldable-content';
+
+    if (input) {
+      const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
+      const isArr = Array.isArray(input);
+      const inputLabel = isArr ? `Embedding Input (${input.length} items)` : 'Embedding Input';
+      const pCard = document.createElement('div');
+      pCard.className = 'msg-card msg-user';
+      pCard.innerHTML = `
+        <div class="msg-header">
+          <span style="color: #58a6ff; font-weight: 700;">${escapeHtml(inputLabel)}</span>
+          <button class="btn-mini btn-copy-input">Copy</button>
+        </div>
+        <div class="msg-text">${escapeHtml(inputStr)}</div>
+      `;
+      pCard.querySelector('.btn-copy-input')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(inputStr);
+        const btn = e.target;
+        const orig = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = orig, 1500);
+      });
+      content.appendChild(pCard);
+    }
 
     if (prompt) {
       const pCard = document.createElement('div');
@@ -727,10 +753,18 @@
       pCard.innerHTML = `
         <div class="msg-header">
           <span style="color: #58a6ff;">Prompt</span>
-          <button class="btn-mini" onclick="navigator.clipboard.writeText(this.nextElementSibling?.textContent || '')">Copy</button>
+          <button class="btn-mini btn-copy-prompt">Copy</button>
         </div>
         <div class="msg-text">${escapeHtml(String(prompt))}</div>
       `;
+      pCard.querySelector('.btn-copy-prompt')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(String(prompt));
+        const btn = e.target;
+        const orig = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = orig, 1500);
+      });
       content.appendChild(pCard);
     }
 
@@ -895,18 +929,21 @@
     const text = record.response?.content?.text;
     const reasoning = record.response?.content?.reasoning_content;
     const toolCalls = record.response?.content?.tool_calls;
+    const rawData = record.response?.raw_json?.data;
+    const isEmbeddingResp = Array.isArray(rawData) && rawData.length > 0 && Boolean(rawData[0]?.embedding);
     const isErr = Boolean(record.response?.error || (record.response?.status_code && record.response.status_code >= 400));
     const error = record.response?.error || (isErr && record.response?.status_code ? `HTTP ${record.response.status_code}` : null);
 
-    if (!text && !reasoning && !toolCalls && !error) return null;
+    if (!text && !reasoning && !toolCalls && !error && !isEmbeddingResp) return null;
 
     const container = document.createElement('div');
     container.className = 'foldable-section';
 
     const header = document.createElement('div');
     header.className = 'foldable-header';
+    const sectionTitle = isEmbeddingResp ? '✨ Generated Embeddings & Output' : '✨ Generated Response & Thinking Process';
     header.innerHTML = `
-      <span>✨ Generated Response & Thinking Process</span>
+      <span>${escapeHtml(sectionTitle)}</span>
       <span class="fold-icon">▼</span>
     `;
 
@@ -1026,6 +1063,51 @@
       });
 
       content.appendChild(toolCard);
+    }
+
+    // Generated Embeddings Output (Collapsed by default so inspector stays concise)
+    if (isEmbeddingResp) {
+      const embCard = document.createElement('div');
+      embCard.className = 'msg-card msg-assistant msg-card-collapsible';
+      const vectorCount = rawData.length;
+      const dim = Array.isArray(rawData[0]?.embedding) ? rawData[0].embedding.length : '?';
+      const embLabel = `Generated Embeddings (${vectorCount} vector${vectorCount > 1 ? 's' : ''}, dimension: ${dim})`;
+      const fullJson = JSON.stringify(rawData, null, 2);
+
+      embCard.innerHTML = `
+        <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
+          <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
+            <span style="color: #3fb950; font-weight: 700; flex-shrink: 0;">🧬 ${escapeHtml(embLabel)}</span>
+            <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${fullJson.length.toLocaleString()} chars)</span>
+          </div>
+          <button class="btn-mini btn-copy-emb" style="flex-shrink: 0; margin-left: 8px;">Copy Vectors</button>
+        </div>
+        <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(fullJson)}</div>
+      `;
+
+      const eHeader = embCard.querySelector('.msg-header');
+      const eText = embCard.querySelector('.msg-text');
+      const eFoldIcon = embCard.querySelector('.msg-fold-icon');
+
+      eHeader.addEventListener('click', (e) => {
+        if (e.target.closest('.btn-copy-emb')) return;
+        const isHidden = eText.style.display === 'none';
+        eText.style.display = isHidden ? 'block' : 'none';
+        eFoldIcon.textContent = isHidden ? '▼' : '▶';
+        eHeader.style.marginBottom = isHidden ? '6px' : '0';
+      });
+
+      embCard.querySelector('.btn-copy-emb')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(fullJson);
+        const btn = e.target;
+        const orig = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = orig, 1500);
+      });
+
+      content.appendChild(embCard);
     }
 
     header.addEventListener('click', () => {

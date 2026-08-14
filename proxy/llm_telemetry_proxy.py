@@ -808,12 +808,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 headers=budget_headers
                             )
 
-                        return web.Response(
-                            status=upstream_resp.status,
-                            body=resp_body,
-                            headers=resp_headers,
-                            content_type=upstream_resp.content_type,
-                        )
+                        try:
+                            return web.Response(
+                                status=upstream_resp.status,
+                                body=resp_body,
+                                headers=resp_headers,
+                            )
+                        except Exception:
+                            return web.Response(
+                                status=upstream_resp.status,
+                                body=resp_body,
+                            )
 
     except asyncio.TimeoutError:
         error = "timeout"
@@ -874,11 +879,25 @@ async def _simple_forward(request, path, method):
                     except Exception as tel_err:
                         print(f"[telemetry] _simple_forward log error: {tel_err}", file=sys.stderr)
 
-                    return web.Response(
-                        status=upstream_resp.status,
-                        body=body,
-                        content_type=upstream_resp.content_type,
-                    )
+                    simple_headers = {}
+                    for k, v in upstream_resp.headers.items():
+                        if k.lower() not in (
+                            "content-length", "content-encoding", "transfer-encoding",
+                            "connection", "keep-alive", "upgrade"
+                        ):
+                            simple_headers[k] = v
+
+                    try:
+                        return web.Response(
+                            status=upstream_resp.status,
+                            body=body,
+                            headers=simple_headers,
+                        )
+                    except Exception:
+                        return web.Response(
+                            status=upstream_resp.status,
+                            body=body,
+                        )
     except asyncio.TimeoutError:
         try:
             log_proxy_call(path, method, classify_endpoint(path), None, 504, "timeout", 0, None, (time.monotonic() - t_start) * 1000)
