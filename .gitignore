@@ -4,12 +4,28 @@ __pycache__/
 *$py.class
 .venv/
 env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# SQLite Database & Backups
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.db.bak
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/*.db.bak
+
 # Environment / Local settings
 .env
 .env.local
+.env.*.local
 *.log
-
 
 # Dashboard & Proxy runtime files
 *.pid
@@ -20,3 +36,18 @@ data/.*.pid
 data/.*.port
 data/token_budget.json
 data/*.tmp
+
+# Raw Payload Logger
+logger/
+*.jsonl
+
+# MkDocs build output
+site/
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -505,13 +505,17 @@ def make_raw_payload_record(
     error: str,
 ) -> dict:
     safe_req_headers = {}
+    sensitive_keys = {"authorization", "api-key", "x-api-key", "x-auth-token", "proxy-authorization"}
     for k, v in (req_headers or {}).items():
-        if k.lower() == "authorization" and isinstance(v, str) and v.startswith("Bearer "):
-            token = v[7:]
-            if len(token) > 10:
+        k_lower = str(k).lower()
+        if k_lower in sensitive_keys and isinstance(v, str):
+            if v.startswith("Bearer ") and len(v) > 17:
+                token = v[7:]
                 masked = f"Bearer {token[:4]}...{token[-4:]}"
+            elif len(v) > 10:
+                masked = f"{v[:4]}...{v[-4:]}"
             else:
-                masked = "Bearer ***"
+                masked = "***"
             safe_req_headers[k] = masked
         else:
             safe_req_headers[k] = v

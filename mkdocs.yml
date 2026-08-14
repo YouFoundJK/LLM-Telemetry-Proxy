@@ -1,0 +1,62 @@
+site_name: LLM Telemetry Proxy & Dashboard
+site_description: High-performance reverse proxy and real-time observability suite for LLM APIs.
+site_author: LLM Telemetry Proxy Team
+repo_url: https://github.com/your-org/llm-proxy
+repo_name: llm-proxy
+
+theme:
+  name: material
+  language: en
+  palette:
+    # Palette toggle for automatic/light/dark mode
+    - scheme: default
+      primary: indigo
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+
+nav:
+  - Overview: index.md
+  - Getting Started: getting-started.md
+  - Architecture & Design: architecture.md
+  - Proxy Gateway: proxy.md
+  - Analytics Dashboard: dashboard.md
+  - API Reference: api-reference.md
+  - Maintenance & Operations: maintenance.md
