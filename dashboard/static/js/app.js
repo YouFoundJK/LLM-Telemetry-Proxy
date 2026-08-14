@@ -32,6 +32,8 @@ const App = (() => {
     
     // Proxy Gateway State
     proxyStatus: null,
+    runningProxyConfig: null,
+    isProxyStatusLoading: false,
     healthData: null,
     
     // Dropdown Instance
@@ -529,6 +531,12 @@ const App = (() => {
       tabId = 'controlPanelTab';
     }
 
+    const previousTab = State.activeTab;
+    // If moving away from controlPanelTab without restarting, discard unapplied edits
+    if (previousTab === 'controlPanelTab' && tabId !== 'controlPanelTab') {
+      resetProxyConfigInputs();
+    }
+
     const btn = document.querySelector(`.tab-btn[data-tab="${tabId}"]`);
     if (!btn) return;
 
@@ -558,6 +566,7 @@ const App = (() => {
       loadHealth();
       loadProxyStatus();
       loadProxyLogs();
+      loadRawLogStatus();
       loadCrossCheck();
     }
   }
@@ -1187,18 +1196,183 @@ const App = (() => {
     }
   }
 
+  // Upstream Target LocalStorage Cache (stores only what the user has actually used)
+  const UPSTREAM_HISTORY_KEY = 'llm_proxy_user_upstream_history';
+
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function normalizeUpstreamUrl(url) {
+    if (!url || typeof url !== 'string') return '';
+    return url.trim().replace(/\/+$/, '');
+  }
+
+  function getUpstreamHistory() {
+    try {
+      const stored = localStorage.getItem(UPSTREAM_HISTORY_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          const unique = [];
+          parsed.forEach(item => {
+            const norm = normalizeUpstreamUrl(item);
+            if (norm && !unique.includes(norm)) {
+              unique.push(norm);
+            }
+          });
+          return unique;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to parse upstream history from localStorage', e);
+    }
+    return [];
+  }
+
+  function saveUpstreamToHistory(url) {
+    const normalized = normalizeUpstreamUrl(url);
+    if (!normalized) return;
+    try {
+      const current = getUpstreamHistory();
+      // If already at the top of the history list, avoid redundant write and render
+      if (current.length > 0 && current[0] === normalized) {
+        return;
+      }
+      const filtered = current.filter(item => item !== normalized);
+      filtered.unshift(normalized);
+      const limited = filtered.slice(0, 30);
+      localStorage.setItem(UPSTREAM_HISTORY_KEY, JSON.stringify(limited));
+      renderUpstreamHistoryOptions();
+    } catch (e) {
+      console.warn('Failed to save upstream history to localStorage', e);
+    }
+  }
+
+  function renderUpstreamHistoryOptions() {
+    const list = getUpstreamHistory();
+    const datalist = document.getElementById('proxyUpstreamDatalist');
+    const select = document.getElementById('proxyUpstreamQuickSelect');
+    const countEl = document.getElementById('proxyUpstreamHistoryCount');
+    
+    if (datalist) {
+      datalist.innerHTML = list.map(u => `<option value="${escapeHtml(u)}"></option>`).join('');
+    }
+    
+    if (select) {
+      if (list.length === 0) {
+        select.innerHTML = '<option value="" disabled selected>▼ No History</option>';
+      } else {
+        select.innerHTML = `<option value="" disabled selected>▼ Previous Targets (${list.length})</option>` +
+          list.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join('');
+      }
+    }
+
+    if (countEl) {
+      countEl.textContent = list.length === 1 ? '1 previous target' : `${list.length} previous targets`;
+    }
+  }
+
+  function isProxyConfigDirty() {
+    if (!State.runningProxyConfig) return false;
+    const portInput = document.getElementById('proxyConfigPort');
+    const hostInput = document.getElementById('proxyConfigHost');
+    const upstreamInput = document.getElementById('proxyConfigUpstream');
+    
+    const currPort = portInput ? parseInt(portInput.value, 10) : 9090;
+    const currHost = hostInput ? hostInput.value.trim() : '0.0.0.0';
+    const currUpstream = upstreamInput ? normalizeUpstreamUrl(upstreamInput.value) : '';
+    const runningUpstream = normalizeUpstreamUrl(State.runningProxyConfig.upstream);
+
+    return currPort !== State.runningProxyConfig.port ||
+           currHost !== State.runningProxyConfig.host ||
+           currUpstream !== runningUpstream;
+  }
+
+  function updateProxyConfigDirtyState() {
+    const isDirty = isProxyConfigDirty();
+    const noticeEl = document.getElementById('proxyConfigStatusNotice');
+    const restartBtn = document.getElementById('proxyRestartBtn');
+    const resetBtn = document.getElementById('proxyResetConfigBtn');
+
+    if (noticeEl) {
+      noticeEl.style.display = isDirty ? 'inline-flex' : 'none';
+    }
+    if (restartBtn) {
+      if (isDirty) {
+        restartBtn.classList.add('pending-restart');
+      } else {
+        restartBtn.classList.remove('pending-restart');
+      }
+    }
+    if (resetBtn) {
+      resetBtn.style.display = isDirty ? 'inline-flex' : 'none';
+    }
+  }
+
+  function resetProxyConfigInputs() {
+    if (!State.runningProxyConfig) return;
+    const portInput = document.getElementById('proxyConfigPort');
+    const hostInput = document.getElementById('proxyConfigHost');
+    const upstreamInput = document.getElementById('proxyConfigUpstream');
+
+    if (portInput) portInput.value = State.runningProxyConfig.port;
+    if (hostInput) hostInput.value = State.runningProxyConfig.host;
+    if (upstreamInput) upstreamInput.value = State.runningProxyConfig.upstream;
+
+    updateProxyConfigDirtyState();
+  }
+
   /**
    * Load live Proxy Gateway Status
    */
   async function loadProxyStatus() {
+    // If the browser tab or window is hidden / not visible, completely skip network requests
+    if (document.hidden) return;
+    if (State.isProxyStatusLoading) return;
+    State.isProxyStatusLoading = true;
+
     try {
-      const portInput = document.getElementById('proxyConfigPort');
-      const port = portInput ? parseInt(portInput.value, 10) : null;
+      const port = State.runningProxyConfig ? State.runningProxyConfig.port : (parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10));
       const data = await TelemetryAPI.getProxyStatus(port);
       State.proxyStatus = data;
+
+      const activePort = data.port || 9090;
+      const activeHost = data.host || '0.0.0.0';
+      const activeUpstream = data.upstream || (data.health && data.health.upstream) || (State.runningProxyConfig ? State.runningProxyConfig.upstream : 'https://llm.ai.e-infra.cz/v1');
+
+      State.runningProxyConfig = {
+        port: activePort,
+        host: activeHost,
+        upstream: activeUpstream
+      };
+
+      if (activeUpstream) {
+        saveUpstreamToHistory(activeUpstream);
+      }
+
+      // Only synchronize input values if user is NOT currently editing/dirty
+      if (!isProxyConfigDirty()) {
+        const portInput = document.getElementById('proxyConfigPort');
+        const hostInput = document.getElementById('proxyConfigHost');
+        const upstreamInput = document.getElementById('proxyConfigUpstream');
+        if (portInput && document.activeElement !== portInput) portInput.value = activePort;
+        if (hostInput && document.activeElement !== hostInput) hostInput.value = activeHost;
+        if (upstreamInput && document.activeElement !== upstreamInput) upstreamInput.value = activeUpstream;
+      }
+
       UI.renderProxyStatus(data);
+      updateProxyConfigDirtyState();
     } catch (e) {
       console.warn('Failed to load proxy status', e);
+    } finally {
+      State.isProxyStatusLoading = false;
     }
   }
 
@@ -1206,6 +1380,7 @@ const App = (() => {
    * Load live Proxy Execution Logs
    */
   async function loadProxyLogs() {
+    if (document.hidden) return;
     try {
       const linesSelect = document.getElementById('proxyLogLinesSelect');
       const lines = linesSelect ? parseInt(linesSelect.value, 10) : 200;
@@ -1222,11 +1397,60 @@ const App = (() => {
    * Setup Gateway Control Listeners and Actions
    */
   function setupProxyControl() {
+    // Render stored upstream history options
+    renderUpstreamHistoryOptions();
+
     // Top header badge click -> switch to control panel tab
     const headerBadge = document.getElementById('proxyHeaderBadge');
     if (headerBadge) {
       headerBadge.addEventListener('click', () => {
         switchTab('controlPanelTab');
+      });
+    }
+
+    const headerConcurrencyBadge = document.getElementById('headerConcurrencyBadge');
+    if (headerConcurrencyBadge) {
+      headerConcurrencyBadge.addEventListener('click', () => {
+        switchTab('controlPanelTab');
+      });
+    }
+
+    // Proxy configuration input listeners for dirty state tracking
+    const portInput = document.getElementById('proxyConfigPort');
+    const hostInput = document.getElementById('proxyConfigHost');
+    const upstreamInput = document.getElementById('proxyConfigUpstream');
+
+    if (portInput) {
+      portInput.addEventListener('input', updateProxyConfigDirtyState);
+      portInput.addEventListener('change', updateProxyConfigDirtyState);
+    }
+    if (hostInput) {
+      hostInput.addEventListener('input', updateProxyConfigDirtyState);
+      hostInput.addEventListener('change', updateProxyConfigDirtyState);
+    }
+    if (upstreamInput) {
+      upstreamInput.addEventListener('input', updateProxyConfigDirtyState);
+      upstreamInput.addEventListener('change', updateProxyConfigDirtyState);
+    }
+
+    // Quick select history dropdown
+    const upstreamQuickSelect = document.getElementById('proxyUpstreamQuickSelect');
+    if (upstreamQuickSelect) {
+      upstreamQuickSelect.addEventListener('change', () => {
+        if (upstreamInput && upstreamQuickSelect.value) {
+          upstreamInput.value = upstreamQuickSelect.value;
+          upstreamQuickSelect.selectedIndex = 0;
+          updateProxyConfigDirtyState();
+        }
+      });
+    }
+
+    // Discard / Reset button
+    const resetBtn = document.getElementById('proxyResetConfigBtn');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        resetProxyConfigInputs();
+        UI.showProxyAlert('Configuration edits discarded.', 'info', 2500);
       });
     }
 
@@ -1239,6 +1463,7 @@ const App = (() => {
         const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
 
         startBtn.disabled = true;
+        saveUpstreamToHistory(upstream);
         UI.showProxyAlert(`Starting proxy gateway on port ${port}...`, 'info', 0);
         try {
           const res = await TelemetryAPI.startProxy({ port, host, upstream });
@@ -1288,6 +1513,7 @@ const App = (() => {
         const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
 
         restartBtn.disabled = true;
+        saveUpstreamToHistory(upstream);
         UI.showProxyAlert(`Restarting proxy gateway on port ${port}...`, 'info', 0);
         try {
           const res = await TelemetryAPI.restartProxy({ port, host, upstream });
@@ -1302,15 +1528,6 @@ const App = (() => {
           await loadProxyStatus();
           await loadProxyLogs();
         }
-      });
-    }
-
-    // Refresh Status button
-    const refreshStatusBtn = document.getElementById('proxyRefreshStatusBtn');
-    if (refreshStatusBtn) {
-      refreshStatusBtn.addEventListener('click', async () => {
-        await loadProxyStatus();
-        UI.showProxyAlert('Proxy status refreshed.', 'info', 2000);
       });
     }
 
@@ -1344,6 +1561,19 @@ const App = (() => {
         }
       });
     }
+
+    // Tab/window activation listeners: immediately refresh proxy status without waiting for the 3s cycle
+    const onTabActivated = () => {
+      if (!document.hidden && document.visibilityState === 'visible') {
+        loadProxyStatus();
+        if (State.activeTab === 'controlPanelTab') {
+          loadProxyLogs();
+          loadRawLogStatus();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onTabActivated);
+    window.addEventListener('focus', onTabActivated);
 
     // Run DB Compress button
     const runDbCompressBtn = document.getElementById('runDbCompressBtn');
@@ -1484,6 +1714,7 @@ const App = (() => {
    * Load Raw Payload Logging Status
    */
   async function loadRawLogStatus() {
+    if (document.hidden) return;
     try {
       const data = await TelemetryAPI.getRawLogStatus();
       UI.renderRawLogStatus(data);
@@ -1497,6 +1728,19 @@ const App = (() => {
    */
   function startIntervals() {
     stopIntervals();
+
+    // 1. Live Proxy Gateway status & Active Concurrency Heartbeat — ALWAYS active across all tabs
+    State.intervals.proxyStatus = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadProxyStatus();
+        if (State.activeTab === 'controlPanelTab') {
+          loadProxyLogs();
+          loadRawLogStatus();
+        }
+      }
+    }, 3000);
+
+    // 2. Telemetry query intervals (respects liveUpdatesEnabled toggle)
     if (!State.liveUpdatesEnabled) return;
 
     State.intervals.refresh = setInterval(refresh, State.refreshRateSeconds * 1000);
@@ -1504,14 +1748,6 @@ const App = (() => {
       State.intervals.serverStatus = setInterval(loadServerStatus, 15000);
     }
     State.intervals.crossCheck = setInterval(loadCrossCheck, 30000);
-    State.intervals.proxyStatus = setInterval(loadProxyStatus, 4000);
-    State.intervals.rawLogStatus = setInterval(loadRawLogStatus, 4000);
-    State.intervals.proxyLogs = setInterval(() => {
-      if (State.activeTab === 'controlPanelTab') {
-        loadProxyLogs();
-        loadRawLogStatus();
-      }
-    }, 4000);
   }
 
   /**

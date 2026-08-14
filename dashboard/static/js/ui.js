@@ -1710,7 +1710,7 @@ const UI = (() => {
     const port = status.port || 9090;
     const upstream = status.upstream || (status.health && status.health.upstream) || 'https://llm.ai.e-infra.cz/v1';
 
-    // Header badge
+    // 1. Header Proxy Status badge
     const headerDot = document.getElementById('proxyHeaderDot');
     const headerText = document.getElementById('proxyHeaderText');
     if (headerDot && headerText) {
@@ -1718,7 +1718,37 @@ const UI = (() => {
       headerText.textContent = isRunning ? `Proxy: ${port}` : 'Proxy: Offline';
     }
 
-    // Main status badge
+    // 2. Compute Active Concurrency & Queue
+    let concurrencyStr = isRunning ? '0 / 4 (0)' : '—';
+    let activeCount = 0;
+    let queuedCount = 0;
+    if (status.health && status.health.rate_limiter) {
+      const rl = status.health.rate_limiter;
+      activeCount = rl.active || 0;
+      const maxCount = rl.max_concurrent || 4;
+      queuedCount = rl.queued || 0;
+      concurrencyStr = `${activeCount} / ${maxCount} (${queuedCount})`;
+    }
+
+    // 3. Header Active Concurrency badge
+    const headerConcurrencyBadge = document.getElementById('headerConcurrencyBadge');
+    const headerConcurrencyVal = document.getElementById('headerConcurrencyVal');
+    if (headerConcurrencyVal) {
+      headerConcurrencyVal.textContent = concurrencyStr;
+    }
+    if (headerConcurrencyBadge) {
+      if (!isRunning) {
+        headerConcurrencyBadge.className = 'header-concurrency-badge';
+      } else if (queuedCount > 0) {
+        headerConcurrencyBadge.className = 'header-concurrency-badge high-load';
+      } else if (activeCount > 0) {
+        headerConcurrencyBadge.className = 'header-concurrency-badge active-load';
+      } else {
+        headerConcurrencyBadge.className = 'header-concurrency-badge';
+      }
+    }
+
+    // 4. Main Control Panel status badge
     const stateBadge = document.getElementById('proxyStateBadge');
     const stateText = document.getElementById('proxyStateText');
     if (stateBadge && stateText) {
@@ -1726,7 +1756,7 @@ const UI = (() => {
       stateText.textContent = isRunning ? 'ONLINE' : 'STOPPED';
     }
 
-    // Metric items
+    // 5. Metric items in Control Panel
     const pidEl = document.getElementById('proxyPidVal');
     if (pidEl) pidEl.textContent = isRunning && pid ? pid : (isRunning ? 'Active' : '—');
 
@@ -1736,16 +1766,9 @@ const UI = (() => {
     const upstreamEl = document.getElementById('proxyUpstreamVal');
     if (upstreamEl) upstreamEl.textContent = upstream;
 
-    // Rate limiter & active concurrency
     const concurrencyEl = document.getElementById('proxyConcurrencyVal');
     if (concurrencyEl) {
-      if (status.health && status.health.rate_limiter) {
-        const rl = status.health.rate_limiter;
-        const queued = rl.queued || 0;
-        concurrencyEl.textContent = `${rl.active || 0} / ${rl.max_concurrent || 4} (${queued})`;
-      } else {
-        concurrencyEl.textContent = isRunning ? '0 / 4 (0)' : '—';
-      }
+      concurrencyEl.textContent = concurrencyStr;
     }
 
     // Token budget

@@ -28,15 +28,15 @@
         <h1>LLM <span>Telemetry</span> Dashboard</h1>
       </div>
       
-      <!-- Live Sync Status & Proxy Header Indicator -->
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <div class="live-status-container">
-          <div class="live-dot" id="liveStatusDot"></div>
-          <span id="liveStatusText">Auto updates active</span>
-        </div>
-        <div class="proxy-header-badge" id="proxyHeaderBadge" title="Click to open Gateway Control" style="cursor: pointer;">
+      <!-- Header Gateway Indicators (Proxy Live on left, Concurrency on right) -->
+      <div class="header-proxy-group">
+        <div class="proxy-header-badge" id="proxyHeaderBadge" title="Proxy Gateway Status — Click to open Gateway Control" style="cursor: pointer;">
           <span class="proxy-dot offline" id="proxyHeaderDot"></span>
           <span id="proxyHeaderText">Proxy: Offline</span>
+        </div>
+        <div class="header-concurrency-badge" id="headerConcurrencyBadge" title="Active Concurrency / Max (Queued) — Click to open Gateway Control" style="cursor: pointer;">
+          <span class="concurrency-icon">⚡</span>
+          <span id="headerConcurrencyVal">0 / 4 (0)</span>
         </div>
       </div>
 
@@ -525,19 +525,11 @@
             </div>
           </div>
 
-          <!-- Gateway Metrics Grid -->
+          <!-- Gateway Live Metrics Grid -->
           <div class="proxy-metrics-grid">
             <div class="proxy-metric-box">
               <span class="metric-lbl">Process ID (PID)</span>
               <span class="metric-val" id="proxyPidVal">—</span>
-            </div>
-            <div class="proxy-metric-box">
-              <span class="metric-lbl">Listening Port</span>
-              <span class="metric-val" id="proxyPortVal">9090</span>
-            </div>
-            <div class="proxy-metric-box">
-              <span class="metric-lbl">Upstream Target</span>
-              <span class="metric-val code" id="proxyUpstreamVal" style="font-size: 11px;">https://llm.ai.e-infra.cz/v1</span>
             </div>
             <div class="proxy-metric-box">
               <span class="metric-lbl">Active Concurrency</span>
@@ -554,6 +546,41 @@
             </div>
           </div>
 
+          <!-- Gateway Editable Configuration Pane -->
+          <div class="proxy-config-pane">
+            <div class="proxy-config-header">
+              <span class="proxy-config-title">⚙️ Gateway Configuration & Upstream Target</span>
+              <span id="proxyConfigStatusNotice" class="proxy-config-status-notice" style="display: none;">
+                ⚠️ Unsaved configuration &mdash; restart gateway to apply
+              </span>
+            </div>
+            <div class="proxy-form-grid">
+              <div class="proxy-form-group">
+                <label for="proxyConfigPort">Proxy Port</label>
+                <input type="number" id="proxyConfigPort" class="proxy-input" value="9090" placeholder="9090">
+              </div>
+              <div class="proxy-form-group">
+                <label for="proxyConfigHost">Host</label>
+                <input type="text" id="proxyConfigHost" class="proxy-input" value="0.0.0.0" placeholder="0.0.0.0">
+              </div>
+              <div class="proxy-form-group full-width">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <label for="proxyConfigUpstream">Upstream Target URL</label>
+                  <span id="proxyUpstreamHistoryCount" style="font-size: 11px; color: var(--text-muted);">Cached targets available</span>
+                </div>
+                <div class="proxy-input-with-dropdown">
+                  <input type="text" id="proxyConfigUpstream" class="proxy-input" list="proxyUpstreamDatalist" value="https://llm.ai.e-infra.cz/v1" placeholder="https://llm.ai.e-infra.cz/v1">
+                  <datalist id="proxyUpstreamDatalist">
+                    <!-- Populated dynamically with localStorage history -->
+                  </datalist>
+                  <select id="proxyUpstreamQuickSelect" class="proxy-select history-dropdown" title="Saved Upstream Targets">
+                    <option value="" disabled selected>▼ History Cache</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Action Buttons & Notification Message -->
           <div class="proxy-actions-row">
             <div class="proxy-action-buttons">
@@ -566,8 +593,8 @@
               <button id="proxyRestartBtn" class="btn-proxy btn-restart">
                 <span class="btn-icon">🔄</span> Restart Gateway
               </button>
-              <button id="proxyRefreshStatusBtn" class="btn-proxy btn-secondary">
-                <span class="btn-icon">↻</span> Refresh
+              <button id="proxyResetConfigBtn" class="btn-proxy btn-secondary" style="display: none;">
+                <span class="btn-icon">↩</span> Discard Changes
               </button>
             </div>
             <div id="proxyActionAlert" class="proxy-alert" style="display: none;"></div>
@@ -622,28 +649,8 @@
           </div>
         </div>
 
-        <!-- Three Column Layout: Configuration, Database Maintenance, & Model Pricing Catalog -->
-        <div class="gateway-three-col">
-          <!-- Gateway Configuration Options -->
-          <div class="section-card">
-            <h2>Gateway Settings</h2>
-            <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">Configure launch arguments for starting or restarting the proxy service.</p>
-            <div class="proxy-form-grid">
-              <div class="proxy-form-group">
-                <label for="proxyConfigPort">Proxy Port</label>
-                <input type="number" id="proxyConfigPort" class="proxy-input" value="9090">
-              </div>
-              <div class="proxy-form-group">
-                <label for="proxyConfigHost">Host</label>
-                <input type="text" id="proxyConfigHost" class="proxy-input" value="0.0.0.0">
-              </div>
-              <div class="proxy-form-group full-width">
-                <label for="proxyConfigUpstream">Upstream Target URL</label>
-                <input type="text" id="proxyConfigUpstream" class="proxy-input" value="https://llm.ai.e-infra.cz/v1">
-              </div>
-            </div>
-          </div>
-
+        <!-- Two Column Layout: Database Maintenance & Model Pricing Catalog -->
+        <div class="gateway-two-col">
           <!-- Database Maintenance -->
           <div class="section-card">
             <h2>Database Maintenance</h2>
