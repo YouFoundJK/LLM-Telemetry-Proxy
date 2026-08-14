@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dashboard: Built-in](https://img.shields.io/badge/Dashboard-Web%20UI-emerald?style=flat-square)](http://localhost:9118)
-[![Docs: MkDocs](https://img.shields.io/badge/Docs-Material-purple?style=flat-square)](docs/)
+[![Docs: MkDocs](https://img.shields.io/badge/Docs-Material-purple?style=flat-square)](https://youfoundjk.github.io/LLM-Telemetry-Proxy/)
 
 <br/>
 

@@ -1,8 +1,8 @@
 site_name: LLM Telemetry Proxy & Dashboard
 site_description: High-performance reverse proxy and real-time observability suite for LLM APIs.
-site_author: LLM Telemetry Proxy Team
-repo_url: https://github.com/your-org/llm-proxy
-repo_name: llm-proxy
+site_author: YouFoundJK | Gemini Antigravity
+repo_url: https://github.com/YouFoundJK/LLM-Telemetry-Proxy
+repo_name: LLM-Telemetry-Proxy
 
 theme:
   name: material
