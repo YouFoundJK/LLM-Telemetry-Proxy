@@ -18,3 +18,5 @@ env/
 data/*.log
 data/.*.pid
 data/.*.port
+data/token_budget.json
+data/*.tmp

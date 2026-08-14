@@ -1752,8 +1752,8 @@ const UI = (() => {
     const budgetFill = document.getElementById('proxyTokenBudgetFill');
     const budgetText = document.getElementById('proxyTokenBudgetText');
     if (budgetFill && budgetText) {
-      if (status.health && status.health.token_budget) {
-        const tb = status.health.token_budget;
+      const tb = (status.health && status.health.token_budget) || status.token_budget;
+      if (tb && typeof tb.total_used === 'number') {
         const perc = tb.percentage_used || 0;
         budgetFill.style.width = `${Math.min(perc, 100)}%`;
         if (perc > 85) {

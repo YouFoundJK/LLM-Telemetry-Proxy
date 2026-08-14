@@ -11,10 +11,11 @@ import ctypes
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -135,6 +136,58 @@ def kill_pid(pid: int, force: bool = False) -> bool:
             return not is_pid_alive(pid)
 
 
+def get_persisted_token_budget() -> Dict[str, Any]:
+    """Retrieve 24H token usage from data/token_budget.json or SQLite DB as fallback."""
+    # 1. Check data/token_budget.json
+    budget_file = get_data_dir() / "token_budget.json"
+    if budget_file.exists():
+        try:
+            with open(budget_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {
+                    "total_used": data.get("total_used", 0),
+                    "remaining": data.get("remaining", 480_000_000),
+                    "percentage_used": data.get("percentage_used", 0.0),
+                    "daily_limit": data.get("daily_limit", 480_000_000),
+                }
+        except Exception:
+            pass
+
+    # 2. Check SQLite DB
+    db_file = get_data_dir() / "llm_telemetry.db"
+    if db_file.exists():
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            conn = sqlite3.connect(str(db_file), timeout=2.0)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT SUM((COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) * COALESCE(calls_count, 1))
+                FROM api_calls
+                WHERE timestamp >= ?
+            """, (cutoff,))
+            row = cur.fetchone()
+            conn.close()
+            total_used = int(row[0] or 0) if row else 0
+            daily_limit = 480_000_000
+            remaining = max(0, daily_limit - total_used)
+            perc = round((total_used / daily_limit) * 100, 2)
+            return {
+                "total_used": total_used,
+                "remaining": remaining,
+                "percentage_used": perc,
+                "daily_limit": daily_limit,
+            }
+        except Exception:
+            pass
+
+    return {
+        "total_used": 0,
+        "remaining": 480_000_000,
+        "percentage_used": 0.0,
+        "daily_limit": 480_000_000,
+    }
+
+
 class ProxyManager:
     """Manages the lifecycle and health of the LLM Telemetry Proxy."""
 
@@ -201,6 +254,9 @@ class ProxyManager:
         except Exception:
             pass
 
+        fallback_tb = get_persisted_token_budget()
+        token_budget = (health_data.get("token_budget") if health_data and "token_budget" in health_data else fallback_tb)
+
         return {
             "running": running,
             "pid": pid,
@@ -208,6 +264,7 @@ class ProxyManager:
             "upstream": (health_data.get("upstream") if health_data else cls._last_known_upstream),
             "health_ok": health_ok,
             "health": health_data,
+            "token_budget": token_budget,
             "log_file": str(get_log_file()),
             "pid_file": str(get_pid_file()),
         }

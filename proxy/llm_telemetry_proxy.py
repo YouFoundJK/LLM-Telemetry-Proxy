@@ -32,7 +32,7 @@ import atexit
 import os
 import signal
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import aiohttp
@@ -58,6 +58,7 @@ _raw_subscribers = set()
 _env_db_path = os.environ.get("TELEMETRY_DB_PATH")
 DB_PATH = Path(_env_db_path) if _env_db_path else (REPO_ROOT / "data" / "llm_telemetry.db")
 PID_FILE = REPO_ROOT / "data" / ".proxy.pid"
+TOKEN_BUDGET_FILE = REPO_ROOT / "data" / "token_budget.json"
 
 # Models to track server load for
 WATCHED_MODELS = ["Deepseek-v4", "Glm-5.2", "Qwen3.5-int4", "Kimi-K2.7"]
@@ -70,16 +71,109 @@ MAX_CONCURRENT = 4
 _upstream_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 # ── Token Budget Enforcement ─────────────────────────────────────────────────
-# Hard cap: 240M tokens per day. When exceeded, proxy rejects with clear error.
-DAILY_TOKEN_LIMIT = 480_000_000  # 240 million tokens
+# Hard cap: 480M tokens per day. When exceeded, proxy rejects with clear error.
+DAILY_TOKEN_LIMIT = 480_000_000  # 480 million tokens
 
 class RollingTokenBudget:
-    """Rolling 24-hour token budget with hard enforcement."""
-    
-    def __init__(self, daily_limit: int):
+    """Rolling 24-hour token budget with hard enforcement and persistence across restarts."""
+
+    def __init__(self, daily_limit: int, db_path: Path = DB_PATH, state_file: Path = TOKEN_BUDGET_FILE):
         self.daily_limit = daily_limit
-        self._usage = deque()  # (timestamp, token_count)
-    
+        self.db_path = db_path
+        self.state_file = state_file
+        self._usage = deque()  # (timestamp_float, token_count)
+        self._load_state()
+
+    def _load_state(self):
+        """Restore rolling token budget from SQLite DB and state file on startup."""
+        now = time.time()
+        cutoff = now - 86400
+        temp_usage = []
+
+        # 1. First attempt: Query SQLite DB for calls within the past 24 hours
+        try:
+            if self.db_path and Path(self.db_path).exists():
+                cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+                cutoff_iso = cutoff_dt.isoformat()
+                conn = sqlite3.connect(str(self.db_path), timeout=5.0)
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT timestamp, input_tokens, output_tokens, calls_count
+                    FROM api_calls
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp ASC
+                """, (cutoff_iso,))
+                rows = cur.fetchall()
+                conn.close()
+
+                for row in rows:
+                    ts_str, in_tok, out_tok, calls_cnt = row
+                    cnt = calls_cnt if calls_cnt else 1
+                    total_tok = ((in_tok or 0) + (out_tok or 0)) * cnt
+                    if total_tok <= 0:
+                        continue
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        ts_float = dt.timestamp()
+                        if ts_float >= cutoff:
+                            temp_usage.append((ts_float, total_tok))
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[telemetry] Error loading token budget from DB: {e}", file=sys.stderr)
+
+        # 2. Fallback: Read from state_file if DB had no records
+        if not temp_usage and self.state_file and Path(self.state_file).exists():
+            try:
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    records = data.get("recent_usage", [])
+                    for r in records:
+                        ts = r.get("ts", 0)
+                        cnt = r.get("tokens", 0)
+                        if ts >= cutoff and cnt > 0:
+                            temp_usage.append((ts, cnt))
+            except Exception as e:
+                print(f"[telemetry] Error reading {self.state_file}: {e}", file=sys.stderr)
+
+        if temp_usage:
+            self._usage = deque(sorted(temp_usage, key=lambda x: x[0]))
+
+        self._save_state()
+
+    def _save_state(self):
+        """Save current token budget summary & recent history to data/token_budget.json."""
+        if not self.state_file:
+            return
+        try:
+            now = time.time()
+            cutoff = now - 86400
+            while self._usage and self._usage[0][0] < cutoff:
+                self._usage.popleft()
+
+            current_usage = sum(count for _, count in self._usage)
+            remaining = max(0, self.daily_limit - current_usage)
+            percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
+
+            recent_list = [{"ts": round(ts, 2), "tokens": cnt} for ts, cnt in self._usage]
+
+            state_data = {
+                "daily_limit": self.daily_limit,
+                "total_used": current_usage,
+                "remaining": remaining,
+                "percentage_used": round(percentage_used, 2),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "recent_usage": recent_list[-5000:],
+            }
+
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = self.state_file.with_suffix(".tmp")
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+            temp_file.replace(self.state_file)
+        except Exception:
+            pass
+
     def record_and_check(self, input_tokens: int, output_tokens: int) -> tuple[bool, dict]:
         """
         Record usage and check if within budget.
@@ -89,38 +183,40 @@ class RollingTokenBudget:
         now = time.time()
         total = input_tokens + output_tokens
         self._usage.append((now, total))
-        
+
         # Purge entries older than 24 hours
         cutoff = now - 86400
         while self._usage and self._usage[0][0] < cutoff:
             self._usage.popleft()
-        
+
         current_usage = sum(count for _, count in self._usage)
         remaining = max(0, self.daily_limit - current_usage)
-        percentage_used = (current_usage / self.daily_limit) * 100
-        
+        percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
+
         status = {
             "total_used": current_usage,
             "remaining": remaining,
             "percentage_used": round(percentage_used, 2),
             "daily_limit": self.daily_limit,
         }
-        
+
+        self._save_state()
+
         if current_usage >= self.daily_limit:
             return False, status
         return True, status
-    
+
     def get_status(self) -> dict:
         """Get current budget status without recording usage."""
         now = time.time()
         cutoff = now - 86400
         while self._usage and self._usage[0][0] < cutoff:
             self._usage.popleft()
-        
+
         current_usage = sum(count for _, count in self._usage)
         remaining = max(0, self.daily_limit - current_usage)
-        percentage_used = (current_usage / self.daily_limit) * 100
-        
+        percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
+
         return {
             "total_used": current_usage,
             "remaining": remaining,
