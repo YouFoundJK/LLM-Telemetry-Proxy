@@ -1741,9 +1741,10 @@ const UI = (() => {
     if (concurrencyEl) {
       if (status.health && status.health.rate_limiter) {
         const rl = status.health.rate_limiter;
-        concurrencyEl.textContent = `${rl.active || 0} / ${rl.max_concurrent || 4}`;
+        const queued = rl.queued || 0;
+        concurrencyEl.textContent = `${rl.active || 0} / ${rl.max_concurrent || 4} (${queued})`;
       } else {
-        concurrencyEl.textContent = isRunning ? '0 / 4' : '—';
+        concurrencyEl.textContent = isRunning ? '0 / 4 (0)' : '—';
       }
     }
 

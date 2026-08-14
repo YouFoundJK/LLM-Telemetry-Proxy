@@ -937,7 +937,8 @@ async def handle_health(request: web.Request) -> web.Response:
         "db": str(DB_PATH),
         "rate_limiter": {
             "max_concurrent": MAX_CONCURRENT,
-            "active": MAX_CONCURRENT - _upstream_semaphore._value,
+            "active": max(0, MAX_CONCURRENT - _upstream_semaphore._value),
+            "queued": len(_upstream_semaphore._waiters) if hasattr(_upstream_semaphore, "_waiters") and _upstream_semaphore._waiters else 0,
         },
         "token_budget": budget_status,
         "model_queue": model_queue,

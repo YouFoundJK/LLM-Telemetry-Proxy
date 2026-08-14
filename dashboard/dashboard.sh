@@ -21,11 +21,15 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DASHBOARD_PID_FILE="$SCRIPT_DIR/.dashboard.pid"
-DASHBOARD_PORT_FILE="$SCRIPT_DIR/.dashboard.port"
-DASHBOARD_LOG_FILE="$SCRIPT_DIR/.dashboard.log"
-PROXY_PID_FILE="$REPO_ROOT/data/.proxy.pid"
-PROXY_LOG_FILE="$REPO_ROOT/data/proxy.log"
+DATA_DIR="$REPO_ROOT/data"
+DASHBOARD_PID_FILE="$DATA_DIR/.dashboard.pid"
+DASHBOARD_PORT_FILE="$DATA_DIR/.dashboard.port"
+DASHBOARD_LOG_FILE="$DATA_DIR/dashboard.log"
+PROXY_PID_FILE="$DATA_DIR/.proxy.pid"
+PROXY_LOG_FILE="$DATA_DIR/proxy.log"
+
+# Clean up legacy files from dashboard source dir if present
+rm -f "$SCRIPT_DIR/.dashboard.pid" "$SCRIPT_DIR/.dashboard.port" "$SCRIPT_DIR/.dashboard.log" 2>/dev/null || true
 
 DEFAULT_PORT="9118"
 PROXY_PORT="9090"
@@ -33,145 +37,157 @@ PYTHON="${PYTHON:-python3}"
 
 # ── Port & PID Helpers ───────────────────────────────────────────────────────
 
-get_pids_on_port() {
-    local port="$1"
-    local pids=""
-    if command -v lsof >/dev/null 2>&1; then
-        pids=$(lsof -ti "tcp:$port" 2>/dev/null || true)
+# Returns the cmdline for a given PID
+get_proc_cmdline() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return 1
+    if [[ -f "/proc/$pid/cmdline" ]]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true
+    else
+        ps -p "$pid" -o args= 2>/dev/null || true
     fi
-    if [[ -z "$pids" ]] && command -v fuser >/dev/null 2>&1; then
-        pids=$(fuser "$port/tcp" 2>/dev/null || true)
-    fi
-    if [[ -z "$pids" ]] && command -v ss >/dev/null 2>&1; then
-        pids=$(ss -tlpn "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 || true)
-    fi
-    echo "$pids"
 }
 
-get_dashboard_pids() {
-    local pids=""
+# Verify if a PID belongs to the dashboard server
+is_dashboard_pid() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return 1
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 1
+    fi
+    local cmd
+    cmd=$(get_proc_cmdline "$pid")
+    if [[ "$cmd" =~ server\.py ]] && [[ "$cmd" =~ dashboard ]]; then
+        return 0
+    elif [[ "$cmd" =~ server\.py ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Verify if a PID belongs to the LLM telemetry proxy
+is_proxy_pid() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return 1
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 1
+    fi
+    local cmd
+    cmd=$(get_proc_cmdline "$pid")
+    if [[ "$cmd" =~ llm_telemetry_proxy\.py ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Get ONLY the PID that is actively LISTENING on a given port (never client sockets)
+get_listening_pid_on_port() {
+    local port="$1"
+    local pid=""
+    if command -v lsof >/dev/null 2>&1; then
+        pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | head -n1 || true)
+    fi
+    if [[ -z "$pid" ]] && command -v ss >/dev/null 2>&1; then
+        pid=$(ss -tlpn "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2 || true)
+    fi
+    echo "$pid"
+}
+
+# Get dashboard PID (strictly verified)
+get_dashboard_pid() {
     if [[ -f "$DASHBOARD_PID_FILE" ]]; then
         local file_pid
         file_pid=$(cat "$DASHBOARD_PID_FILE" 2>/dev/null || true)
-        if [[ -n "$file_pid" ]] && kill -0 "$file_pid" 2>/dev/null; then
-            pids="$file_pid"
+        if [[ -n "$file_pid" ]] && is_dashboard_pid "$file_pid"; then
+            echo "$file_pid"
+            return 0
         fi
+        # Stale PID file
+        rm -f "$DASHBOARD_PID_FILE"
     fi
 
+    # Fallback: check listening port ONLY if the process is verified to be our dashboard
     local target_port
     target_port=$(cat "$DASHBOARD_PORT_FILE" 2>/dev/null || echo "$DEFAULT_PORT")
-    local port_pids
-    port_pids=$(get_pids_on_port "$target_port")
-    if [[ -n "$port_pids" ]]; then
-        pids=$(echo -e "${pids}\n${port_pids}" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
-    fi
-
-    if command -v pgrep >/dev/null 2>&1; then
-        local pgrep_pids
-        pgrep_pids=$(pgrep -f "server.py.*--port" 2>/dev/null || true)
-        if [[ -n "$pgrep_pids" ]]; then
-            pids=$(echo -e "${pids}\n${pgrep_pids}" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
-        fi
-    fi
-
-    echo "$pids"
-}
-
-get_proxy_pids() {
-    local pids=""
-    if [[ -f "$PROXY_PID_FILE" ]]; then
-        local file_pid
-        file_pid=$(cat "$PROXY_PID_FILE" 2>/dev/null || true)
-        if [[ -n "$file_pid" ]] && kill -0 "$file_pid" 2>/dev/null; then
-            pids="$file_pid"
-        fi
-    fi
-
-    local port_pids
-    port_pids=$(get_pids_on_port "$PROXY_PORT")
-    if [[ -n "$port_pids" ]]; then
-        pids=$(echo -e "${pids}\n${port_pids}" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
-    fi
-
-    if command -v pgrep >/dev/null 2>&1; then
-        local pgrep_pids
-        pgrep_pids=$(pgrep -f "llm_telemetry_proxy.py" 2>/dev/null || true)
-        if [[ -n "$pgrep_pids" ]]; then
-            pids=$(echo -e "${pids}\n${pgrep_pids}" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
-        fi
-    fi
-
-    echo "$pids"
-}
-
-kill_pids_robustly() {
-    local pids="$1"
-    local name="${2:-process}"
-    if [[ -z "$pids" ]]; then
+    local listen_pid
+    listen_pid=$(get_listening_pid_on_port "$target_port")
+    if [[ -n "$listen_pid" ]] && is_dashboard_pid "$listen_pid"; then
+        echo "$listen_pid" > "$DASHBOARD_PID_FILE"
+        echo "$listen_pid"
         return 0
     fi
 
-    echo "Stopping $name (PID(s): $(echo "$pids" | tr '\n' ' '))..."
-    for pid in $pids; do
-        kill "$pid" 2>/dev/null || true
-    done
+    return 1
+}
 
-    # Wait up to 3 seconds for graceful shutdown
+# Get proxy PID (strictly verified)
+get_proxy_pid() {
+    if [[ -f "$PROXY_PID_FILE" ]]; then
+        local file_pid
+        file_pid=$(cat "$PROXY_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$file_pid" ]] && is_proxy_pid "$file_pid"; then
+            echo "$file_pid"
+            return 0
+        fi
+        # Stale PID file
+        rm -f "$PROXY_PID_FILE"
+    fi
+
+    # Fallback: check listening port ONLY if the process is verified to be our proxy
+    local listen_pid
+    listen_pid=$(get_listening_pid_on_port "$PROXY_PORT")
+    if [[ -n "$listen_pid" ]] && is_proxy_pid "$listen_pid"; then
+        echo "$listen_pid" > "$PROXY_PID_FILE"
+        echo "$listen_pid"
+        return 0
+    fi
+
+    return 1
+}
+
+# Kill only a specific, verified PID
+kill_pid_safely() {
+    local pid="$1"
+    local name="${2:-process}"
+    if [[ -z "$pid" ]]; then
+        return 0
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+
+    echo "Stopping $name (PID $pid)..."
+    kill "$pid" 2>/dev/null || true
+
+    # Wait up to 3 seconds for graceful termination
     local waited=0
     while (( waited < 6 )); do
-        local any_alive=0
-        for pid in $pids; do
-            if kill -0 "$pid" 2>/dev/null; then
-                any_alive=1
-                break
-            fi
-        done
-        if (( any_alive == 0 )); then
-            break
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
         fi
         sleep 0.5
         waited=$((waited + 1))
     done
 
     # Force kill if still alive
-    for pid in $pids; do
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "Force killing $name (PID $pid)..."
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Force killing $name (PID $pid)..."
+        kill -9 "$pid" 2>/dev/null || true
+    fi
     sleep 0.2
 }
 
-ensure_port_freed() {
-    local port="$1"
-    local name="${2:-service}"
-    local pids
-    pids=$(get_pids_on_port "$port")
-    if [[ -n "$pids" ]]; then
-        echo "Clearing lingering process on port $port..."
-        kill_pids_robustly "$pids" "$name"
-    fi
-}
-
 is_dashboard_running() {
-    local pids
-    pids=$(get_dashboard_pids)
-    if [[ -n "$pids" ]]; then
-        return 0
-    fi
-    rm -f "$DASHBOARD_PID_FILE"
-    return 1
+    local pid
+    pid=$(get_dashboard_pid || true)
+    [[ -n "$pid" ]]
 }
 
 is_proxy_running() {
-    local pids
-    pids=$(get_proxy_pids)
-    if [[ -n "$pids" ]]; then
-        return 0
-    fi
-    rm -f "$PROXY_PID_FILE"
-    return 1
+    local pid
+    pid=$(get_proxy_pid || true)
+    [[ -n "$pid" ]]
 }
 
 # ── Service Control Functions ────────────────────────────────────────────────
@@ -192,7 +208,9 @@ start_dashboard() {
     if is_dashboard_running; then
         local active_port
         active_port=$(cat "$DASHBOARD_PORT_FILE" 2>/dev/null || echo "$target_port")
-        echo "Dashboard already running (PID(s): $(echo "$(get_dashboard_pids)" | tr '\n' ' '))"
+        local pid
+        pid=$(get_dashboard_pid || true)
+        echo "Dashboard already running (PID: $pid)"
         echo "URL: http://localhost:$active_port"
         if [[ "$with_proxy" == true ]]; then
             start_proxy "$PROXY_PORT"
@@ -200,10 +218,20 @@ start_dashboard() {
         return 0
     fi
 
-    # Ensure port is clean before binding
-    ensure_port_freed "$target_port" "dashboard"
+    # Check if another process is listening on the port
+    local listen_pid
+    listen_pid=$(get_listening_pid_on_port "$target_port")
+    if [[ -n "$listen_pid" ]]; then
+        if is_dashboard_pid "$listen_pid"; then
+            kill_pid_safely "$listen_pid" "dashboard"
+        else
+            echo "❌ Port $target_port is already in use by PID $listen_pid. Cannot start dashboard."
+            return 1
+        fi
+    fi
 
     echo "Starting telemetry dashboard on port $target_port..."
+    mkdir -p "$DATA_DIR"
     cd "$SCRIPT_DIR"
     nohup "$PYTHON" server.py --port "$target_port" > "$DASHBOARD_LOG_FILE" 2>&1 &
     local new_pid=$!
@@ -215,10 +243,9 @@ start_dashboard() {
     for _ in {1..6}; do
         sleep 0.5
         if kill -0 "$new_pid" 2>/dev/null; then
-            # Verify port listening
-            local port_pids
-            port_pids=$(get_pids_on_port "$target_port")
-            if [[ -n "$port_pids" ]] || grep -q "Server starting on" "$DASHBOARD_LOG_FILE" 2>/dev/null; then
+            local p
+            p=$(get_listening_pid_on_port "$target_port")
+            if [[ "$p" == "$new_pid" ]] || grep -q "Server starting on" "$DASHBOARD_LOG_FILE" 2>/dev/null; then
                 started=true
                 break
             fi
@@ -244,19 +271,14 @@ start_dashboard() {
 }
 
 stop_dashboard() {
-    local pids
-    pids=$(get_dashboard_pids)
-    local target_port
-    target_port=$(cat "$DASHBOARD_PORT_FILE" 2>/dev/null || echo "$DEFAULT_PORT")
+    local pid
+    pid=$(get_dashboard_pid || true)
 
-    if [[ -n "$pids" ]]; then
-        kill_pids_robustly "$pids" "dashboard"
-        ensure_port_freed "$target_port" "dashboard"
+    if [[ -n "$pid" ]]; then
+        kill_pid_safely "$pid" "dashboard"
         rm -f "$DASHBOARD_PID_FILE" "$DASHBOARD_PORT_FILE"
         echo "✅ Dashboard stopped."
     else
-        # Still check if target port is occupied
-        ensure_port_freed "$target_port" "dashboard"
         rm -f "$DASHBOARD_PID_FILE" "$DASHBOARD_PORT_FILE"
         echo "Dashboard not running."
     fi
@@ -265,11 +287,23 @@ stop_dashboard() {
 start_proxy() {
     local pport="${1:-$PROXY_PORT}"
     if is_proxy_running; then
-        echo "Proxy already running (PID(s): $(echo "$(get_proxy_pids)" | tr '\n' ' '))"
+        local pid
+        pid=$(get_proxy_pid || true)
+        echo "Proxy already running (PID: $pid)"
         return 0
     fi
 
-    ensure_port_freed "$pport" "proxy"
+    local listen_pid
+    listen_pid=$(get_listening_pid_on_port "$pport")
+    if [[ -n "$listen_pid" ]]; then
+        if is_proxy_pid "$listen_pid"; then
+            kill_pid_safely "$listen_pid" "proxy"
+        else
+            echo "❌ Port $pport is already in use by PID $listen_pid. Cannot start proxy."
+            return 1
+        fi
+    fi
+
     echo "Starting LLM telemetry proxy on port $pport..."
     mkdir -p "$REPO_ROOT/data"
     cd "$REPO_ROOT"
@@ -289,15 +323,13 @@ start_proxy() {
 }
 
 stop_proxy() {
-    local pids
-    pids=$(get_proxy_pids)
-    if [[ -n "$pids" ]]; then
-        kill_pids_robustly "$pids" "proxy"
-        ensure_port_freed "$PROXY_PORT" "proxy"
+    local pid
+    pid=$(get_proxy_pid || true)
+    if [[ -n "$pid" ]]; then
+        kill_pid_safely "$pid" "proxy"
         rm -f "$PROXY_PID_FILE"
         echo "✅ Proxy stopped."
     else
-        ensure_port_freed "$PROXY_PORT" "proxy"
         rm -f "$PROXY_PID_FILE"
         echo "Proxy not running."
     fi
@@ -351,16 +383,16 @@ case "$COMMAND" in
         echo "=== LLM Telemetry Suite Status ==="
         if is_dashboard_running; then
             local_port=$(cat "$DASHBOARD_PORT_FILE" 2>/dev/null || echo "$DEFAULT_PORT")
-            local_pids=$(echo "$(get_dashboard_pids)" | tr '\n' ' ')
-            echo "✅ Dashboard: Running (PID(s) $local_pids, port $local_port)"
+            local_pid=$(get_dashboard_pid || true)
+            echo "✅ Dashboard: Running (PID $local_pid, port $local_port)"
             echo "   URL: http://localhost:$local_port"
         else
             echo "❌ Dashboard: Stopped"
         fi
 
         if is_proxy_running; then
-            local_pids=$(echo "$(get_proxy_pids)" | tr '\n' ' ')
-            echo "✅ Proxy:     Running (PID(s) $local_pids)"
+            local_pid=$(get_proxy_pid || true)
+            echo "✅ Proxy:     Running (PID $local_pid)"
             echo "   Log: $PROXY_LOG_FILE"
         else
             echo "❌ Proxy:     Stopped"
@@ -393,7 +425,7 @@ case "$COMMAND" in
                 ;;
             status)
                 if is_proxy_running; then
-                    echo "✅ Proxy running (PID(s): $(echo "$(get_proxy_pids)" | tr '\n' ' '))"
+                    echo "✅ Proxy running (PID: $(get_proxy_pid || true))"
                 else
                     echo "❌ Proxy not running."
                 fi

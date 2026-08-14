@@ -11,7 +11,10 @@ env/
 *.log
 
 
-# Dashboard runtime files
-.dashboard.pid
-.dashboard.port
-.dashboard.log
+# Dashboard & Proxy runtime files
+*.pid
+.dashboard.*
+.proxy.*
+data/*.log
+data/.*.pid
+data/.*.port
