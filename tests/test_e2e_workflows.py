@@ -14,7 +14,10 @@ import unittest
 from pathlib import Path
 from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Add project root to sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
 from dashboard.server import create_app
 
 

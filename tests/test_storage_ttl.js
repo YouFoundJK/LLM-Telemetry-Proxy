@@ -4,6 +4,8 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
 
 // Mock IndexedDB in Node environment
 class MockIDBIndex {
@@ -138,8 +140,8 @@ global.window = {
 };
 global.indexedDB = global.window.indexedDB;
 
-const vm = require('vm');
-const code = fs.readFileSync('dashboard/static/js/storage.js', 'utf8');
+const storageJsPath = path.join(__dirname, '..', 'dashboard', 'static', 'js', 'storage.js');
+const code = fs.readFileSync(storageJsPath, 'utf8');
 vm.runInThisContext(code);
 
 async function runTests() {
