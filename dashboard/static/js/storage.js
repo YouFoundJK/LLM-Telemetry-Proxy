@@ -175,8 +175,20 @@ const TelemetryStore = (() => {
           const r = records[i];
           if (!r || r.id === undefined || r.id === null) continue;
 
+          // Normalize timestamp to standard 24-char ISO string (YYYY-MM-DDTHH:mm:ss.sssZ)
+          // for strict lexicographical range ordering in IndexedDB indexes
+          let normTs = r.timestamp;
+          if (normTs && (typeof normTs !== 'string' || normTs.length !== 24 || !normTs.endsWith('Z'))) {
+            try {
+              const d = new Date(normTs);
+              if (!isNaN(d.getTime())) normTs = d.toISOString();
+            } catch (e) {
+              normTs = r.timestamp;
+            }
+          }
+
           // Create lean record omitting redundant null/empty fields
-          const item = { id: r.id, timestamp: r.timestamp };
+          const item = { id: r.id, timestamp: normTs };
           if (r.model) item.model = r.model;
           if (r.endpoint) item.endpoint = r.endpoint;
           if (r.input_tokens) item.input_tokens = r.input_tokens;
@@ -193,8 +205,8 @@ const TelemetryStore = (() => {
           callsStore.put(item);
 
           if (r.id > maxId) maxId = r.id;
-          if (!earliestTs || (r.timestamp && r.timestamp < earliestTs)) earliestTs = r.timestamp;
-          if (!latestTs || (r.timestamp && r.timestamp > latestTs)) latestTs = r.timestamp;
+          if (!earliestTs || (normTs && normTs < earliestTs)) earliestTs = normTs;
+          if (!latestTs || (normTs && normTs > latestTs)) latestTs = normTs;
         }
 
         tx.oncomplete = () => {
@@ -223,15 +235,55 @@ const TelemetryStore = (() => {
         const store = tx.objectStore(STORE_CALLS);
         const index = store.index('timestamp');
 
-        let keyRange = null;
-        if (fromTs && toTs) {
-          keyRange = IDBKeyRange.bound(fromTs, toTs);
-        } else if (fromTs) {
-          keyRange = IDBKeyRange.lowerBound(fromTs);
-        } else if (toTs) {
-          keyRange = IDBKeyRange.upperBound(toTs);
+        // Normalize query boundary timestamps to canonical ISO strings
+        let normFrom = null;
+        let normTo = null;
+
+        if (fromTs) {
+          try {
+            const d = new Date(fromTs);
+            if (!isNaN(d.getTime())) normFrom = d.toISOString();
+          } catch (e) {}
+        }
+        if (toTs) {
+          try {
+            const d = new Date(toTs);
+            if (!isNaN(d.getTime())) normTo = d.toISOString();
+          } catch (e) {}
         }
 
+        let keyRange = null;
+        if (normFrom && normTo) {
+          keyRange = IDBKeyRange.bound(normFrom, normTo);
+        } else if (normFrom) {
+          keyRange = IDBKeyRange.lowerBound(normFrom);
+        } else if (normTo) {
+          keyRange = IDBKeyRange.upperBound(normTo);
+        }
+
+        // 1. Unbounded query (All Time): use native store.getAll()
+        if (!keyRange && store.getAll) {
+          const req = store.getAll();
+          req.onsuccess = () => {
+            touchAccess();
+            resolve(req.result || []);
+          };
+          req.onerror = () => resolve([]);
+          return;
+        }
+
+        // 2. Bounded index range query: use native index.getAll(keyRange) if available
+        if (keyRange && index.getAll) {
+          const req = index.getAll(keyRange);
+          req.onsuccess = () => {
+            touchAccess();
+            resolve(req.result || []);
+          };
+          req.onerror = () => resolve([]);
+          return;
+        }
+
+        // 3. Fallback to cursor iteration
         const results = [];
         const req = index.openCursor(keyRange);
 

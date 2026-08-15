@@ -13,16 +13,42 @@ class MockIDBIndex {
     this.store = store;
     this.indexName = indexName;
   }
+  getAll(range) {
+    const req = { onsuccess: null, onerror: null };
+    setImmediate(() => {
+      let items = Array.from(this.store.items.values());
+      if (this.indexName === 'timestamp') {
+        items.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+        if (range) {
+          if (range.lower && range.upper) {
+            items = items.filter(item => item.timestamp >= range.lower && item.timestamp <= range.upper);
+          } else if (range.lower) {
+            items = items.filter(item => item.timestamp >= range.lower);
+          } else if (range.upper) {
+            items = items.filter(item => item.timestamp <= range.upper);
+          }
+        }
+      }
+      req.result = items;
+      if (req.onsuccess) req.onsuccess({ target: req });
+    });
+    return req;
+  }
   openCursor(range, direction = 'next') {
     const req = { onsuccess: null, onerror: null };
     setImmediate(() => {
       let items = Array.from(this.store.items.values());
       if (this.indexName === 'timestamp') {
-        items.sort((a, b) => {
-          if (!a.timestamp) return -1;
-          if (!b.timestamp) return 1;
-          return a.timestamp.localeCompare(b.timestamp);
-        });
+        items.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+        if (range) {
+          if (range.lower && range.upper) {
+            items = items.filter(item => item.timestamp >= range.lower && item.timestamp <= range.upper);
+          } else if (range.lower) {
+            items = items.filter(item => item.timestamp >= range.lower);
+          } else if (range.upper) {
+            items = items.filter(item => item.timestamp <= range.upper);
+          }
+        }
       }
       if (direction === 'prev') {
         items.reverse();
@@ -69,6 +95,14 @@ class MockIDBStore {
     const req = { onsuccess: null, onerror: null };
     setImmediate(() => {
       req.result = this.items.get(key) || null;
+      if (req.onsuccess) req.onsuccess({ target: req });
+    });
+    return req;
+  }
+  getAll() {
+    const req = { onsuccess: null, onerror: null };
+    setImmediate(() => {
+      req.result = Array.from(this.items.values());
       if (req.onsuccess) req.onsuccess({ target: req });
     });
     return req;
@@ -148,18 +182,41 @@ async function runTests() {
   console.log('Testing TelemetryStore initialization...');
   await TelemetryStore.init();
 
-  console.log('Testing batch insertion...');
+  console.log('Testing batch insertion with various timestamp formats...');
   const sampleCalls = [
-    { id: 1, timestamp: '2026-08-01T10:00:00Z', model: 'glm-4', input_tokens: 500, output_tokens: 100, ttfb_ms: 200, total_ms: 1000 },
-    { id: 2, timestamp: '2026-08-02T10:00:00Z', model: 'qwen-2.5', input_tokens: 1200, output_tokens: 300, ttfb_ms: 350, total_ms: 1500 },
-    { id: 3, timestamp: '2026-08-03T10:00:00Z', model: 'glm-4', input_tokens: 800, output_tokens: 200, ttfb_ms: 180, total_ms: 800 }
+    // Microseconds and timezone offset +00:00 (SQLite raw format)
+    { id: 1, timestamp: '2026-08-01T10:00:00.123456+00:00', model: 'glm-4', input_tokens: 500, output_tokens: 100 },
+    // Standard ISO string
+    { id: 2, timestamp: '2026-08-02T15:30:00.000Z', model: 'qwen-2.5', input_tokens: 1200, output_tokens: 300 },
+    // Date string without milliseconds
+    { id: 3, timestamp: '2026-08-03T18:00:00Z', model: 'glm-4', input_tokens: 800, output_tokens: 200 },
+    // Date string 24h later
+    { id: 4, timestamp: '2026-08-04T12:00:00Z', model: 'glm-4', input_tokens: 400, output_tokens: 100 }
   ];
   await TelemetryStore.putBatch(sampleCalls);
 
   const stats = await TelemetryStore.getStorageStats();
   console.log('Storage Stats:', stats);
-  assert.strictEqual(stats.count, 3);
-  assert.strictEqual(stats.maxId, 3);
+  assert.strictEqual(stats.count, 4);
+  assert.strictEqual(stats.maxId, 4);
+
+  console.log('Testing range queries...');
+  // Query 1: 6-hour window covering call 2
+  const range1 = await TelemetryStore.getRange('2026-08-02T12:00:00Z', '2026-08-02T18:00:00Z');
+  assert.strictEqual(range1.length, 1);
+  assert.strictEqual(range1[0].id, 2);
+  console.log('PASS: 6-hour range query returned call 2');
+
+  // Query 2: 24-hour window covering call 1
+  const range2 = await TelemetryStore.getRange('2026-08-01T00:00:00Z', '2026-08-01T23:59:59Z');
+  assert.strictEqual(range2.length, 1);
+  assert.strictEqual(range2[0].id, 1);
+  console.log('PASS: 24-hour range query returned call 1');
+
+  // Query 3: Multi-day range covering all 4 calls
+  const range3 = await TelemetryStore.getRange('2026-08-01T00:00:00Z', '2026-08-05T00:00:00Z');
+  assert.strictEqual(range3.length, 4);
+  console.log('PASS: Full range query returned all 4 calls');
 
   console.log('Testing 1-week TTL eviction logic...');
   assert.strictEqual(stats.remainingDays, 7);

@@ -154,7 +154,7 @@ const App = (() => {
     
     saveFiltersToLocalStorage();
     if (triggerRefresh) {
-      refresh(true);
+      refresh(false);
     }
   }
 
@@ -839,7 +839,7 @@ const App = (() => {
           // Clear active class from quick range buttons since dates were custom-selected
           document.querySelectorAll('[data-range]').forEach(b => b.classList.remove('active'));
           saveFiltersToLocalStorage();
-          refresh(true);
+          refresh(false);
         }
       }
     });
@@ -1012,7 +1012,7 @@ const App = (() => {
   }
 
   /**
-   * Gather inputs and query API
+   * Gather inputs and query local cache / API
    */
   async function refresh(forceFetch = false) {
     // If a quick range button is selected, update date range dynamically based on current time
@@ -1035,10 +1035,22 @@ const App = (() => {
     const fromVal = dateRange.from ? new Date(dateRange.from).toISOString() : '';
     const toVal = dateRange.to ? new Date(dateRange.to).toISOString() : '';
 
-    // Automatically refresh live model status nodes from infra in sync with telemetry
-    loadServerStatus();
+    let watermarks = { count: 0, maxId: 0, earliestTs: null, latestTs: null };
+    if (typeof TelemetryStore !== 'undefined') {
+      try {
+        watermarks = await TelemetryStore.getWatermarks();
+      } catch (e) {
+        console.warn('Failed to query watermarks:', e);
+      }
+    }
 
-    // 1. Instantaneous Local Rendering from IndexedDB Data Lake
+    // 1. If cold cache (0 records) or forceFetch explicitly requested, fetch bulk from server
+    if (watermarks.count === 0 || forceFetch) {
+      await fetchTelemetryDelta(fromVal, toVal, false, forceFetch);
+      return;
+    }
+
+    // 2. Local IndexedDB Cache Hit: Query local store instantly (0 network requests)
     let cachedCalls = [];
     if (typeof TelemetryStore !== 'undefined') {
       try {
@@ -1048,18 +1060,18 @@ const App = (() => {
       }
     }
 
-    if (cachedCalls.length > 0 && !forceFetch) {
-      const initialPayload = {
-        calls: cachedCalls,
-        available_models: State.allAvailableModels || [],
-        available_types: State.allAvailableTypes || []
-      };
-      State.currentData = initialPayload;
-      renderTelemetry(initialPayload);
-      // Run delta sync in background
+    const initialPayload = {
+      calls: cachedCalls,
+      available_models: State.allAvailableModels || [],
+      available_types: State.allAvailableTypes || []
+    };
+    State.currentData = initialPayload;
+    renderTelemetry(initialPayload);
+    updateCacheStatsUI();
+
+    // 3. Only if requested range extends earlier than our earliest cached date, backfill gap
+    if (fromVal && watermarks.earliestTs && fromVal < watermarks.earliestTs) {
       fetchTelemetryDelta(fromVal, toVal, true, false);
-    } else {
-      fetchTelemetryDelta(fromVal, toVal, false, forceFetch);
     }
   }
 
@@ -1091,10 +1103,10 @@ const App = (() => {
       const watermarks = await TelemetryStore.getWatermarks();
 
       if (forceFetch || watermarks.count === 0) {
-        // Cold fetch for requested range
+        // Cold fetch for complete dataset into data lake
         const filters = {
-          from: fromVal,
-          to: toVal,
+          from: '',
+          to: '',
           limit: 500000
         };
         try {
@@ -1113,15 +1125,13 @@ const App = (() => {
           }
         } catch (bulkErr) {
           console.warn('[TelemetryStore] Bulk query failed, trying standard query fallback:', bulkErr);
-          // Fallback to standard query with smaller limits
           const fallbackData = await TelemetryAPI.query({ from: fromVal, to: toVal, limit: 10000 }, { signal });
           if (fallbackData.calls && fallbackData.calls.length > 0) {
             await TelemetryStore.putBatch(fallbackData.calls);
           }
         }
       } else {
-        // Smart Delta Sync:
-        // A. Fetch missing older historical window if fromVal is earlier than cached earliestTs
+        // Smart Delta Sync: Fetch missing older historical window if fromVal is earlier than cached earliestTs
         if (fromVal && (!watermarks.earliestTs || fromVal < watermarks.earliestTs)) {
           const histFilters = {
             from: fromVal,
@@ -1135,28 +1145,6 @@ const App = (() => {
             }
           } catch (e) {
             console.warn('[TelemetryStore] Historical gap sync deferred:', e);
-          }
-        }
-
-        // B. Fetch live tail (new calls recorded since maxId)
-        if (watermarks.maxId > 0) {
-          const tailFilters = {
-            since_id: watermarks.maxId,
-            limit: 500000
-          };
-          try {
-            const tailData = await TelemetryAPI.queryBulk(tailFilters, { signal });
-            if (tailData.calls && tailData.calls.length > 0) {
-              await TelemetryStore.putBatch(tailData.calls);
-            }
-            if (tailData.available_models && tailData.available_models.length > 0) {
-              State.allAvailableModels = tailData.available_models;
-            }
-            if (tailData.available_types && tailData.available_types.length > 0) {
-              State.allAvailableTypes = tailData.available_types;
-            }
-          } catch (e) {
-            console.warn('[TelemetryStore] Live tail sync deferred:', e);
           }
         }
       }
@@ -1207,6 +1195,42 @@ const App = (() => {
       if (State.activeAbortController === controller) {
         State.activeAbortController = null;
       }
+    }
+  }
+
+  /**
+   * Live tail sync poller (runs periodically when live updates are enabled)
+   */
+  async function syncLiveTail() {
+    if (typeof TelemetryStore === 'undefined' || !State.liveUpdatesEnabled) return;
+    try {
+      const watermarks = await TelemetryStore.getWatermarks();
+      if (watermarks.maxId > 0) {
+        const tailData = await TelemetryAPI.queryBulk({ since_id: watermarks.maxId, limit: 50000 });
+        if (tailData.calls && tailData.calls.length > 0) {
+          await TelemetryStore.putBatch(tailData.calls);
+          if (tailData.available_models && tailData.available_models.length > 0) {
+            State.allAvailableModels = tailData.available_models;
+          }
+          if (tailData.available_types && tailData.available_types.length > 0) {
+            State.allAvailableTypes = tailData.available_types;
+          }
+          const dateRange = getSelectedDateRange();
+          const fromVal = dateRange.from ? new Date(dateRange.from).toISOString() : '';
+          const toVal = dateRange.to ? new Date(dateRange.to).toISOString() : '';
+          const updatedCalls = await TelemetryStore.getRange(fromVal, toVal);
+          const updatedPayload = {
+            calls: updatedCalls,
+            available_models: State.allAvailableModels || [],
+            available_types: State.allAvailableTypes || []
+          };
+          State.currentData = updatedPayload;
+          renderTelemetry(updatedPayload);
+          updateCacheStatsUI();
+        }
+      }
+    } catch (e) {
+      console.warn('[TelemetryStore] Live tail sync deferred:', e);
     }
   }
 
@@ -1882,7 +1906,7 @@ const App = (() => {
     // 2. Telemetry query intervals (respects liveUpdatesEnabled toggle)
     if (!State.liveUpdatesEnabled) return;
 
-    State.intervals.refresh = setInterval(refresh, State.refreshRateSeconds * 1000);
+    State.intervals.refresh = setInterval(syncLiveTail, State.refreshRateSeconds * 1000);
     if (State.eInfraEnabled) {
       State.intervals.serverStatus = setInterval(loadServerStatus, 15000);
     }
