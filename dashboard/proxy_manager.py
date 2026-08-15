@@ -155,7 +155,14 @@ def kill_pid(pid: int, force: bool = False) -> bool:
 def get_persisted_token_budget() -> Dict[str, Any]:
     """Retrieve 24H token usage from data/token_budget.json or SQLite DB as fallback."""
     now = time.time()
-    cutoff_ts = now - 86400
+    now_utc = datetime.now(timezone.utc)
+    start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff_ts = start_of_today.timestamp()
+    cutoff_iso = start_of_today.isoformat()
+
+    tomorrow_midnight = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_reset_seconds = max(0, int((tomorrow_midnight - now_utc).total_seconds()))
+    daily_reset_formatted = format_time_remaining(daily_reset_seconds)
 
     # 1. Check data/token_budget.json
     budget_file = get_data_dir() / "token_budget.json"
@@ -165,7 +172,7 @@ def get_persisted_token_budget() -> Dict[str, Any]:
                 data = json.load(f)
                 records = [r for r in data.get("recent_usage", []) if r.get("ts", 0) >= cutoff_ts]
                 daily_limit = data.get("daily_limit", DEFAULT_TOKEN_LIMIT)
-                total_used = sum(r.get("tokens", 0) for r in records) if records else data.get("total_used", 0)
+                total_used = sum(r.get("tokens", 0) for r in records) if records else (data.get("total_used", 0) if data.get("updated_at", "") >= cutoff_iso else 0)
                 remaining = max(0, daily_limit - total_used)
                 percentage_used = round((total_used / daily_limit) * 100, 2) if daily_limit > 0 else 0.0
 
@@ -179,10 +186,14 @@ def get_persisted_token_budget() -> Dict[str, Any]:
                     "remaining": remaining,
                     "percentage_used": percentage_used,
                     "daily_limit": daily_limit,
+                    "daily_reset_seconds": daily_reset_seconds,
+                    "daily_reset_formatted": daily_reset_formatted,
                     "next_reset_seconds": next_reset_seconds,
                     "full_reset_seconds": full_reset_seconds,
                     "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
                     "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
+                    "server_time": now_utc.isoformat(),
+                    "reset_time_utc": tomorrow_midnight.isoformat(),
                 }
         except Exception:
             pass
@@ -191,8 +202,6 @@ def get_persisted_token_budget() -> Dict[str, Any]:
     db_file = get_data_dir() / "llm_telemetry.db"
     if db_file.exists():
         try:
-            cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
-            cutoff_iso = cutoff_dt.isoformat()
             conn = sqlite3.connect(str(db_file), timeout=2.0)
             cur = conn.cursor()
             cur.execute("""
@@ -232,10 +241,14 @@ def get_persisted_token_budget() -> Dict[str, Any]:
                 "remaining": remaining,
                 "percentage_used": perc,
                 "daily_limit": daily_limit,
+                "daily_reset_seconds": daily_reset_seconds,
+                "daily_reset_formatted": daily_reset_formatted,
                 "next_reset_seconds": next_reset_seconds,
                 "full_reset_seconds": full_reset_seconds,
                 "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
                 "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
+                "server_time": now_utc.isoformat(),
+                "reset_time_utc": tomorrow_midnight.isoformat(),
             }
         except Exception:
             pass
@@ -245,10 +258,14 @@ def get_persisted_token_budget() -> Dict[str, Any]:
         "remaining": DEFAULT_TOKEN_LIMIT,
         "percentage_used": 0.0,
         "daily_limit": DEFAULT_TOKEN_LIMIT,
+        "daily_reset_seconds": daily_reset_seconds,
+        "daily_reset_formatted": daily_reset_formatted,
         "next_reset_seconds": 0,
         "full_reset_seconds": 0,
         "next_reset_formatted": None,
         "full_reset_formatted": None,
+        "server_time": now_utc.isoformat(),
+        "reset_time_utc": tomorrow_midnight.isoformat(),
     }
 
 

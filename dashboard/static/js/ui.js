@@ -1758,11 +1758,13 @@ const UI = (() => {
         budgetText.textContent = `${usedM}M / ${limitM}M (${perc}%)`;
 
         if (renewalText) {
-          const resetSecs = (typeof tb.full_reset_seconds === 'number' && tb.full_reset_seconds > 0)
-            ? tb.full_reset_seconds
-            : (typeof tb.next_reset_seconds === 'number' && tb.next_reset_seconds > 0 ? tb.next_reset_seconds : 0);
+          const resetSecs = (typeof tb.daily_reset_seconds === 'number' && tb.daily_reset_seconds > 0)
+            ? tb.daily_reset_seconds
+            : (typeof tb.full_reset_seconds === 'number' && tb.full_reset_seconds > 0
+              ? tb.full_reset_seconds
+              : (typeof tb.next_reset_seconds === 'number' && tb.next_reset_seconds > 0 ? tb.next_reset_seconds : 0));
 
-          let timeStr = tb.full_reset_formatted;
+          let timeStr = tb.daily_reset_formatted || tb.full_reset_formatted;
           if (!timeStr && resetSecs > 0) {
             const hrs = Math.floor(resetSecs / 3600);
             const mins = Math.floor((resetSecs % 3600) / 60);
@@ -1778,10 +1780,9 @@ const UI = (() => {
             }
           }
 
-          if (tb.total_used > 0 && timeStr) {
+          if (timeStr) {
             renewalText.textContent = `(resets in ${timeStr})`;
-            const nextRollOff = tb.next_reset_formatted ? ` • next roll-off in ${tb.next_reset_formatted}` : '';
-            renewalText.title = `Token usage fully resets in ${timeStr}${nextRollOff} (rolling 24h window)`;
+            renewalText.title = `Daily token quota resets at 00:00 UTC (in ${timeStr})`;
             renewalText.style.display = 'inline';
           } else {
             renewalText.textContent = '';

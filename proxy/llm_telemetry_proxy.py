@@ -100,16 +100,16 @@ class RollingTokenBudget:
         self._load_state()
 
     def _load_state(self):
-        """Restore rolling token budget from SQLite DB and state file on startup."""
-        now = time.time()
-        cutoff = now - 86400
+        """Restore token budget from SQLite DB and state file for the current UTC day."""
+        now_utc = datetime.now(timezone.utc)
+        start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = start_of_today.timestamp()
+        cutoff_iso = start_of_today.isoformat()
         temp_usage = []
 
-        # 1. First attempt: Query SQLite DB for calls within the past 24 hours
+        # 1. First attempt: Query SQLite DB for calls within the current UTC day
         try:
             if self.db_path and Path(self.db_path).exists():
-                cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
-                cutoff_iso = cutoff_dt.isoformat()
                 conn = sqlite3.connect(str(self.db_path), timeout=5.0)
                 cur = conn.cursor()
                 cur.execute("""
@@ -161,8 +161,9 @@ class RollingTokenBudget:
         if not self.state_file:
             return
         try:
-            now = time.time()
-            cutoff = now - 86400
+            now_utc = datetime.now(timezone.utc)
+            start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            cutoff = start_of_today.timestamp()
             while self._usage and self._usage[0][0] < cutoff:
                 self._usage.popleft()
 
@@ -170,10 +171,15 @@ class RollingTokenBudget:
             remaining = max(0, self.daily_limit - current_usage)
             percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
 
+            now = time.time()
             oldest_ts = self._usage[0][0] if self._usage else None
             newest_ts = self._usage[-1][0] if self._usage else None
             next_reset_seconds = max(0, int((oldest_ts + 86400) - now)) if oldest_ts else 0
             full_reset_seconds = max(0, int((newest_ts + 86400) - now)) if newest_ts else 0
+
+            tomorrow_midnight = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            daily_reset_seconds = max(0, int((tomorrow_midnight - now_utc).total_seconds()))
+            daily_reset_formatted = format_time_remaining(daily_reset_seconds)
 
             recent_list = [{"ts": round(ts, 2), "tokens": cnt} for ts, cnt in self._usage]
 
@@ -182,11 +188,15 @@ class RollingTokenBudget:
                 "total_used": current_usage,
                 "remaining": remaining,
                 "percentage_used": round(percentage_used, 2),
+                "daily_reset_seconds": daily_reset_seconds,
+                "daily_reset_formatted": daily_reset_formatted,
                 "next_reset_seconds": next_reset_seconds,
                 "full_reset_seconds": full_reset_seconds,
                 "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
                 "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "server_time": now_utc.isoformat(),
+                "reset_time_utc": tomorrow_midnight.isoformat(),
+                "updated_at": now_utc.isoformat(),
                 "recent_usage": recent_list[-5000:],
             }
 
@@ -208,14 +218,19 @@ class RollingTokenBudget:
         total = input_tokens + output_tokens
         self._usage.append((now, total))
 
-        # Purge entries older than 24 hours
-        cutoff = now - 86400
+        now_utc = datetime.now(timezone.utc)
+        start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = start_of_today.timestamp()
         while self._usage and self._usage[0][0] < cutoff:
             self._usage.popleft()
 
         current_usage = sum(count for _, count in self._usage)
         remaining = max(0, self.daily_limit - current_usage)
         percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
+
+        tomorrow_midnight = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_reset_seconds = max(0, int((tomorrow_midnight - now_utc).total_seconds()))
+        daily_reset_formatted = format_time_remaining(daily_reset_seconds)
 
         oldest_ts = self._usage[0][0] if self._usage else None
         newest_ts = self._usage[-1][0] if self._usage else None
@@ -227,10 +242,14 @@ class RollingTokenBudget:
             "remaining": remaining,
             "percentage_used": round(percentage_used, 2),
             "daily_limit": self.daily_limit,
+            "daily_reset_seconds": daily_reset_seconds,
+            "daily_reset_formatted": daily_reset_formatted,
             "next_reset_seconds": next_reset_seconds,
             "full_reset_seconds": full_reset_seconds,
             "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
             "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
+            "server_time": now_utc.isoformat(),
+            "reset_time_utc": tomorrow_midnight.isoformat(),
         }
 
         self._save_state()
@@ -242,13 +261,19 @@ class RollingTokenBudget:
     def get_status(self) -> dict:
         """Get current budget status without recording usage."""
         now = time.time()
-        cutoff = now - 86400
+        now_utc = datetime.now(timezone.utc)
+        start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = start_of_today.timestamp()
         while self._usage and self._usage[0][0] < cutoff:
             self._usage.popleft()
 
         current_usage = sum(count for _, count in self._usage)
         remaining = max(0, self.daily_limit - current_usage)
         percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
+
+        tomorrow_midnight = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_reset_seconds = max(0, int((tomorrow_midnight - now_utc).total_seconds()))
+        daily_reset_formatted = format_time_remaining(daily_reset_seconds)
 
         oldest_ts = self._usage[0][0] if self._usage else None
         newest_ts = self._usage[-1][0] if self._usage else None
@@ -260,10 +285,14 @@ class RollingTokenBudget:
             "remaining": remaining,
             "percentage_used": round(percentage_used, 2),
             "daily_limit": self.daily_limit,
+            "daily_reset_seconds": daily_reset_seconds,
+            "daily_reset_formatted": daily_reset_formatted,
             "next_reset_seconds": next_reset_seconds,
             "full_reset_seconds": full_reset_seconds,
             "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
             "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
+            "server_time": now_utc.isoformat(),
+            "reset_time_utc": tomorrow_midnight.isoformat(),
             "oldest_token_ts": oldest_ts,
             "newest_token_ts": newest_ts,
         }
