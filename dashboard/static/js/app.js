@@ -1119,6 +1119,9 @@ const App = (() => {
           }
           if (data.available_models && data.available_models.length > 0) {
             State.allAvailableModels = data.available_models;
+            if (State.modelDropdownInstance && State.modelDropdownInstance.updateModels) {
+              State.modelDropdownInstance.updateModels(State.allAvailableModels);
+            }
           }
           if (data.available_types && data.available_types.length > 0) {
             State.allAvailableTypes = data.available_types;
@@ -1211,6 +1214,9 @@ const App = (() => {
           await TelemetryStore.putBatch(tailData.calls);
           if (tailData.available_models && tailData.available_models.length > 0) {
             State.allAvailableModels = tailData.available_models;
+            if (State.modelDropdownInstance && State.modelDropdownInstance.updateModels) {
+              State.modelDropdownInstance.updateModels(State.allAvailableModels);
+            }
           }
           if (tailData.available_types && tailData.available_types.length > 0) {
             State.allAvailableTypes = tailData.available_types;

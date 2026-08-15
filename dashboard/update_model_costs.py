@@ -89,15 +89,6 @@ MODEL_SOURCE_PATTERNS = {
         "openrouter/qwen/qwen3.5-397b-a17b",
         "scaleway/qwen/qwen3.5-397b-a17b"
     ],
-    "mistral-medium-3.5": [
-        "scaleway/mistralai/mistral-medium-3.5-128b",
-        "mistral/mistral-medium-3.5-128b"
-    ],
-    "whisper-large-v3": [
-        "fireworks_ai/whisper-large-v3",
-        "groq/whisper-large-v3",
-        "scaleway/openai/whisper-large-v3"
-    ],
     "qwen3-embedding-4b": [
         "dashscope/qwen3-embedding-4b",
         "fireworks_ai/accounts/fireworks/models/qwen3-embedding-4b"
@@ -105,10 +96,6 @@ MODEL_SOURCE_PATTERNS = {
     "qwen3-reranker-4b": [
         "deepinfra/qwen3-reranker-4b",
         "fireworks_ai/accounts/fireworks/models/qwen3-reranker-4b"
-    ],
-    "command-a": [
-        "vercel_ai_gateway/cohere/command-a",
-        "command-a-03-2025"
     ]
 }
 

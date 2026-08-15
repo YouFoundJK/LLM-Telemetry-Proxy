@@ -409,7 +409,7 @@ const UI = (() => {
 
     // If server grouped by model, render server stats
     if (isModelGroup && data.groups) {
-      const groups = [...data.groups].sort((a, b) => (b.total_input || 0) - (a.total_input || 0));
+      const groups = [...data.groups].filter(g => (g.calls || 0) > 0).sort((a, b) => (b.total_input || 0) - (a.total_input || 0));
       tbody.innerHTML = groups.map(g => `
         <tr>
           <td><span class="tag ${getModelClass(g.model)}">${g.model || 'System / Non-Inference'}</span></td>
@@ -484,6 +484,7 @@ const UI = (() => {
     });
 
     tbody.innerHTML = Object.entries(byModel)
+      .filter(([m, b]) => b.calls > 0)
       .sort((a, b) => (b[1].input || 0) - (a[1].input || 0))
       .map(([m, b]) => {
         const avgTtfb = b.ttfbCount > 0 ? (b.ttfbSum / b.ttfbCount) : 0;
@@ -730,10 +731,16 @@ const UI = (() => {
       return Array.from(checkedInputs).map(i => i.value);
     }
 
+    function updateModels(newAvailableModels) {
+      availableModels = (newAvailableModels || []).filter(Boolean);
+      rebuild();
+    }
+
     rebuild();
 
     return {
-      getSelectedModels
+      getSelectedModels,
+      updateModels
     };
   }
   /**
@@ -760,7 +767,7 @@ const UI = (() => {
       modelInputTokens[c.model] = (modelInputTokens[c.model] || 0) + inp;
     });
 
-    const sortedModels = Object.keys(modelInputTokens).sort((a, b) => modelInputTokens[b] - modelInputTokens[a]);
+    const sortedModels = Object.keys(modelInputTokens).filter(m => (modelInputTokens[m] || 0) > 0).sort((a, b) => modelInputTokens[b] - modelInputTokens[a]);
 
     if (sortedModels.length < 2) {
       const singleModel = sortedModels[0] || 'Unknown';
@@ -964,7 +971,9 @@ const UI = (() => {
       s.total += (c.input_tokens || 0) + (c.output_tokens || 0);
     });
 
-    const efficiencyRows = Object.values(modelTokenStats).map(s => {
+    const efficiencyRows = Object.values(modelTokenStats)
+      .filter(s => s.calls > 0 && s.total > 0)
+      .map(s => {
       const avgInput = s.calls > 0 ? (s.input / s.calls) : 0;
       const avgOutput = s.calls > 0 ? (s.output / s.calls) : 0;
       const ratio = avgOutput > 0 ? (avgInput / avgOutput) : 0;
@@ -1550,6 +1559,7 @@ const UI = (() => {
     });
 
     tbody.innerHTML = Object.entries(byModel)
+      .filter(([m, b]) => b.calls > 0)
       .sort((a, b) => b[1].totalCost - a[1].totalCost)
       .map(([m, b]) => {
         const avgCost = b.calls > 0 ? (b.totalCost / b.calls) : 0;

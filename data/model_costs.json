@@ -142,35 +142,5 @@
       "output_cost_per_million": 0.56,
       "provider_source": "Tensormesh (LiteLLM)"
     }
-  ],
-  "command-a": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 2.5,
-      "output_cost_per_million": 10.0,
-      "provider_source": "Cohere (LiteLLM)"
-    }
-  ],
-  "mistral-medium-3.5": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 1.5,
-      "output_cost_per_million": 7.5,
-      "provider_source": "Mistral AI / Scaleway (LiteLLM)"
-    }
-  ],
-  "whisper-large-v3": [
-    {
-      "effective_date": "2026-07-04",
-      "input_cost_per_million": 7.5,
-      "output_cost_per_million": 0.0,
-      "provider_source": "Fireworks AI"
-    },
-    {
-      "effective_date": "2026-08-13",
-      "input_cost_per_million": 0.0,
-      "output_cost_per_million": 0.0,
-      "provider_source": "Scaleway (LiteLLM)"
-    }
   ]
 }

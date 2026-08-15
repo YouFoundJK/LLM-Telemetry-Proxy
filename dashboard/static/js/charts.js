@@ -263,7 +263,7 @@ const TelemetryCharts = (() => {
 
     const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
     const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && byBucket[b][m] > 0));
+    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && (byBucket[b][m] || 0) > 0));
     
     const datasets = models.map(m => ({
       label: m,
@@ -272,7 +272,10 @@ const TelemetryCharts = (() => {
       borderColor: getModelColor(m),
       borderWidth: 1.5,
       fill: true,
-      tension: 0.2
+      tension: 0.2,
+      pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+      pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0),
+      pointHitRadius: 10
     }));
 
     const ctx = document.getElementById('tokenChart');
@@ -292,7 +295,18 @@ const TelemetryCharts = (() => {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } }
+          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+          tooltip: {
+            filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0,
+            callbacks: {
+              label: function(context) {
+                let label = context.dataset.label || '';
+                if (label) label += ': ';
+                const val = Number(context.raw) || 0;
+                return label + val.toLocaleString('en-US');
+              }
+            }
+          }
         },
         scales: {
           x: {
@@ -696,7 +710,9 @@ const TelemetryCharts = (() => {
         backgroundColor: COLORS.accent + '15',
         borderWidth: 2,
         tension: 0.2,
-        fill: true
+        fill: true,
+        pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+        pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0)
       },
       {
         label: 'Output Tokens',
@@ -705,7 +721,9 @@ const TelemetryCharts = (() => {
         backgroundColor: COLORS.purple + '15',
         borderWidth: 2,
         tension: 0.2,
-        fill: true
+        fill: true,
+        pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+        pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0)
       },
       {
         label: 'Total Tokens',
@@ -715,7 +733,9 @@ const TelemetryCharts = (() => {
         borderWidth: 2.5,
         borderDash: [5, 5],
         tension: 0.2,
-        fill: false
+        fill: false,
+        pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+        pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0)
       }
     ];
 
@@ -732,8 +752,20 @@ const TelemetryCharts = (() => {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } }
+          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+          tooltip: {
+            filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0,
+            callbacks: {
+              label: function(context) {
+                let label = context.dataset.label || '';
+                if (label) label += ': ';
+                const val = Number(context.raw) || 0;
+                return label + val.toLocaleString('en-US');
+              }
+            }
+          }
         },
         scales: {
           x: { ticks: { color: COLORS.text, maxRotation: 45 }, grid: { color: COLORS.grid } },
@@ -757,10 +789,11 @@ const TelemetryCharts = (() => {
 
     calls.forEach(c => {
       if (!c.model || c.model === 'unknown') return;
+      const totalTok = (c.input_tokens || 0) + (c.output_tokens || 0);
+      if (totalTok <= 0) return;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
       if (byBucket[bucketKey] === undefined) return;
       const m = c.model;
-      const totalTok = (c.input_tokens || 0) + (c.output_tokens || 0);
       const callsCount = (c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1);
       
       if (!byBucket[bucketKey][m]) {
@@ -783,13 +816,16 @@ const TelemetryCharts = (() => {
         label: m,
         data: sortedBuckets.map(b => {
           const entry = byBucket[b][m];
-          return entry && entry.count > 0 ? (entry.sum / entry.count) : null;
+          return entry && entry.count > 0 && entry.sum > 0 ? (entry.sum / entry.count) : null;
         }),
         borderColor: getModelColor(m),
         backgroundColor: 'transparent',
         borderWidth: 2,
         tension: 0.2,
-        spanGaps: false
+        spanGaps: false,
+        pointRadius: (ctx) => (ctx.raw !== null && Number(ctx.raw) > 0 ? 3 : 0),
+        pointHoverRadius: (ctx) => (ctx.raw !== null && Number(ctx.raw) > 0 ? 5 : 0),
+        pointHitRadius: 10
       };
     });
 
@@ -806,8 +842,20 @@ const TelemetryCharts = (() => {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } }
+          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+          tooltip: {
+            filter: (tooltipItem) => tooltipItem.raw !== null && (Number(tooltipItem.raw) || 0) > 0,
+            callbacks: {
+              label: function(context) {
+                let label = context.dataset.label || '';
+                if (label) label += ': ';
+                const val = Number(context.raw) || 0;
+                return label + Math.round(val).toLocaleString('en-US') + ' tok/call';
+              }
+            }
+          }
         },
         scales: {
           x: { ticks: { color: COLORS.text, maxRotation: 45 }, grid: { color: COLORS.grid } },
@@ -870,7 +918,10 @@ const TelemetryCharts = (() => {
           responsive: true,
           maintainAspectRatio: false,
           plugins: {
-            legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } }
+            legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+            tooltip: {
+              filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0
+            }
           },
           scales: {
             x: { ticks: { color: COLORS.text }, grid: { color: COLORS.grid } },
@@ -895,7 +946,9 @@ const TelemetryCharts = (() => {
               backgroundColor: COLORS.accent + '20',
               borderWidth: 2,
               tension: 0.3,
-              fill: false
+              fill: false,
+              pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+              pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0)
             },
             {
               label: 'Startup Latency (Avg TTFT)',
@@ -904,15 +957,21 @@ const TelemetryCharts = (() => {
               backgroundColor: COLORS.cyan + '20',
               borderWidth: 2,
               tension: 0.3,
-              fill: false
+              fill: false,
+              pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+              pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0)
             }
           ]
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
           plugins: {
-            legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } }
+            legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+            tooltip: {
+              filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0
+            }
           },
           scales: {
             x: { ticks: { color: COLORS.text }, grid: { color: COLORS.grid } },
@@ -951,15 +1010,16 @@ const TelemetryCharts = (() => {
 
     calls.forEach(c => {
       if (!c.model || c.model === 'unknown') return;
+      const cost = c.total_cost || 0;
+      if (cost <= 0) return;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
       const m = c.model;
-      const cost = c.total_cost || 0;
       byBucket[bucketKey][m] = (byBucket[bucketKey][m] || 0) + cost;
     });
 
     const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
     const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && byBucket[b][m] > 0));
+    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && (byBucket[b][m] || 0) > 0));
 
     const datasets = models.map(m => {
       const dataPoints = sortedBuckets.map(b => byBucket[b][m] || 0);
@@ -971,7 +1031,10 @@ const TelemetryCharts = (() => {
         borderColor: getModelColor(m),
         borderWidth: 2,
         fill: true,
-        tension: 0.2
+        tension: 0.2,
+        pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
+        pointHoverRadius: (ctx) => (Number(ctx.raw) > 0 ? 5 : 0),
+        pointHitRadius: 10
       };
     });
 
@@ -1000,9 +1063,11 @@ const TelemetryCharts = (() => {
             labels: { color: COLORS.text, font: { family: 'Outfit' } }
           },
           tooltip: {
+            filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0,
             callbacks: {
               label: function(context) {
-                return `${context.dataset.label}: $${context.raw.toFixed(4)}`;
+                const val = Number(context.raw) || 0;
+                return `${context.dataset.label}: $${val.toFixed(4)}`;
               }
             }
           }
@@ -1037,11 +1102,13 @@ const TelemetryCharts = (() => {
     const byModel = {};
     calls.forEach(c => {
       if (!c.model || c.model === 'unknown') return;
+      const cost = c.total_cost || 0;
+      if (cost <= 0) return;
       const m = c.model;
-      byModel[m] = (byModel[m] || 0) + (c.total_cost || 0);
+      byModel[m] = (byModel[m] || 0) + cost;
     });
 
-    const sortedModels = Object.keys(byModel).sort((a, b) => byModel[b] - byModel[a]);
+    const sortedModels = Object.keys(byModel).filter(m => (byModel[m] || 0) > 0).sort((a, b) => byModel[b] - byModel[a]);
     const data = sortedModels.map(m => byModel[m]);
     const backgroundColors = sortedModels.map(m => getModelColor(m));
 

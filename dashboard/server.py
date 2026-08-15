@@ -499,25 +499,30 @@ async def handle_query(request: web.Request) -> web.Response:
         if _metadata_cache["models"] is None or (now_ts - _metadata_cache["last_fetched"] > 30.0):
             try:
                 models_avail = conn.execute(
-                    "SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL ORDER BY model"
+                    "SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL AND (COALESCE(calls_count, 1) > 0 OR COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0) ORDER BY model"
                 ).fetchall()
                 mapped_models = set()
                 for r in models_avail:
                     if r["model"]:
-                        mapped_models.add(get_resolved_model(r["model"], mapping))
-                for v in mapping.values():
-                    if isinstance(v, str):
-                        mapped_models.add(v)
-                    elif isinstance(v, dict):
-                        for tgt in v.values():
-                            if tgt:
-                                mapped_models.add(tgt)
-                _metadata_cache["models"] = sorted(list(mapped_models))
+                        target = mapping.get(r["model"].lower().strip())
+                        if isinstance(target, dict):
+                            for v in target.values():
+                                if v:
+                                    mapped_models.add(v)
+                        elif isinstance(target, str):
+                            mapped_models.add(target)
+                        elif isinstance(target, list):
+                            for v in target:
+                                if v:
+                                    mapped_models.add(v)
+                        else:
+                            mapped_models.add(r["model"])
+                _metadata_cache["models"] = sorted([m for m in mapped_models if m])
 
                 types_avail = conn.execute(
-                    "SELECT DISTINCT call_type FROM api_calls ORDER BY call_type"
+                    "SELECT DISTINCT call_type FROM api_calls WHERE call_type IS NOT NULL ORDER BY call_type"
                 ).fetchall()
-                _metadata_cache["types"] = [r["call_type"] for r in types_avail]
+                _metadata_cache["types"] = [r["call_type"] for r in types_avail if r["call_type"]]
                 _metadata_cache["last_fetched"] = now_ts
             except Exception:
                 pass
@@ -688,21 +693,28 @@ async def handle_query_bulk(request: web.Request) -> web.Response:
         now_ts = datetime.now().timestamp()
         if _metadata_cache["models"] is None or (now_ts - _metadata_cache["last_fetched"] > 30.0):
             try:
-                models_avail = conn.execute("SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL ORDER BY model").fetchall()
+                models_avail = conn.execute(
+                    "SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL AND (COALESCE(calls_count, 1) > 0 OR COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0) ORDER BY model"
+                ).fetchall()
                 mapped_models = set()
                 for r in models_avail:
                     if r["model"]:
-                        mapped_models.add(get_resolved_model(r["model"], mapping))
-                for v in mapping.values():
-                    if isinstance(v, str):
-                        mapped_models.add(v)
-                    elif isinstance(v, dict):
-                        for tgt in v.values():
-                            if tgt:
-                                mapped_models.add(tgt)
-                _metadata_cache["models"] = sorted(list(mapped_models))
-                types_avail = conn.execute("SELECT DISTINCT call_type FROM api_calls ORDER BY call_type").fetchall()
-                _metadata_cache["types"] = [r["call_type"] for r in types_avail]
+                        target = mapping.get(r["model"].lower().strip())
+                        if isinstance(target, dict):
+                            for v in target.values():
+                                if v:
+                                    mapped_models.add(v)
+                        elif isinstance(target, str):
+                            mapped_models.add(target)
+                        elif isinstance(target, list):
+                            for v in target:
+                                if v:
+                                    mapped_models.add(v)
+                        else:
+                            mapped_models.add(r["model"])
+                _metadata_cache["models"] = sorted([m for m in mapped_models if m])
+                types_avail = conn.execute("SELECT DISTINCT call_type FROM api_calls WHERE call_type IS NOT NULL ORDER BY call_type").fetchall()
+                _metadata_cache["types"] = [r["call_type"] for r in types_avail if r["call_type"]]
                 _metadata_cache["last_fetched"] = now_ts
             except Exception:
                 pass
