@@ -1751,20 +1751,37 @@ const UI = (() => {
         } else {
           budgetFill.className = 'token-budget-fill';
         }
-        const usedM = ((tb.total_used || 0) / 1_000_000).toFixed(1);
-        const limitM = ((tb.daily_limit || 480_000_000) / 1_000_000).toFixed(0);
+        const usedVal = (tb.total_used || 0) / 1_000_000;
+        const usedM = usedVal >= 10 ? usedVal.toFixed(1) : (usedVal > 0 ? usedVal.toFixed(2) : '0');
+        const limitVal = (tb.daily_limit || 480_000_000) / 1_000_000;
+        const limitM = limitVal % 1 === 0 ? limitVal.toFixed(0) : limitVal.toFixed(1);
         budgetText.textContent = `${usedM}M / ${limitM}M (${perc}%)`;
 
         if (renewalText) {
-          let timeStr = tb.next_reset_formatted;
-          if (!timeStr && typeof tb.next_reset_seconds === 'number' && tb.next_reset_seconds > 0) {
-            const hrs = Math.floor(tb.next_reset_seconds / 3600);
-            const mins = Math.floor((tb.next_reset_seconds % 3600) / 60);
-            timeStr = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+          const resetSecs = (typeof tb.full_reset_seconds === 'number' && tb.full_reset_seconds > 0)
+            ? tb.full_reset_seconds
+            : (typeof tb.next_reset_seconds === 'number' && tb.next_reset_seconds > 0 ? tb.next_reset_seconds : 0);
+
+          let timeStr = tb.full_reset_formatted;
+          if (!timeStr && resetSecs > 0) {
+            const hrs = Math.floor(resetSecs / 3600);
+            const mins = Math.floor((resetSecs % 3600) / 60);
+            const secs = resetSecs % 60;
+            if (hrs > 0) {
+              timeStr = mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+            } else if (mins > 0) {
+              timeStr = `${mins}m`;
+            } else if (secs > 0) {
+              timeStr = `< 1m`;
+            } else {
+              timeStr = `0m`;
+            }
           }
+
           if (tb.total_used > 0 && timeStr) {
-            renewalText.textContent = `(${timeStr})`;
-            renewalText.title = `Next token roll-off in ${timeStr} (oldest tokens in 24h rolling window)`;
+            renewalText.textContent = `(resets in ${timeStr})`;
+            const nextRollOff = tb.next_reset_formatted ? ` • next roll-off in ${tb.next_reset_formatted}` : '';
+            renewalText.title = `Token usage fully resets in ${timeStr}${nextRollOff} (rolling 24h window)`;
             renewalText.style.display = 'inline';
           } else {
             renewalText.textContent = '';
@@ -1773,7 +1790,8 @@ const UI = (() => {
         }
       } else {
         budgetFill.style.width = '0%';
-        const defaultLimitM = (((status && status.token_limit) || 480_000_000) / 1_000_000).toFixed(0);
+        const defaultLimitVal = (((status && status.token_limit) || 480_000_000) / 1_000_000);
+        const defaultLimitM = defaultLimitVal % 1 === 0 ? defaultLimitVal.toFixed(0) : defaultLimitVal.toFixed(1);
         budgetText.textContent = isRunning ? `0 / ${defaultLimitM}M (0%)` : '—';
         if (renewalText) {
           renewalText.textContent = '';

@@ -137,6 +137,32 @@ class TestBulkApiEndpoint(AioHTTPTestCase):
         self.assertIn("db_fingerprint", data)
         self.assertTrue(len(data["db_fingerprint"]) > 0)
 
+    def test_format_time_remaining(self):
+        """Test time remaining format helper across minute/hour boundaries."""
+        from proxy.llm_telemetry_proxy import format_time_remaining as proxy_format
+        from dashboard.proxy_manager import format_time_remaining as mgr_format
+
+        for fn in (proxy_format, mgr_format):
+            self.assertEqual(fn(0), "0m")
+            self.assertEqual(fn(-10), "0m")
+            self.assertEqual(fn(30), "< 1m")
+            self.assertEqual(fn(60), "1m")
+            self.assertEqual(fn(125), "2m")
+            self.assertEqual(fn(3600), "1h")
+            self.assertEqual(fn(3660), "1h 1m")
+            self.assertEqual(fn(86100), "23h 55m")
+
+    def test_parse_token_limit(self):
+        """Test token limit parsing with numeric and million string inputs."""
+        from dashboard.server import parse_token_limit
+        self.assertEqual(parse_token_limit(480_000_000), 480_000_000)
+        self.assertEqual(parse_token_limit("480M"), 480_000_000)
+        self.assertEqual(parse_token_limit("500m"), 500_000_000)
+        self.assertEqual(parse_token_limit("1.5M"), 1_500_000)
+        self.assertEqual(parse_token_limit("480000000"), 480_000_000)
+        self.assertEqual(parse_token_limit(None, default=480_000_000), 480_000_000)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1383,6 +1383,23 @@ const App = (() => {
     }
   }
 
+  function formatTokenLimitToMillion(tokenLimit) {
+    if (tokenLimit === null || tokenLimit === undefined || isNaN(tokenLimit)) return '480';
+    const num = Number(tokenLimit);
+    if (num <= 0) return '0';
+    // If it's a raw token count (e.g. 480000000), convert to millions (480)
+    const valInM = num >= 1000 ? num / 1_000_000 : num;
+    return Number(valInM.toFixed(4)).toString();
+  }
+
+  function parseTokenLimitFromInput(val) {
+    if (val === null || val === undefined || String(val).trim() === '') return 480000000;
+    const num = parseFloat(String(val).trim().replace(/,/g, ''));
+    if (isNaN(num) || num < 0) return 480000000;
+    // Input is in Millions (e.g. 480 -> 480,000,000)
+    return Math.round(num * 1_000_000);
+  }
+
   function isProxyConfigDirty() {
     if (!State.runningProxyConfig) return false;
     const portInput = document.getElementById('proxyConfigPort');
@@ -1392,7 +1409,7 @@ const App = (() => {
     
     const currPort = portInput ? parseInt(portInput.value, 10) : 9090;
     const currHost = hostInput ? hostInput.value.trim() : '0.0.0.0';
-    const currTokenLimit = tokenLimitInput ? parseInt(tokenLimitInput.value, 10) : 480000000;
+    const currTokenLimit = tokenLimitInput ? parseTokenLimitFromInput(tokenLimitInput.value) : 480000000;
     const currUpstream = upstreamInput ? normalizeUpstreamUrl(upstreamInput.value) : '';
     const runningUpstream = normalizeUpstreamUrl(State.runningProxyConfig.upstream);
 
@@ -1432,7 +1449,7 @@ const App = (() => {
 
     if (portInput) portInput.value = State.runningProxyConfig.port;
     if (hostInput) hostInput.value = State.runningProxyConfig.host;
-    if (tokenLimitInput) tokenLimitInput.value = State.runningProxyConfig.token_limit ?? 480000000;
+    if (tokenLimitInput) tokenLimitInput.value = formatTokenLimitToMillion(State.runningProxyConfig.token_limit ?? 480000000);
     if (upstreamInput) upstreamInput.value = State.runningProxyConfig.upstream;
 
     updateProxyConfigDirtyState();
@@ -1476,7 +1493,9 @@ const App = (() => {
         const upstreamInput = document.getElementById('proxyConfigUpstream');
         if (portInput && document.activeElement !== portInput) portInput.value = activePort;
         if (hostInput && document.activeElement !== hostInput) hostInput.value = activeHost;
-        if (tokenLimitInput && document.activeElement !== tokenLimitInput) tokenLimitInput.value = activeTokenLimit;
+        if (tokenLimitInput && document.activeElement !== tokenLimitInput) {
+          tokenLimitInput.value = formatTokenLimitToMillion(activeTokenLimit);
+        }
         if (upstreamInput && document.activeElement !== upstreamInput) upstreamInput.value = activeUpstream;
       }
 
@@ -1578,7 +1597,7 @@ const App = (() => {
       startBtn.addEventListener('click', async () => {
         const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
         const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
-        const tokenLimit = parseInt(document.getElementById('proxyConfigTokenLimit')?.value || '480000000', 10);
+        const tokenLimit = parseTokenLimitFromInput(document.getElementById('proxyConfigTokenLimit')?.value);
         const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
 
         startBtn.disabled = true;
@@ -1629,7 +1648,7 @@ const App = (() => {
       restartBtn.addEventListener('click', async () => {
         const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
         const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
-        const tokenLimit = parseInt(document.getElementById('proxyConfigTokenLimit')?.value || '480000000', 10);
+        const tokenLimit = parseTokenLimitFromInput(document.getElementById('proxyConfigTokenLimit')?.value);
         const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
 
         restartBtn.disabled = true;

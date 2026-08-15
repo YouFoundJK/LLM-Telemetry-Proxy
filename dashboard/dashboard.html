@@ -566,7 +566,10 @@
               </div>
               <div class="proxy-form-group">
                 <label for="proxyConfigTokenLimit">Daily Token Cap (24H)</label>
-                <input type="number" id="proxyConfigTokenLimit" class="proxy-input" value="480000000" min="0" step="1000000" placeholder="480000000">
+                <div class="proxy-input-unit-wrapper">
+                  <input type="number" id="proxyConfigTokenLimit" class="proxy-input proxy-input-with-unit" value="480" min="0" step="any" placeholder="480">
+                  <span class="proxy-input-unit">M</span>
+                </div>
               </div>
               <div class="proxy-form-group full-width">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">

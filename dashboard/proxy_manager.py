@@ -35,9 +35,14 @@ def format_time_remaining(seconds: int) -> str:
         return "0m"
     hrs = seconds // 3600
     mins = (seconds % 3600) // 60
+    secs = seconds % 60
     if hrs > 0:
-        return f"{hrs}h {mins}m"
-    return f"{mins}m"
+        return f"{hrs}h {mins}m" if mins > 0 else f"{hrs}h"
+    if mins > 0:
+        return f"{mins}m"
+    if secs > 0:
+        return "< 1m"
+    return "0m"
 
 
 def get_data_dir() -> Path:

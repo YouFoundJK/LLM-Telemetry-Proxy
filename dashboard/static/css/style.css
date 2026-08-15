@@ -1653,6 +1653,28 @@ td.num {
   border-color: var(--accent);
 }
 
+.proxy-input-unit-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.proxy-input-unit-wrapper .proxy-input {
+  width: 100%;
+  padding-right: 32px;
+}
+
+.proxy-input-unit {
+  position: absolute;
+  right: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+  user-select: none;
+}
+
 .db-maint-info {
   display: flex;
   flex-direction: column;
