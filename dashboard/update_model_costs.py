@@ -138,18 +138,47 @@ def load_model_mapping() -> dict:
     return {}
 
 
-def resolve_canonical_model(model_name: str, mapping: dict = None) -> str:
+def resolve_canonical_model(model_name: str, mapping: dict = None, timestamp: str = None) -> str:
     if not model_name:
         return model_name
     if mapping is None:
         mapping = load_model_mapping()
+    if not mapping:
+        return model_name
     m_lower = str(model_name).lower().strip()
-    for canonical, aliases in mapping.items():
-        if m_lower == canonical.lower().strip():
-            return canonical
-        for alias in aliases:
-            if m_lower == str(alias).lower().strip():
-                return canonical
+    
+    target = mapping.get(m_lower)
+    if target is None:
+        for k, v in mapping.items():
+            if k.lower().strip() == m_lower:
+                target = v
+                break
+                
+    if target is None:
+        return model_name
+        
+    if isinstance(target, str):
+        return target
+        
+    if isinstance(target, dict):
+        sorted_dates = sorted(target.keys())
+        if not sorted_dates:
+            return model_name
+        if not timestamp:
+            return target[sorted_dates[-1]]
+            
+        ts_date = str(timestamp)[:10]
+        matched_date = sorted_dates[0]
+        for d in sorted_dates:
+            if d <= ts_date:
+                matched_date = d
+            else:
+                break
+        return target[matched_date]
+        
+    if isinstance(target, list):
+        return target[0] if target else model_name
+        
     return model_name
 
 
@@ -158,9 +187,17 @@ def get_all_tracked_models() -> set:
     canonical_models = set()
 
     # 1. Canonical models defined in model_mapping.json
-    for canon in mapping.keys():
-        if canon:
-            canonical_models.add(canon.strip())
+    for v in mapping.values():
+        if isinstance(v, str):
+            canonical_models.add(v.strip())
+        elif isinstance(v, dict):
+            for tgt in v.values():
+                if tgt:
+                    canonical_models.add(tgt.strip())
+        elif isinstance(v, list):
+            for tgt in v:
+                if tgt:
+                    canonical_models.add(tgt.strip())
 
     # 2. Existing models in model_costs.json (canonicalized)
     if COSTS_PATH.exists():

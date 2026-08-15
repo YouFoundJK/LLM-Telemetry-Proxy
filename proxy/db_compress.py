@@ -64,16 +64,43 @@ def load_model_mapping() -> dict:
             print(f"[compressor] Error loading model_mapping.json from {mapping_path}: {e}", file=sys.stderr)
     return {}
 
-def get_resolved_model(model_name: str, mapping: dict) -> str:
-    if not model_name:
+def get_resolved_model(model_name: str, mapping: dict, timestamp: str = None) -> str:
+    if not model_name or not mapping:
         return model_name
-    model_lower = model_name.lower().strip()
-    for main_model, aliases in mapping.items():
-        if model_lower == main_model.lower().strip():
-            return main_model
-        for alias in aliases:
-            if model_lower == alias.lower().strip():
-                return main_model
+    m_lower = str(model_name).lower().strip()
+    
+    target = mapping.get(m_lower)
+    if target is None:
+        for k, v in mapping.items():
+            if k.lower().strip() == m_lower:
+                target = v
+                break
+                
+    if target is None:
+        return model_name
+        
+    if isinstance(target, str):
+        return target
+        
+    if isinstance(target, dict):
+        sorted_dates = sorted(target.keys())
+        if not sorted_dates:
+            return model_name
+        if not timestamp:
+            return target[sorted_dates[-1]]
+            
+        ts_date = str(timestamp)[:10]
+        matched_date = sorted_dates[0]
+        for d in sorted_dates:
+            if d <= ts_date:
+                matched_date = d
+            else:
+                break
+        return target[matched_date]
+        
+    if isinstance(target, list):
+        return target[0] if target else model_name
+        
     return model_name
 
 def get_db():
@@ -145,7 +172,7 @@ def compress(dry_run=False):
     # Process api_calls
     api_groups = {}
     for r in api_rows:
-        resolved_model = get_resolved_model(r["model"], mapping)
+        resolved_model = get_resolved_model(r["model"], mapping, r["timestamp"])
         bucket_ts = get_bucket_timestamp(r["timestamp"])
         key = (
             bucket_ts,
@@ -162,7 +189,7 @@ def compress(dry_run=False):
     # Process proxy_calls
     proxy_groups = {}
     for r in proxy_rows:
-        resolved_model = get_resolved_model(r["model"], mapping)
+        resolved_model = get_resolved_model(r["model"], mapping, r["timestamp"])
         bucket_ts = get_bucket_timestamp(r["timestamp"])
         key = (
             bucket_ts,

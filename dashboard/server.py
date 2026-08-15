@@ -109,16 +109,43 @@ def load_model_mapping() -> dict:
             print(f"[server] Error loading model_mapping.json from {mapping_path}: {e}", file=sys.stderr)
     return {}
 
-def get_resolved_model(model_name: str, mapping: dict) -> str:
-    if not model_name:
+def get_resolved_model(model_name: str, mapping: dict, timestamp: str = None) -> str:
+    if not model_name or not mapping:
         return model_name
-    model_lower = model_name.lower().strip()
-    for main_model, aliases in mapping.items():
-        if model_lower == main_model.lower().strip():
-            return main_model
-        for alias in aliases:
-            if model_lower == alias.lower().strip():
-                return main_model
+    m_lower = str(model_name).lower().strip()
+    
+    target = mapping.get(m_lower)
+    if target is None:
+        for k, v in mapping.items():
+            if k.lower().strip() == m_lower:
+                target = v
+                break
+                
+    if target is None:
+        return model_name
+        
+    if isinstance(target, str):
+        return target
+        
+    if isinstance(target, dict):
+        sorted_dates = sorted(target.keys())
+        if not sorted_dates:
+            return model_name
+        if not timestamp:
+            return target[sorted_dates[-1]]
+            
+        ts_date = str(timestamp)[:10]
+        matched_date = sorted_dates[0]
+        for d in sorted_dates:
+            if d <= ts_date:
+                matched_date = d
+            else:
+                break
+        return target[matched_date]
+        
+    if isinstance(target, list):
+        return target[0] if target else model_name
+        
     return model_name
 
 # ── DB Path Auto-Detection ───────────────────────────────────────────────────
@@ -236,10 +263,21 @@ async def handle_query(request: web.Request) -> web.Response:
             for m in models:
                 expanded_models.append(m)
                 m_lower = m.lower().strip()
-                for main_model, aliases in mapping.items():
-                    if m_lower == main_model.lower().strip() or any(m_lower == a.lower().strip() for a in aliases):
-                        expanded_models.append(main_model)
-                        expanded_models.extend(aliases)
+                for alias_key, target in mapping.items():
+                    alias_lower = alias_key.lower().strip()
+                    if m_lower == alias_lower:
+                        if isinstance(target, str):
+                            expanded_models.append(target)
+                        elif isinstance(target, dict):
+                            expanded_models.extend(target.values())
+                        elif isinstance(target, list):
+                            expanded_models.extend(target)
+                    elif isinstance(target, str) and m_lower == target.lower().strip():
+                        expanded_models.append(alias_key)
+                    elif isinstance(target, dict) and any(m_lower == str(v).lower().strip() for v in target.values()):
+                        expanded_models.append(alias_key)
+                    elif isinstance(target, list) and any(m_lower == str(v).lower().strip() for v in target):
+                        expanded_models.append(alias_key)
             expanded_models = list(set(expanded_models))
             
             placeholders = ",".join("?" for _ in expanded_models)
@@ -423,7 +461,7 @@ async def handle_query(request: web.Request) -> web.Response:
             calls = []
             for r in rows:
                 d = dict(r)
-                d["model"] = get_resolved_model(d["model"], mapping)
+                d["model"] = get_resolved_model(d["model"], mapping, d.get("timestamp"))
                 if not d.get("error") and d.get("status_code") and (d["status_code"] < 200 or d["status_code"] >= 300):
                     d["error"] = http_err_map.get(d["status_code"], f"HTTP {d['status_code']}")
                 calls.append(d)
@@ -450,8 +488,18 @@ async def handle_query(request: web.Request) -> web.Response:
                 models_avail = conn.execute(
                     "SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL ORDER BY model"
                 ).fetchall()
-                mapped_models = [get_resolved_model(r["model"], mapping) for r in models_avail]
-                _metadata_cache["models"] = sorted(list(set(mapped_models)))
+                mapped_models = set()
+                for r in models_avail:
+                    if r["model"]:
+                        mapped_models.add(get_resolved_model(r["model"], mapping))
+                for v in mapping.values():
+                    if isinstance(v, str):
+                        mapped_models.add(v)
+                    elif isinstance(v, dict):
+                        for tgt in v.values():
+                            if tgt:
+                                mapped_models.add(tgt)
+                _metadata_cache["models"] = sorted(list(mapped_models))
 
                 types_avail = conn.execute(
                     "SELECT DISTINCT call_type FROM api_calls ORDER BY call_type"

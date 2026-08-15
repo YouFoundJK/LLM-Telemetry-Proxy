@@ -262,7 +262,8 @@ const TelemetryCharts = (() => {
     });
 
     const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
-    const models = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
+    const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
+    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && byBucket[b][m] > 0));
     
     const datasets = models.map(m => ({
       label: m,
@@ -736,7 +737,11 @@ const TelemetryCharts = (() => {
 
     const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
     const labels = sortedBuckets.map(b => UI.formatShortDate(b));
-    const models = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
+    const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
+    const models = allModels.filter(m => sortedBuckets.some(b => {
+      const entry = byBucket[b][m];
+      return entry && entry.count > 0 && entry.sum > 0;
+    }));
 
     const datasets = models.map(m => {
       return {
@@ -749,7 +754,7 @@ const TelemetryCharts = (() => {
         backgroundColor: 'transparent',
         borderWidth: 2,
         tension: 0.2,
-        spanGaps: true
+        spanGaps: false
       };
     });
 
@@ -918,7 +923,8 @@ const TelemetryCharts = (() => {
     });
 
     const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
-    const models = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
+    const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
+    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && byBucket[b][m] > 0));
 
     const datasets = models.map(m => {
       const dataPoints = sortedBuckets.map(b => byBucket[b][m] || 0);

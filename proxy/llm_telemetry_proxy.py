@@ -359,19 +359,46 @@ def load_model_mapping():
                 pass
     return _model_mapping_cache
 
-def resolve_canonical_model(model_name: str) -> str:
+def resolve_canonical_model(model_name: str, timestamp: str = None) -> str:
     if not model_name:
         return model_name
     mapping = load_model_mapping()
     if not mapping:
         return model_name
     m_lower = str(model_name).lower().strip()
-    for canonical, aliases in mapping.items():
-        if m_lower == canonical.lower().strip():
-            return canonical
-        for alias in aliases:
-            if m_lower == str(alias).lower().strip():
-                return canonical
+    
+    target = mapping.get(m_lower)
+    if target is None:
+        for k, v in mapping.items():
+            if k.lower().strip() == m_lower:
+                target = v
+                break
+                
+    if target is None:
+        return model_name
+        
+    if isinstance(target, str):
+        return target
+        
+    if isinstance(target, dict):
+        sorted_dates = sorted(target.keys())
+        if not sorted_dates:
+            return model_name
+        if not timestamp:
+            return target[sorted_dates[-1]]
+            
+        ts_date = str(timestamp)[:10]
+        matched_date = sorted_dates[0]
+        for d in sorted_dates:
+            if d <= ts_date:
+                matched_date = d
+            else:
+                break
+        return target[matched_date]
+        
+    if isinstance(target, list):
+        return target[0] if target else model_name
+        
     return model_name
 
 

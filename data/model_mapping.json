@@ -1,58 +1,37 @@
 {
-  "glm-5.2": [
-    "glm",
-    "glm-5",
-    "glm-5.2"
-  ],
-  "kimi-k3": [
-    "kimi",
-    "kimi-k3"
-  ],
-  "deepseek-v4-flash": [
-    "deepseek",
-    "deepseek-v4-flash"
-  ],
-  "deepseek-v4-flash-thinking": [
-    "deepseek-thinking",
-    "thinker",
-    "deepseek-v4-flash-thinking"
-  ],
-  "gpt-oss-120b": [
-    "mini",
-    "gpt-oss-120b"
-  ],
-  "qwen3.5-122b": [
-    "coder",
-    "agentic",
-    "qwen3.5-122b"
-  ],
-  "qwen3.5-int4": [
-    "qwen3.5-int4"
-  ],
-  "mistral-medium-3.5": [
-    "mistral-medium-3.5"
-  ],
-  "gemma4": [
-    "gemma-4",
-    "gemma4"
-  ],
-  "whisper-large-v3": [
-    "whisper-large-v3"
-  ],
-  "qwen3-embedding-4b": [
-    "qwen3-embedding-4b"
-  ],
-  "qwen3-reranker-4b": [
-    "qwen3-reranker-4b",
-    "qwen3-reranker-4b1"
-  ],
-  "deepseek-v4-pro": [
-    "deepseek-v4-pro"
-  ],
-  "deepseek-v4-pro-thinking": [
-    "deepseek-v4-pro-thinking"
-  ],
-  "command-a": [
-    "command-a"
-  ]
+  "deepseek": {
+    "2026-07-01": "deepseek-v4-pro",
+    "2026-08-01": "deepseek-v4-flash"
+  },
+  "deepseek-thinking": {
+    "2026-07-01": "deepseek-v4-pro-thinking",
+    "2026-08-01": "deepseek-v4-flash-thinking"
+  },
+  "thinker": {
+    "2026-07-01": "deepseek-v4-pro-thinking",
+    "2026-08-01": "deepseek-v4-flash-thinking"
+  },
+  "glm": "glm-5.2",
+  "glm-5": "glm-5.2",
+  "glm-5.2": "glm-5.2",
+  "kimi": "kimi-k3",
+  "kimi-k3": "kimi-k3",
+  "mini": "gpt-oss-120b",
+  "gpt-oss-120b": "gpt-oss-120b",
+  "coder": "qwen3.5-122b",
+  "agentic": "qwen3.5-122b",
+  "qwen3.5-122b": "qwen3.5-122b",
+  "qwen3.5-int4": "qwen3.5-int4",
+  "mistral-medium-3.5": "mistral-medium-3.5",
+  "gemma-4": "gemma4",
+  "gemma4": "gemma4",
+  "whisper-large-v3": "whisper-large-v3",
+  "qwen3-embedding-4b": "qwen3-embedding-4b",
+  "qwen3-reranker-4b": "qwen3-reranker-4b",
+  "qwen3-reranker-4b1": "qwen3-reranker-4b",
+  "deepseek-v4-pro": "deepseek-v4-pro",
+  "deepseek-v4-pro-thinking": "deepseek-v4-pro-thinking",
+  "deepseek-v4-flash": "deepseek-v4-flash",
+  "deepseek-v4-flash-thinking": "deepseek-v4-flash-thinking",
+  "command-a": "command-a"
 }
