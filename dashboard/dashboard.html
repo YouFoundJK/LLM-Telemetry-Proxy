@@ -506,7 +506,7 @@
       </div>
     </div>
 
-    <!-- Tab Section: Central Control Panel (Gateway & Diagnostics) -->
+    <!-- Tab Section: Central Control Panel -->
     <div id="controlPanelTab" class="tab-content">
       <div class="gateway-manager-container">
         
@@ -536,7 +536,7 @@
               <span class="metric-val" id="proxyConcurrencyVal">0 / 4 (0)</span>
             </div>
             <div class="proxy-metric-box">
-              <span class="metric-lbl">24H Token Usage</span>
+              <span class="metric-lbl">24H Token Usage <span id="proxyTokenRenewalText" class="renewal-text"></span></span>
               <div class="token-budget-bar-wrapper">
                 <div class="token-budget-bar">
                   <div class="token-budget-fill" id="proxyTokenBudgetFill" style="width: 0%;"></div>
@@ -562,6 +562,10 @@
               <div class="proxy-form-group">
                 <label for="proxyConfigHost">Host</label>
                 <input type="text" id="proxyConfigHost" class="proxy-input" value="0.0.0.0" placeholder="0.0.0.0">
+              </div>
+              <div class="proxy-form-group">
+                <label for="proxyConfigTokenLimit">Daily Token Cap (24H)</label>
+                <input type="number" id="proxyConfigTokenLimit" class="proxy-input" value="480000000" min="0" step="1000000" placeholder="480000000">
               </div>
               <div class="proxy-form-group full-width">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
@@ -692,17 +696,6 @@
               </button>
             </div>
             <div id="costSyncAlertControlPanel" class="proxy-alert" style="display: none; margin-top: 12px;"></div>
-          </div>
-        </div>
-
-        <!-- System & Diagnostics Section -->
-        <div class="section-card">
-          <h2>System & Diagnostics</h2>
-          <div id="diagnosticsPanel" style="padding-top: 10px;">
-            <div class="loading-overlay">
-              <div class="spinner"></div>
-              <span>Reading database and server configuration...</span>
-            </div>
           </div>
         </div>
 

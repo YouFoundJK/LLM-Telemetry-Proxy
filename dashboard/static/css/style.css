@@ -1352,6 +1352,14 @@ td.num {
   color: var(--text-muted);
 }
 
+.proxy-metric-box .metric-lbl .renewal-text {
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--accent);
+  margin-left: 4px;
+}
+
 .proxy-metric-box .metric-val {
   font-size: 16px;
   font-weight: 600;
@@ -1603,8 +1611,14 @@ td.num {
 
 .proxy-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 14px;
+}
+
+@media (max-width: 860px) {
+  .proxy-form-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .proxy-form-group {

@@ -74,6 +74,16 @@ _upstream_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 # Hard cap: 480M tokens per day. When exceeded, proxy rejects with clear error.
 DAILY_TOKEN_LIMIT = 480_000_000  # 480 million tokens
 
+def format_time_remaining(seconds: int) -> str:
+    if seconds <= 0:
+        return "0m"
+    hrs = seconds // 3600
+    mins = (seconds % 3600) // 60
+    if hrs > 0:
+        return f"{hrs}h {mins}m"
+    return f"{mins}m"
+
+
 class RollingTokenBudget:
     """Rolling 24-hour token budget with hard enforcement and persistence across restarts."""
 
@@ -155,6 +165,11 @@ class RollingTokenBudget:
             remaining = max(0, self.daily_limit - current_usage)
             percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
 
+            oldest_ts = self._usage[0][0] if self._usage else None
+            newest_ts = self._usage[-1][0] if self._usage else None
+            next_reset_seconds = max(0, int((oldest_ts + 86400) - now)) if oldest_ts else 0
+            full_reset_seconds = max(0, int((newest_ts + 86400) - now)) if newest_ts else 0
+
             recent_list = [{"ts": round(ts, 2), "tokens": cnt} for ts, cnt in self._usage]
 
             state_data = {
@@ -162,6 +177,10 @@ class RollingTokenBudget:
                 "total_used": current_usage,
                 "remaining": remaining,
                 "percentage_used": round(percentage_used, 2),
+                "next_reset_seconds": next_reset_seconds,
+                "full_reset_seconds": full_reset_seconds,
+                "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
+                "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "recent_usage": recent_list[-5000:],
             }
@@ -193,11 +212,20 @@ class RollingTokenBudget:
         remaining = max(0, self.daily_limit - current_usage)
         percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
 
+        oldest_ts = self._usage[0][0] if self._usage else None
+        newest_ts = self._usage[-1][0] if self._usage else None
+        next_reset_seconds = max(0, int((oldest_ts + 86400) - now)) if oldest_ts else 0
+        full_reset_seconds = max(0, int((newest_ts + 86400) - now)) if newest_ts else 0
+
         status = {
             "total_used": current_usage,
             "remaining": remaining,
             "percentage_used": round(percentage_used, 2),
             "daily_limit": self.daily_limit,
+            "next_reset_seconds": next_reset_seconds,
+            "full_reset_seconds": full_reset_seconds,
+            "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
+            "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
         }
 
         self._save_state()
@@ -217,11 +245,22 @@ class RollingTokenBudget:
         remaining = max(0, self.daily_limit - current_usage)
         percentage_used = (current_usage / self.daily_limit) * 100 if self.daily_limit > 0 else 0
 
+        oldest_ts = self._usage[0][0] if self._usage else None
+        newest_ts = self._usage[-1][0] if self._usage else None
+        next_reset_seconds = max(0, int((oldest_ts + 86400) - now)) if oldest_ts else 0
+        full_reset_seconds = max(0, int((newest_ts + 86400) - now)) if newest_ts else 0
+
         return {
             "total_used": current_usage,
             "remaining": remaining,
             "percentage_used": round(percentage_used, 2),
             "daily_limit": self.daily_limit,
+            "next_reset_seconds": next_reset_seconds,
+            "full_reset_seconds": full_reset_seconds,
+            "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
+            "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
+            "oldest_token_ts": oldest_ts,
+            "newest_token_ts": newest_ts,
         }
 
 _token_budget = RollingTokenBudget(DAILY_TOKEN_LIMIT)
@@ -1203,12 +1242,13 @@ def create_app():
 
 
 def main():
-    global LISTEN_HOST, LISTEN_PORT, UPSTREAM, DB_PATH, PID_FILE
+    global LISTEN_HOST, LISTEN_PORT, UPSTREAM, DB_PATH, PID_FILE, DAILY_TOKEN_LIMIT
 
     parser = argparse.ArgumentParser(description="LLM Telemetry Proxy")
     parser.add_argument("--port", type=int, default=LISTEN_PORT, help="Listen port (default 9090)")
     parser.add_argument("--host", type=str, default=LISTEN_HOST, help="Listen host (default 0.0.0.0)")
     parser.add_argument("--upstream", type=str, default=UPSTREAM, help="Upstream API base URL")
+    parser.add_argument("--token-limit", type=int, default=DAILY_TOKEN_LIMIT, help="Daily token budget cap (default 480000000)")
     parser.add_argument("--db", type=str, default=str(DB_PATH), help="SQLite database file path")
     parser.add_argument("--pid-file", type=str, default=str(PID_FILE), help="PID file path")
     args = parser.parse_args()
@@ -1216,8 +1256,13 @@ def main():
     LISTEN_PORT = args.port
     LISTEN_HOST = args.host
     UPSTREAM = args.upstream
+    DAILY_TOKEN_LIMIT = args.token_limit
     DB_PATH = Path(args.db)
     PID_FILE = Path(args.pid_file)
+
+    _token_budget.daily_limit = DAILY_TOKEN_LIMIT
+    _token_budget.db_path = DB_PATH
+    _token_budget._load_state()
 
     # Write PID file
     try:

@@ -1179,20 +1179,22 @@ const App = (() => {
   }
 
   /**
-   * Health and Diagnostics details
+   * Database details and status
    */
   async function loadHealth() {
     try {
       const data = await TelemetryAPI.getHealth();
       State.healthData = data;
-      UI.renderHealth(data);
+      if (UI.renderHealth) UI.renderHealth(data);
       
       const dbPathEl = document.getElementById('proxyDbPathVal');
       const dbSizeEl = document.getElementById('proxyDbSizeVal');
       if (dbPathEl && data.db_path) dbPathEl.textContent = data.db_path;
-      if (dbSizeEl && data.db_size_mb !== undefined) dbSizeEl.textContent = `${data.db_size_mb} MB`;
+      if (dbSizeEl && data.db_size_mb !== undefined) {
+        dbSizeEl.textContent = data.db_exists ? `${data.db_size_mb} MB` : 'Not Found';
+      }
     } catch (e) {
-      console.error('Diagnostics check failed', e);
+      console.error('Database health check failed', e);
     }
   }
 
@@ -1283,15 +1285,18 @@ const App = (() => {
     if (!State.runningProxyConfig) return false;
     const portInput = document.getElementById('proxyConfigPort');
     const hostInput = document.getElementById('proxyConfigHost');
+    const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
     const upstreamInput = document.getElementById('proxyConfigUpstream');
     
     const currPort = portInput ? parseInt(portInput.value, 10) : 9090;
     const currHost = hostInput ? hostInput.value.trim() : '0.0.0.0';
+    const currTokenLimit = tokenLimitInput ? parseInt(tokenLimitInput.value, 10) : 480000000;
     const currUpstream = upstreamInput ? normalizeUpstreamUrl(upstreamInput.value) : '';
     const runningUpstream = normalizeUpstreamUrl(State.runningProxyConfig.upstream);
 
     return currPort !== State.runningProxyConfig.port ||
            currHost !== State.runningProxyConfig.host ||
+           currTokenLimit !== State.runningProxyConfig.token_limit ||
            currUpstream !== runningUpstream;
   }
 
@@ -1320,10 +1325,12 @@ const App = (() => {
     if (!State.runningProxyConfig) return;
     const portInput = document.getElementById('proxyConfigPort');
     const hostInput = document.getElementById('proxyConfigHost');
+    const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
     const upstreamInput = document.getElementById('proxyConfigUpstream');
 
     if (portInput) portInput.value = State.runningProxyConfig.port;
     if (hostInput) hostInput.value = State.runningProxyConfig.host;
+    if (tokenLimitInput) tokenLimitInput.value = State.runningProxyConfig.token_limit ?? 480000000;
     if (upstreamInput) upstreamInput.value = State.runningProxyConfig.upstream;
 
     updateProxyConfigDirtyState();
@@ -1345,11 +1352,13 @@ const App = (() => {
 
       const activePort = data.port || 9090;
       const activeHost = data.host || '0.0.0.0';
+      const activeTokenLimit = data.token_limit || (data.token_budget && data.token_budget.daily_limit) || (data.health && data.health.token_budget && data.health.token_budget.daily_limit) || 480000000;
       const activeUpstream = data.upstream || (data.health && data.health.upstream) || (State.runningProxyConfig ? State.runningProxyConfig.upstream : 'https://llm.ai.e-infra.cz/v1');
 
       State.runningProxyConfig = {
         port: activePort,
         host: activeHost,
+        token_limit: activeTokenLimit,
         upstream: activeUpstream
       };
 
@@ -1361,9 +1370,11 @@ const App = (() => {
       if (!isProxyConfigDirty()) {
         const portInput = document.getElementById('proxyConfigPort');
         const hostInput = document.getElementById('proxyConfigHost');
+        const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
         const upstreamInput = document.getElementById('proxyConfigUpstream');
         if (portInput && document.activeElement !== portInput) portInput.value = activePort;
         if (hostInput && document.activeElement !== hostInput) hostInput.value = activeHost;
+        if (tokenLimitInput && document.activeElement !== tokenLimitInput) tokenLimitInput.value = activeTokenLimit;
         if (upstreamInput && document.activeElement !== upstreamInput) upstreamInput.value = activeUpstream;
       }
 
@@ -1418,6 +1429,7 @@ const App = (() => {
     // Proxy configuration input listeners for dirty state tracking
     const portInput = document.getElementById('proxyConfigPort');
     const hostInput = document.getElementById('proxyConfigHost');
+    const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
     const upstreamInput = document.getElementById('proxyConfigUpstream');
 
     if (portInput) {
@@ -1427,6 +1439,10 @@ const App = (() => {
     if (hostInput) {
       hostInput.addEventListener('input', updateProxyConfigDirtyState);
       hostInput.addEventListener('change', updateProxyConfigDirtyState);
+    }
+    if (tokenLimitInput) {
+      tokenLimitInput.addEventListener('input', updateProxyConfigDirtyState);
+      tokenLimitInput.addEventListener('change', updateProxyConfigDirtyState);
     }
     if (upstreamInput) {
       upstreamInput.addEventListener('input', updateProxyConfigDirtyState);
@@ -1460,13 +1476,14 @@ const App = (() => {
       startBtn.addEventListener('click', async () => {
         const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
         const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
+        const tokenLimit = parseInt(document.getElementById('proxyConfigTokenLimit')?.value || '480000000', 10);
         const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
 
         startBtn.disabled = true;
         saveUpstreamToHistory(upstream);
         UI.showProxyAlert(`Starting proxy gateway on port ${port}...`, 'info', 0);
         try {
-          const res = await TelemetryAPI.startProxy({ port, host, upstream });
+          const res = await TelemetryAPI.startProxy({ port, host, upstream, token_limit: tokenLimit });
           if (res.success) {
             UI.showProxyAlert(res.message || 'Proxy started successfully.', 'success', 5000);
           } else {
@@ -1510,13 +1527,14 @@ const App = (() => {
       restartBtn.addEventListener('click', async () => {
         const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
         const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
+        const tokenLimit = parseInt(document.getElementById('proxyConfigTokenLimit')?.value || '480000000', 10);
         const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
 
         restartBtn.disabled = true;
         saveUpstreamToHistory(upstream);
         UI.showProxyAlert(`Restarting proxy gateway on port ${port}...`, 'info', 0);
         try {
-          const res = await TelemetryAPI.restartProxy({ port, host, upstream });
+          const res = await TelemetryAPI.restartProxy({ port, host, upstream, token_limit: tokenLimit });
           if (res.success) {
             UI.showProxyAlert(res.message || 'Proxy restarted successfully.', 'success', 5000);
           } else {

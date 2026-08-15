@@ -323,48 +323,12 @@ const UI = (() => {
   }
 
   /**
-   * Render System Diagnostics
+   * Render System Diagnostics (legacy / no-op)
    */
   function renderHealth(health) {
     const el = document.getElementById('diagnosticsPanel');
     if (!el) return;
-
-    el.innerHTML = `
-      <div class="diag-grid">
-        <div class="diag-card">
-          <h3>Database Info</h3>
-          <div class="diag-value-row">
-            <span class="diag-label">SQLite File Path</span>
-            <span class="diag-val code">${health.db_path || 'unknown'}</span>
-          </div>
-          <div class="diag-value-row">
-            <span class="diag-label">Database Exists</span>
-            <span class="diag-val" style="color: ${health.db_exists ? 'var(--green)' : 'var(--red)'}">
-              ${health.db_exists ? 'YES' : 'NO'}
-            </span>
-          </div>
-          <div class="diag-value-row">
-            <span class="diag-label">Database File Size</span>
-            <span class="diag-val">${health.db_size_mb || 0} MB</span>
-          </div>
-        </div>
-        <div class="diag-card">
-          <h3>Server Configuration</h3>
-          <div class="diag-value-row">
-            <span class="diag-label">Backend Host URL</span>
-            <span class="diag-val code">${TelemetryAPI.BASE_URL || 'Local (relative)'}</span>
-          </div>
-          <div class="diag-value-row">
-            <span class="diag-label">Static Assets Served</span>
-            <span class="diag-val" style="color: var(--green)">YES</span>
-          </div>
-          <div class="diag-value-row">
-            <span class="diag-label">CORS Enabled</span>
-            <span class="diag-val" style="color: var(--green)">YES (Access-Control-Allow-Origin: *)</span>
-          </div>
-        </div>
-      </div>
-    `;
+    el.innerHTML = '';
   }
 
   /**
@@ -1774,6 +1738,7 @@ const UI = (() => {
     // Token budget
     const budgetFill = document.getElementById('proxyTokenBudgetFill');
     const budgetText = document.getElementById('proxyTokenBudgetText');
+    const renewalText = document.getElementById('proxyTokenRenewalText');
     if (budgetFill && budgetText) {
       const tb = (status.health && status.health.token_budget) || status.token_budget;
       if (tb && typeof tb.total_used === 'number') {
@@ -1789,9 +1754,31 @@ const UI = (() => {
         const usedM = ((tb.total_used || 0) / 1_000_000).toFixed(1);
         const limitM = ((tb.daily_limit || 480_000_000) / 1_000_000).toFixed(0);
         budgetText.textContent = `${usedM}M / ${limitM}M (${perc}%)`;
+
+        if (renewalText) {
+          let timeStr = tb.next_reset_formatted;
+          if (!timeStr && typeof tb.next_reset_seconds === 'number' && tb.next_reset_seconds > 0) {
+            const hrs = Math.floor(tb.next_reset_seconds / 3600);
+            const mins = Math.floor((tb.next_reset_seconds % 3600) / 60);
+            timeStr = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+          }
+          if (tb.total_used > 0 && timeStr) {
+            renewalText.textContent = `(${timeStr})`;
+            renewalText.title = `Next token roll-off in ${timeStr} (oldest tokens in 24h rolling window)`;
+            renewalText.style.display = 'inline';
+          } else {
+            renewalText.textContent = '';
+            renewalText.style.display = 'none';
+          }
+        }
       } else {
         budgetFill.style.width = '0%';
-        budgetText.textContent = isRunning ? '0 / 480M (0%)' : '—';
+        const defaultLimitM = (((status && status.token_limit) || 480_000_000) / 1_000_000).toFixed(0);
+        budgetText.textContent = isRunning ? `0 / ${defaultLimitM}M (0%)` : '—';
+        if (renewalText) {
+          renewalText.textContent = '';
+          renewalText.style.display = 'none';
+        }
       }
     }
 

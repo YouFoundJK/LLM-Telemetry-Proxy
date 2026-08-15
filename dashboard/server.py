@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import os
 import urllib.parse
+from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -597,6 +598,33 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     return web.Response(text="Dashboard file not found at " + str(dashboard_html), status=404)
 
 
+def parse_token_limit(val: Any, default: int = 480_000_000) -> int:
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return max(0, int(val))
+    val_str = str(val).strip().lower().replace(",", "")
+    if val_str.endswith("m"):
+        try:
+            return max(0, int(float(val_str[:-1]) * 1_000_000))
+        except ValueError:
+            pass
+    elif val_str.endswith("k"):
+        try:
+            return max(0, int(float(val_str[:-1]) * 1_000))
+        except ValueError:
+            pass
+    elif val_str.endswith("b"):
+        try:
+            return max(0, int(float(val_str[:-1]) * 1_000_000_000))
+        except ValueError:
+            pass
+    try:
+        return max(0, int(val_str))
+    except ValueError:
+        return default
+
+
 # ── Proxy Management Endpoints ───────────────────────────────────────────────
 async def handle_proxy_status(request: web.Request) -> web.Response:
     """GET /api/proxy/status — get proxy running state, health, port, upstream, etc."""
@@ -615,8 +643,9 @@ async def handle_proxy_start(request: web.Request) -> web.Response:
     port = int(data.get("port", 9090))
     host = data.get("host", "0.0.0.0")
     upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
+    token_limit = parse_token_limit(data.get("token_limit", 480_000_000))
     db_path = get_db_path()
-    res = await ProxyManager.start(port=port, host=host, upstream=upstream, db_path=db_path)
+    res = await ProxyManager.start(port=port, host=host, upstream=upstream, token_limit=token_limit, db_path=db_path)
     status_code = 200 if res.get("success") else 500
     return web.json_response(res, status=status_code)
 
@@ -641,8 +670,9 @@ async def handle_proxy_restart(request: web.Request) -> web.Response:
     port = int(data.get("port", 9090))
     host = data.get("host", "0.0.0.0")
     upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
+    token_limit = parse_token_limit(data.get("token_limit", 480_000_000))
     db_path = get_db_path()
-    res = await ProxyManager.restart(port=port, host=host, upstream=upstream, db_path=db_path)
+    res = await ProxyManager.restart(port=port, host=host, upstream=upstream, token_limit=token_limit, db_path=db_path)
     status_code = 200 if res.get("success") else 500
     return web.json_response(res, status=status_code)
 

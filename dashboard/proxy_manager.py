@@ -27,6 +27,17 @@ REPO_ROOT = DASHBOARD_DIR.parent
 DEFAULT_PROXY_PORT = 9090
 DEFAULT_UPSTREAM = "https://llm.ai.e-infra.cz/v1"
 DEFAULT_HOST = "0.0.0.0"
+DEFAULT_TOKEN_LIMIT = 480_000_000
+
+
+def format_time_remaining(seconds: int) -> str:
+    if seconds <= 0:
+        return "0m"
+    hrs = seconds // 3600
+    mins = (seconds % 3600) // 60
+    if hrs > 0:
+        return f"{hrs}h {mins}m"
+    return f"{mins}m"
 
 
 def get_data_dir() -> Path:
@@ -105,7 +116,7 @@ def is_pid_alive(pid: int) -> bool:
 
 
 def kill_pid(pid: int, force: bool = False) -> bool:
-    """Terminate or kill a process by PID."""
+    """Terminate process tree with given PID."""
     if not is_pid_alive(pid):
         return True
 
@@ -138,17 +149,35 @@ def kill_pid(pid: int, force: bool = False) -> bool:
 
 def get_persisted_token_budget() -> Dict[str, Any]:
     """Retrieve 24H token usage from data/token_budget.json or SQLite DB as fallback."""
+    now = time.time()
+    cutoff_ts = now - 86400
+
     # 1. Check data/token_budget.json
     budget_file = get_data_dir() / "token_budget.json"
     if budget_file.exists():
         try:
             with open(budget_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                records = [r for r in data.get("recent_usage", []) if r.get("ts", 0) >= cutoff_ts]
+                daily_limit = data.get("daily_limit", DEFAULT_TOKEN_LIMIT)
+                total_used = sum(r.get("tokens", 0) for r in records) if records else data.get("total_used", 0)
+                remaining = max(0, daily_limit - total_used)
+                percentage_used = round((total_used / daily_limit) * 100, 2) if daily_limit > 0 else 0.0
+
+                oldest_ts = records[0]["ts"] if records else None
+                newest_ts = records[-1]["ts"] if records else None
+                next_reset_seconds = max(0, int((oldest_ts + 86400) - now)) if oldest_ts else 0
+                full_reset_seconds = max(0, int((newest_ts + 86400) - now)) if newest_ts else 0
+
                 return {
-                    "total_used": data.get("total_used", 0),
-                    "remaining": data.get("remaining", 480_000_000),
-                    "percentage_used": data.get("percentage_used", 0.0),
-                    "daily_limit": data.get("daily_limit", 480_000_000),
+                    "total_used": total_used,
+                    "remaining": remaining,
+                    "percentage_used": percentage_used,
+                    "daily_limit": daily_limit,
+                    "next_reset_seconds": next_reset_seconds,
+                    "full_reset_seconds": full_reset_seconds,
+                    "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
+                    "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
                 }
         except Exception:
             pass
@@ -157,34 +186,64 @@ def get_persisted_token_budget() -> Dict[str, Any]:
     db_file = get_data_dir() / "llm_telemetry.db"
     if db_file.exists():
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+            cutoff_iso = cutoff_dt.isoformat()
             conn = sqlite3.connect(str(db_file), timeout=2.0)
             cur = conn.cursor()
             cur.execute("""
-                SELECT SUM((COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) * COALESCE(calls_count, 1))
+                SELECT timestamp, (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) * COALESCE(calls_count, 1)
                 FROM api_calls
                 WHERE timestamp >= ?
-            """, (cutoff,))
-            row = cur.fetchone()
+                ORDER BY timestamp ASC
+            """, (cutoff_iso,))
+            rows = cur.fetchall()
             conn.close()
-            total_used = int(row[0] or 0) if row else 0
-            daily_limit = 480_000_000
+
+            total_used = 0
+            valid_ts = []
+            for r in rows:
+                ts_str, tok = r
+                if tok and tok > 0:
+                    total_used += tok
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        t_float = dt.timestamp()
+                        if t_float >= cutoff_ts:
+                            valid_ts.append(t_float)
+                    except Exception:
+                        pass
+
+            daily_limit = DEFAULT_TOKEN_LIMIT
             remaining = max(0, daily_limit - total_used)
-            perc = round((total_used / daily_limit) * 100, 2)
+            perc = round((total_used / daily_limit) * 100, 2) if daily_limit > 0 else 0.0
+
+            oldest_ts = valid_ts[0] if valid_ts else None
+            newest_ts = valid_ts[-1] if valid_ts else None
+            next_reset_seconds = max(0, int((oldest_ts + 86400) - now)) if oldest_ts else 0
+            full_reset_seconds = max(0, int((newest_ts + 86400) - now)) if newest_ts else 0
+
             return {
                 "total_used": total_used,
                 "remaining": remaining,
                 "percentage_used": perc,
                 "daily_limit": daily_limit,
+                "next_reset_seconds": next_reset_seconds,
+                "full_reset_seconds": full_reset_seconds,
+                "next_reset_formatted": format_time_remaining(next_reset_seconds) if oldest_ts else None,
+                "full_reset_formatted": format_time_remaining(full_reset_seconds) if newest_ts else None,
             }
         except Exception:
             pass
 
     return {
         "total_used": 0,
-        "remaining": 480_000_000,
+        "remaining": DEFAULT_TOKEN_LIMIT,
         "percentage_used": 0.0,
-        "daily_limit": 480_000_000,
+        "daily_limit": DEFAULT_TOKEN_LIMIT,
+        "next_reset_seconds": 0,
+        "full_reset_seconds": 0,
+        "next_reset_formatted": None,
+        "full_reset_formatted": None,
     }
 
 
@@ -193,6 +252,7 @@ class ProxyManager:
 
     _last_known_port = DEFAULT_PROXY_PORT
     _last_known_upstream = DEFAULT_UPSTREAM
+    _last_known_token_limit = DEFAULT_TOKEN_LIMIT
 
     @classmethod
     def read_pid_file(cls) -> Optional[int]:
@@ -256,12 +316,15 @@ class ProxyManager:
 
         fallback_tb = get_persisted_token_budget()
         token_budget = (health_data.get("token_budget") if health_data and "token_budget" in health_data else fallback_tb)
+        token_limit = token_budget.get("daily_limit", cls._last_known_token_limit)
 
         return {
             "running": running,
             "pid": pid,
             "port": active_port,
+            "host": DEFAULT_HOST,
             "upstream": (health_data.get("upstream") if health_data else cls._last_known_upstream),
+            "token_limit": token_limit,
             "health_ok": health_ok,
             "health": health_data,
             "token_budget": token_budget,
@@ -275,6 +338,7 @@ class ProxyManager:
         port: int = DEFAULT_PROXY_PORT,
         host: str = DEFAULT_HOST,
         upstream: str = DEFAULT_UPSTREAM,
+        token_limit: int = DEFAULT_TOKEN_LIMIT,
         db_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Start the proxy server as a background process."""
@@ -299,6 +363,7 @@ class ProxyManager:
 
         cls._last_known_port = port
         cls._last_known_upstream = upstream
+        cls._last_known_token_limit = token_limit
 
         log_file = get_log_file()
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -309,6 +374,7 @@ class ProxyManager:
             "--port", str(port),
             "--host", host,
             "--upstream", upstream,
+            "--token-limit", str(token_limit),
         ]
         if db_path:
             cmd.extend(["--db", str(db_path)])
@@ -414,12 +480,13 @@ class ProxyManager:
         port: int = DEFAULT_PROXY_PORT,
         host: str = DEFAULT_HOST,
         upstream: str = DEFAULT_UPSTREAM,
+        token_limit: int = DEFAULT_TOKEN_LIMIT,
         db_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Restart the proxy server."""
         await cls.stop(force=True)
         await asyncio.sleep(0.8)
-        return await cls.start(port=port, host=host, upstream=upstream, db_path=db_path)
+        return await cls.start(port=port, host=host, upstream=upstream, token_limit=token_limit, db_path=db_path)
 
     @classmethod
     def get_logs(cls, lines: int = 150) -> Dict[str, Any]:
