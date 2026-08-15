@@ -46,53 +46,85 @@ const App = (() => {
     activeAbortController: null
   };
 
-  // Local browser session cache for telemetry raw responses
-  const DataCache = {
-    _cache: {},
-    
-    getKey(fromVal, toVal) {
-      return `${fromVal || ''}_${toVal || ''}`;
-    },
-    
-    get(fromVal, toVal) {
-      const key = this.getKey(fromVal, toVal);
-      return this._cache[key];
-    },
-    
-    set(fromVal, toVal, data) {
-      const key = this.getKey(fromVal, toVal);
-      this._cache[key] = data;
-      try {
-        sessionStorage.setItem('telemetry_data_cache_v3_' + key, JSON.stringify(data));
-      } catch (e) {
-        // Safe quota recovery: clear telemetry cache and retry
-        try {
-          for (let i = sessionStorage.length - 1; i >= 0; i--) {
-            const k = sessionStorage.key(i);
-            if (k && k.startsWith('telemetry_data_cache_v3_')) {
-              sessionStorage.removeItem(k);
-            }
-          }
-          sessionStorage.setItem('telemetry_data_cache_v3_' + key, JSON.stringify(data));
-        } catch (e2) {
-          console.warn('Failed to save telemetry cache to sessionStorage:', e2);
-        }
-      }
-    },
-    
-    loadFromSessionStorage(fromVal, toVal) {
-      const key = this.getKey(fromVal, toVal);
-      try {
-        const cached = sessionStorage.getItem('telemetry_data_cache_v3_' + key);
-        if (cached) {
-          return JSON.parse(cached);
-        }
-      } catch (e) {
-        console.warn('Failed to load data from sessionStorage', e);
-      }
-      return null;
+  // Browser IndexedDB Cache Management & UI synchronizer
+  async function updateCacheStatsUI() {
+    try {
+      if (typeof TelemetryStore === 'undefined') return;
+      const stats = await TelemetryStore.getStorageStats();
+      const countEl = document.getElementById('browserCacheCountVal');
+      const sizeEl = document.getElementById('browserCacheSizeVal');
+      const ttlEl = document.getElementById('browserCacheTtlVal');
+
+      if (countEl) countEl.textContent = stats.count ? stats.count.toLocaleString() : '0';
+      if (sizeEl) sizeEl.textContent = `${stats.estimatedSizeMb} MB`;
+      if (ttlEl) ttlEl.textContent = `Auto-evicts in ${stats.remainingDays}d`;
+    } catch (e) {
+      console.warn('Failed to update cache stats UI:', e);
     }
-  };
+  }
+
+  function setupCacheControl() {
+    const clearBtn = document.getElementById('clearBrowserCacheBtn');
+    const resyncBtn = document.getElementById('resyncBrowserCacheBtn');
+    const alertEl = document.getElementById('browserCacheAlert');
+
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        try {
+          clearBtn.disabled = true;
+          clearBtn.textContent = 'Clearing...';
+          await TelemetryStore.clearAll();
+          await updateCacheStatsUI();
+          if (alertEl) {
+            alertEl.style.display = 'block';
+            alertEl.className = 'proxy-alert success';
+            alertEl.textContent = 'Browser IndexedDB cache cleared successfully.';
+            setTimeout(() => { alertEl.style.display = 'none'; }, 4000);
+          }
+          await refresh(true);
+        } catch (e) {
+          if (alertEl) {
+            alertEl.style.display = 'block';
+            alertEl.className = 'proxy-alert error';
+            alertEl.textContent = `Failed to clear cache: ${e.message}`;
+          }
+        } finally {
+          clearBtn.disabled = false;
+          clearBtn.innerHTML = '🗑 Clear Cache';
+        }
+      });
+    }
+
+    if (resyncBtn) {
+      resyncBtn.addEventListener('click', async () => {
+        try {
+          resyncBtn.disabled = true;
+          resyncBtn.textContent = 'Syncing...';
+          await TelemetryStore.clearAll();
+          if (alertEl) {
+            alertEl.style.display = 'block';
+            alertEl.className = 'proxy-alert success';
+            alertEl.textContent = 'Re-syncing complete dataset from server...';
+          }
+          await refresh(true);
+          await updateCacheStatsUI();
+          if (alertEl) {
+            alertEl.textContent = 'Data lake synchronized successfully.';
+            setTimeout(() => { alertEl.style.display = 'none'; }, 4000);
+          }
+        } catch (e) {
+          if (alertEl) {
+            alertEl.style.display = 'block';
+            alertEl.className = 'proxy-alert error';
+            alertEl.textContent = `Sync failed: ${e.message}`;
+          }
+        } finally {
+          resyncBtn.disabled = false;
+          resyncBtn.innerHTML = '🔄 Full Re-sync';
+        }
+      });
+    }
+  }
 
   function getSelectedDateRange() {
     let fromVal = '';
@@ -496,6 +528,16 @@ const App = (() => {
     setupProxyControl();
     setupFilters();
     setupToggleSwitches();
+    setupCacheControl();
+
+    try {
+      if (typeof TelemetryStore !== 'undefined') {
+        await TelemetryStore.init();
+        updateCacheStatsUI();
+      }
+    } catch (e) {
+      console.warn('TelemetryStore initialization failed, falling back:', e);
+    }
     
     try {
       const savedNodes = localStorage.getItem('telemetry_dashboard_live_nodes_config');
@@ -937,13 +979,20 @@ const App = (() => {
       });
     }
 
-    const editBtn = document.getElementById('editLiveNodesBtn');
+    const openEditLiveNodesBtn = document.getElementById('openEditLiveNodesBtn');
     const modal = document.getElementById('liveNodesModal');
     const closeBtn = document.getElementById('closeLiveNodesModalBtn');
 
-    if (editBtn && modal) {
-      editBtn.addEventListener('click', () => {
-        openLiveNodesModal();
+    if (openEditLiveNodesBtn && modal) {
+      openEditLiveNodesBtn.addEventListener('click', () => {
+        ensureLiveNodesConfig(State.allLiveModels);
+        UI.renderLiveNodesModal(State.allLiveModels, State.liveNodesConfig, (newConfig) => {
+          State.liveNodesConfig = newConfig;
+          localStorage.setItem('telemetry_dashboard_live_nodes_config', JSON.stringify(newConfig));
+          loadServerStatus();
+          modal.classList.remove('open');
+        });
+        modal.classList.add('open');
       });
     }
 
@@ -989,24 +1038,35 @@ const App = (() => {
     // Automatically refresh live model status nodes from infra in sync with telemetry
     loadServerStatus();
 
-    let cachedData = DataCache.get(fromVal, toVal);
-    if (!cachedData) {
-      cachedData = DataCache.loadFromSessionStorage(fromVal, toVal);
-      if (cachedData) {
-        DataCache.set(fromVal, toVal, cachedData);
+    // 1. Instantaneous Local Rendering from IndexedDB Data Lake
+    let cachedCalls = [];
+    if (typeof TelemetryStore !== 'undefined') {
+      try {
+        cachedCalls = await TelemetryStore.getRange(fromVal, toVal);
+      } catch (e) {
+        console.warn('Failed to query local IndexedDB cache range:', e);
       }
     }
 
-    if (cachedData && !forceFetch) {
-      State.currentData = cachedData;
-      renderTelemetry(cachedData);
-      fetchAllTelemetryAsynchronously(fromVal, toVal, true);
+    if (cachedCalls.length > 0 && !forceFetch) {
+      const initialPayload = {
+        calls: cachedCalls,
+        available_models: State.allAvailableModels || [],
+        available_types: State.allAvailableTypes || []
+      };
+      State.currentData = initialPayload;
+      renderTelemetry(initialPayload);
+      // Run delta sync in background
+      fetchTelemetryDelta(fromVal, toVal, true, false);
     } else {
-      fetchAllTelemetryAsynchronously(fromVal, toVal, false);
+      fetchTelemetryDelta(fromVal, toVal, false, forceFetch);
     }
   }
 
-  async function fetchAllTelemetryAsynchronously(fromVal, toVal, isBackground = false) {
+  /**
+   * Delta-Sync Engine: Resilient fetcher with fallback and offline-first guarantees.
+   */
+  async function fetchTelemetryDelta(fromVal, toVal, isBackground = false, forceFetch = false) {
     if (State.activeAbortController) {
       State.activeAbortController.abort();
     }
@@ -1015,103 +1075,131 @@ const App = (() => {
     State.activeAbortController = controller;
     const signal = controller.signal;
 
-    let allCalls = isBackground && State.currentData && State.currentData.calls ? [...State.currentData.calls] : [];
-    let currentToVal = toVal;
-    const limit = 10000;
-    
     if (!isBackground) {
       showLoadingOverlays();
     }
-    
-    const existingIds = new Set(allCalls.map(c => c.id));
-    let tempCalls = [];
-    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-    
+
     try {
-      while (true) {
-        if (signal.aborted) {
-          break;
-        }
-
-        const filters = {
-          from: fromVal,
-          to: currentToVal,
-          limit: limit
-        };
-        const data = await TelemetryAPI.query(filters, { signal });
-        const newCalls = data.calls || [];
-        
-        if (newCalls.length === 0) {
-          break;
-        }
-        
-        let foundExisting = false;
-        let addedCount = 0;
-        
-        for (let c of newCalls) {
-          if (existingIds.has(c.id)) {
-            foundExisting = true;
-            if (isBackground) {
-              break;
-            }
-          } else {
-            tempCalls.push(c);
-            existingIds.add(c.id);
-            addedCount++;
-          }
-        }
-        
-        if (isBackground && foundExisting) {
-          allCalls = [...tempCalls, ...allCalls];
-          tempCalls = [];
-          
-          const mockDataResponse = {
-            calls: allCalls,
-            available_models: data.available_models,
-            available_types: data.available_types,
-            proxy_stats: data.proxy_stats,
-            proxy_breakdown: data.proxy_breakdown
-          };
-          State.currentData = mockDataResponse;
-          DataCache.set(fromVal, toVal, mockDataResponse);
-          renderTelemetry(mockDataResponse);
-          break;
-        }
-        
-        allCalls = [...allCalls, ...tempCalls];
-        tempCalls = [];
-
-        const mockDataResponse = {
-          calls: allCalls,
-          available_models: data.available_models,
-          available_types: data.available_types,
-          proxy_stats: data.proxy_stats,
-          proxy_breakdown: data.proxy_breakdown
-        };
-        
-        State.currentData = mockDataResponse;
-        DataCache.set(fromVal, toVal, mockDataResponse);
-        renderTelemetry(mockDataResponse);
-        
-        if (newCalls.length < limit || addedCount === 0) {
-          break;
-        }
-        
-        const oldestTime = newCalls.reduce((min, c) => {
-          const t = new Date(c.timestamp).getTime();
-          return t < min ? t : min;
-        }, Infinity);
-        currentToVal = new Date(oldestTime - 1).toISOString();
-
-        // Throttle sequential loop requests slightly to protect database and stay under rate limiter caps
-        await sleep(80);
-      }
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        console.log('Query fetch aborted successfully.');
+      if (typeof TelemetryStore === 'undefined') {
+        // Direct query if IndexedDB is unavailable
+        const data = await TelemetryAPI.query({ from: fromVal, to: toVal, limit: 50000 }, { signal });
+        State.currentData = data;
+        renderTelemetry(data);
         return;
       }
-      console.error('Async pull failed:', e);
+
+      const watermarks = await TelemetryStore.getWatermarks();
+
+      if (forceFetch || watermarks.count === 0) {
+        // Cold fetch for requested range
+        const filters = {
+          from: fromVal,
+          to: toVal,
+          limit: 500000
+        };
+        try {
+          const data = await TelemetryAPI.queryBulk(filters, { signal });
+          if (data.calls && data.calls.length > 0) {
+            await TelemetryStore.putBatch(data.calls);
+          }
+          if (data.db_fingerprint) {
+            await TelemetryStore.setMeta('db_fingerprint', data.db_fingerprint);
+          }
+          if (data.available_models && data.available_models.length > 0) {
+            State.allAvailableModels = data.available_models;
+          }
+          if (data.available_types && data.available_types.length > 0) {
+            State.allAvailableTypes = data.available_types;
+          }
+        } catch (bulkErr) {
+          console.warn('[TelemetryStore] Bulk query failed, trying standard query fallback:', bulkErr);
+          // Fallback to standard query with smaller limits
+          const fallbackData = await TelemetryAPI.query({ from: fromVal, to: toVal, limit: 10000 }, { signal });
+          if (fallbackData.calls && fallbackData.calls.length > 0) {
+            await TelemetryStore.putBatch(fallbackData.calls);
+          }
+        }
+      } else {
+        // Smart Delta Sync:
+        // A. Fetch missing older historical window if fromVal is earlier than cached earliestTs
+        if (fromVal && (!watermarks.earliestTs || fromVal < watermarks.earliestTs)) {
+          const histFilters = {
+            from: fromVal,
+            to: watermarks.earliestTs,
+            limit: 500000
+          };
+          try {
+            const histData = await TelemetryAPI.queryBulk(histFilters, { signal });
+            if (histData.calls && histData.calls.length > 0) {
+              await TelemetryStore.putBatch(histData.calls);
+            }
+          } catch (e) {
+            console.warn('[TelemetryStore] Historical gap sync deferred:', e);
+          }
+        }
+
+        // B. Fetch live tail (new calls recorded since maxId)
+        if (watermarks.maxId > 0) {
+          const tailFilters = {
+            since_id: watermarks.maxId,
+            limit: 500000
+          };
+          try {
+            const tailData = await TelemetryAPI.queryBulk(tailFilters, { signal });
+            if (tailData.calls && tailData.calls.length > 0) {
+              await TelemetryStore.putBatch(tailData.calls);
+            }
+            if (tailData.available_models && tailData.available_models.length > 0) {
+              State.allAvailableModels = tailData.available_models;
+            }
+            if (tailData.available_types && tailData.available_types.length > 0) {
+              State.allAvailableTypes = tailData.available_types;
+            }
+          } catch (e) {
+            console.warn('[TelemetryStore] Live tail sync deferred:', e);
+          }
+        }
+      }
+
+      // Query the complete updated range from IndexedDB
+      const finalCalls = await TelemetryStore.getRange(fromVal, toVal);
+
+      const finalDataResponse = {
+        calls: finalCalls,
+        available_models: State.allAvailableModels || [],
+        available_types: State.allAvailableTypes || []
+      };
+
+      State.currentData = finalDataResponse;
+      renderTelemetry(finalDataResponse);
+      updateCacheStatsUI();
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        console.log('Query delta fetch aborted.');
+        return;
+      }
+      console.error('Delta sync failed:', e);
+
+      // Attempt recovery from existing cached records before showing error state
+      if (typeof TelemetryStore !== 'undefined') {
+        try {
+          const fallbackCached = await TelemetryStore.getRange(fromVal, toVal);
+          if (fallbackCached && fallbackCached.length > 0) {
+            const recoveryPayload = {
+              calls: fallbackCached,
+              available_models: State.allAvailableModels || [],
+              available_types: State.allAvailableTypes || []
+            };
+            State.currentData = recoveryPayload;
+            renderTelemetry(recoveryPayload);
+            updateCacheStatsUI();
+            return;
+          }
+        } catch (dbErr) {
+          console.warn('Fallback cache read failed:', dbErr);
+        }
+      }
+
       if (!isBackground) {
         showErrorState(e);
       }
@@ -1193,6 +1281,20 @@ const App = (() => {
       if (dbSizeEl && data.db_size_mb !== undefined) {
         dbSizeEl.textContent = data.db_exists ? `${data.db_size_mb} MB` : 'Not Found';
       }
+
+      // Check DB fingerprint to detect server DB compressions or resets
+      if (data.db_fingerprint && typeof TelemetryStore !== 'undefined') {
+        const storedFp = await TelemetryStore.getMeta('db_fingerprint');
+        if (storedFp && storedFp !== data.db_fingerprint) {
+          console.log('[TelemetryStore] Server database fingerprint changed. Invalidating stale browser cache.');
+          await TelemetryStore.clearAll();
+          await TelemetryStore.setMeta('db_fingerprint', data.db_fingerprint);
+          await refresh(true);
+        } else if (!storedFp) {
+          await TelemetryStore.setMeta('db_fingerprint', data.db_fingerprint);
+        }
+      }
+      updateCacheStatsUI();
     } catch (e) {
       console.error('Database health check failed', e);
     }

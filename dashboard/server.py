@@ -20,6 +20,7 @@ from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import gzip
 import asyncio
 import aiohttp
 from aiohttp import web
@@ -188,6 +189,17 @@ _metadata_cache = {
     "last_fetched": 0.0
 }
 
+def get_db_fingerprint() -> str:
+    db_path = get_db_path()
+    if not db_path.exists():
+        return "none"
+    try:
+        st = db_path.stat()
+        return f"{int(st.st_mtime)}_{st.st_size}"
+    except Exception:
+        return "unknown"
+
+
 def get_db():
     db_path = get_db_path()
     path_str = str(db_path)
@@ -208,9 +220,10 @@ def get_db():
     conn = sqlite3.connect(uri, uri=True, timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA cache_size = -64000")  # 64MB memory cache
-        conn.execute("PRAGMA mmap_size = 268435456")  # Memory map up to 256MB
+        conn.execute("PRAGMA cache_size = -128000")  # 128MB memory cache
+        conn.execute("PRAGMA mmap_size = 536870912")  # Memory map up to 512MB
         conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA temp_store = MEMORY")
     except Exception:
         pass
     return conn
@@ -552,6 +565,187 @@ async def handle_query(request: web.Request) -> web.Response:
         conn.close()
 
 
+async def handle_query_bulk(request: web.Request) -> web.Response:
+    """GET /api/query/bulk — high-throughput columnar sync endpoint for client-side Data Lake."""
+    try:
+        conn = get_db()
+    except Exception as e:
+        return web.json_response({
+            "error": "Database connection failed",
+            "details": str(e)
+        }, status=503)
+
+    mapping = load_model_mapping()
+
+    try:
+        where_parts = []
+        params = []
+
+        since_id = request.query.get("since_id")
+        if since_id:
+            try:
+                where_parts.append("id > ?")
+                params.append(int(since_id))
+            except ValueError:
+                pass
+
+        since_ts = request.query.get("since_ts")
+        if since_ts and not since_id:
+            where_parts.append("timestamp > ?")
+            params.append(since_ts)
+
+        from_ts = request.query.get("from")
+        if from_ts:
+            where_parts.append("timestamp >= ?")
+            params.append(from_ts)
+
+        to_ts = request.query.get("to")
+        if to_ts:
+            where_parts.append("timestamp <= ?")
+            params.append(to_ts)
+
+        models = request.query.getall("model", None)
+        if models:
+            expanded_models = []
+            for m in models:
+                expanded_models.append(m)
+                m_lower = m.lower().strip()
+                for alias_key, target in mapping.items():
+                    alias_lower = alias_key.lower().strip()
+                    if m_lower == alias_lower:
+                        if isinstance(target, str):
+                            expanded_models.append(target)
+                        elif isinstance(target, dict):
+                            expanded_models.extend(target.values())
+                        elif isinstance(target, list):
+                            expanded_models.extend(target)
+                    elif isinstance(target, str) and m_lower == target.lower().strip():
+                        expanded_models.append(alias_key)
+                    elif isinstance(target, dict) and any(m_lower == str(v).lower().strip() for v in target.values()):
+                        expanded_models.append(alias_key)
+                    elif isinstance(target, list) and any(m_lower == str(v).lower().strip() for v in target):
+                        expanded_models.append(alias_key)
+            expanded_models = list(set(expanded_models))
+            placeholders = ",".join("?" for _ in expanded_models)
+            where_parts.append(f"model IN ({placeholders})")
+            params.extend(expanded_models)
+
+        call_types = request.query.getall("call_type", None)
+        if call_types:
+            placeholders = ",".join("?" * len(call_types))
+            where_parts.append(f"call_type IN ({placeholders})")
+            params.extend(call_types)
+
+        errors_only = request.query.get("errors_only")
+        if errors_only and errors_only.lower() in ("1", "true", "yes"):
+            where_parts.append("((error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)))")
+
+        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+        limit = int(request.query.get("limit", 500000))
+
+        cols = [
+            "id", "timestamp", "model", "endpoint",
+            "input_tokens", "output_tokens", "ttfb_ms", "total_ms",
+            "tokens_per_s", "server_running", "status_code",
+            "error", "call_type", "calls_count"
+        ]
+        sql = f"""
+            SELECT {", ".join(cols)}
+            FROM api_calls
+            WHERE {where_clause}
+            ORDER BY timestamp ASC, id ASC
+            LIMIT ?
+        """
+        rows = conn.execute(sql, params + [limit]).fetchall()
+
+        http_err_map = {
+            400: "HTTP 400 Bad Request",
+            401: "HTTP 401 Unauthorized",
+            403: "HTTP 403 Forbidden",
+            404: "HTTP 404 Not Found",
+            408: "HTTP 408 Request Timeout",
+            429: "HTTP 429 Rate Limit Exceeded",
+            500: "HTTP 500 Internal Server Error",
+            502: "HTTP 502 Bad Gateway",
+            503: "HTTP 503 Service Unavailable",
+            504: "HTTP 504 Gateway Timeout"
+        }
+
+        matrix = []
+        for r in rows:
+            r_list = list(r)
+            raw_model = r_list[2]
+            ts = r_list[1]
+            r_list[2] = get_resolved_model(raw_model, mapping, ts)
+            
+            status_code = r_list[10]
+            err = r_list[11]
+            if not err and status_code and (status_code < 200 or status_code >= 300):
+                r_list[11] = http_err_map.get(status_code, f"HTTP {status_code}")
+                
+            matrix.append(r_list)
+
+        now_ts = datetime.now().timestamp()
+        if _metadata_cache["models"] is None or (now_ts - _metadata_cache["last_fetched"] > 30.0):
+            try:
+                models_avail = conn.execute("SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL ORDER BY model").fetchall()
+                mapped_models = set()
+                for r in models_avail:
+                    if r["model"]:
+                        mapped_models.add(get_resolved_model(r["model"], mapping))
+                for v in mapping.values():
+                    if isinstance(v, str):
+                        mapped_models.add(v)
+                    elif isinstance(v, dict):
+                        for tgt in v.values():
+                            if tgt:
+                                mapped_models.add(tgt)
+                _metadata_cache["models"] = sorted(list(mapped_models))
+                types_avail = conn.execute("SELECT DISTINCT call_type FROM api_calls ORDER BY call_type").fetchall()
+                _metadata_cache["types"] = [r["call_type"] for r in types_avail]
+                _metadata_cache["last_fetched"] = now_ts
+            except Exception:
+                pass
+
+        result_payload = {
+            "columns": cols,
+            "rows": matrix,
+            "count": len(matrix),
+            "db_fingerprint": get_db_fingerprint(),
+            "available_models": _metadata_cache["models"] or [],
+            "available_types": _metadata_cache["types"] or []
+        }
+
+        json_text = json.dumps(result_payload)
+        json_bytes = json_text.encode("utf-8")
+
+        accept_enc = request.headers.get("Accept-Encoding", "")
+        if "gzip" in accept_enc and len(json_bytes) > 1024:
+            gz_body = gzip.compress(json_bytes, compresslevel=3)
+            return web.Response(
+                body=gz_body,
+                content_type="application/json",
+                headers={
+                    "Content-Encoding": "gzip",
+                    "Vary": "Accept-Encoding",
+                    "Cache-Control": "no-cache"
+                }
+            )
+
+        return web.Response(
+            body=json_bytes,
+            content_type="application/json",
+            headers={"Cache-Control": "no-cache"}
+        )
+    except Exception as e:
+        return web.json_response({
+            "error": "Query bulk execution failed",
+            "details": str(e)
+        }, status=500)
+    finally:
+        conn.close()
+
+
 async def handle_server_status(request: web.Request) -> web.Response:
     """GET /api/server-status — live e-INFRA server status."""
     try:
@@ -599,6 +793,7 @@ async def handle_health(request: web.Request) -> web.Response:
         "db_path": str(db_path),
         "db_exists": db_exists,
         "db_size_mb": round(db_size / 1024 / 1024, 1) if db_exists else 0,
+        "db_fingerprint": get_db_fingerprint(),
         "dashboard_html": dashboard_html.exists(),
     })
 
@@ -899,6 +1094,7 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
 def create_app():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/api/query", handle_query)
+    app.router.add_get("/api/query/bulk", handle_query_bulk)
     app.router.add_get("/api/server-status", handle_server_status)
     app.router.add_get("/api/stats", handle_query)  # alias
     app.router.add_get("/api/costs", handle_costs)

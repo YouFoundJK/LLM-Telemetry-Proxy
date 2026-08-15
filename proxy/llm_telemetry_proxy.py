@@ -331,7 +331,10 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON api_calls(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model ON api_calls(model)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_type ON api_calls(call_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_api_calls_ts_id ON api_calls(timestamp DESC, id DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_api_calls_model_ts ON api_calls(model, timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_proxy_ts ON proxy_calls(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_proxy_calls_ts_id ON proxy_calls(timestamp DESC, id DESC)")
     conn.commit()
     conn.close()
 

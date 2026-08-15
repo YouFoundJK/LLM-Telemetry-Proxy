@@ -401,16 +401,49 @@ const TelemetryCharts = (() => {
   }
 
   /**
+   * Fast downsampler for scatter plots to maintain 60 FPS rendering on massive datasets.
+   * If points exceed targetMax, samples points preserving min, max, outliers, and density.
+   */
+  function downsamplePoints(points, targetMax = 2500) {
+    if (!points || points.length <= targetMax) return points;
+
+    const n = points.length;
+    const bucketSize = n / (targetMax / 2);
+    const sampled = [];
+
+    for (let i = 0; i < n; i += bucketSize) {
+      const chunkEnd = Math.min(n, Math.floor(i + bucketSize));
+      let minPt = points[Math.floor(i)];
+      let maxPt = points[Math.floor(i)];
+
+      for (let j = Math.floor(i); j < chunkEnd; j++) {
+        const pt = points[j];
+        if (pt.y < minPt.y) minPt = pt;
+        if (pt.y > maxPt.y) maxPt = pt;
+      }
+
+      sampled.push(minPt);
+      if (maxPt !== minPt) {
+        sampled.push(maxPt);
+      }
+    }
+
+    return sampled;
+  }
+
+  /**
    * Server Load vs RTT Scatter Chart
    */
   function renderLoadChart(calls) {
-    const loadPoints = calls
+    const rawLoadPoints = calls
       .filter(c => c.server_running !== null && c.total_ms)
       .map(c => ({
         x: c.server_running,
         y: c.total_ms / 1000,
         model: c.model || 'unknown'
       }));
+
+    const loadPoints = downsamplePoints(rawLoadPoints, 2500);
 
     const ctx = document.getElementById('loadChart');
     if (!ctx) return;
@@ -465,13 +498,15 @@ const TelemetryCharts = (() => {
    * Throughput Scatter Chart
    */
   function renderThroughputChart(calls, timeRange = null) {
-    const tpsData = calls
+    const rawTpsData = calls
       .filter(c => c.tokens_per_s && c.tokens_per_s > 0)
       .map(c => ({
         x: new Date(c.timestamp).getTime(),
         y: c.tokens_per_s,
         model: c.model || 'unknown'
       }));
+
+    const tpsData = downsamplePoints(rawTpsData, 2500);
 
     const ctx = document.getElementById('tpsChart');
     if (!ctx) return;
