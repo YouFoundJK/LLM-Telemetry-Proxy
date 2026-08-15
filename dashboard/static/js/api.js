@@ -203,6 +203,15 @@ const TelemetryAPI = (() => {
   }
 
   /**
+   * GET /api/model-mapping — retrieves alias to canonical model mapping configuration.
+   */
+  async function getModelMapping() {
+    const url = `${BASE_URL}/api/model-mapping`;
+    const response = await fetchWithRetry(url);
+    return handleResponse(response);
+  }
+
+  /**
    * POST /api/costs/sync — automatically fetches latest rates from LiteLLM and updates model_costs.json.
    */
   async function syncCosts() {
@@ -351,6 +360,7 @@ const TelemetryAPI = (() => {
     queryBulk,
     getServerStatus,
     getCosts,
+    getModelMapping,
     syncCosts,
     getHealth,
     getProxyStatus,

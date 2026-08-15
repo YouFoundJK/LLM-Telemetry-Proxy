@@ -16,6 +16,7 @@ const App = (() => {
     refreshRateSeconds: 30,
     tokenMetricType: 'input', // 'input', 'output', 'total'
     modelCosts: null,
+    modelMapping: null,
     eInfraEnabled: true,
     liveNodesConfig: null,
     allLiveModels: [],
@@ -437,9 +438,35 @@ const App = (() => {
   function renderTelemetry(data) {
     if (!data) return;
 
+    const dateRange = getSelectedDateRange();
+    const minTime = dateRange.from ? new Date(dateRange.from).getTime() : null;
+    const maxTime = dateRange.to ? new Date(dateRange.to).getTime() : null;
+    const timeRange = { minTime, maxTime: maxTime || new Date().getTime() };
+
     const selectedModels = State.modelDropdownInstance ? State.modelDropdownInstance.getSelectedModels() : [];
     
-    let filteredCalls = data.calls || [];
+    let filteredCalls = (data.calls || []).map(c => {
+      if (State.modelMapping && c.model) {
+        const canonical = resolveCanonicalModel(c.model, c.timestamp, State.modelMapping);
+        if (canonical && canonical !== c.model) {
+          c.model = canonical;
+        }
+      }
+      return c;
+    });
+
+    if (minTime) {
+      filteredCalls = filteredCalls.filter(c => {
+        const t = new Date(c.timestamp).getTime();
+        return !isNaN(t) && t >= minTime;
+      });
+    }
+    if (maxTime) {
+      filteredCalls = filteredCalls.filter(c => {
+        const t = new Date(c.timestamp).getTime();
+        return !isNaN(t) && t <= maxTime;
+      });
+    }
     if (selectedModels.length > 0) {
       filteredCalls = filteredCalls.filter(c => c.model && selectedModels.includes(c.model));
     }
@@ -559,6 +586,7 @@ const App = (() => {
 
     const savedSelectedModels = savedFilters ? (savedFilters.selectedModels || []) : null;
 
+    await loadModelMapping();
     await loadAvailableModels(savedSelectedModels);
     await performInitialLoad();
     startIntervals();
@@ -655,7 +683,11 @@ const App = (() => {
   async function loadAvailableModels(savedSelectedModels = []) {
     try {
       const data = await TelemetryAPI.query({ limit: 1 });
-      const availableModels = data.available_models || [];
+      let availableModels = data.available_models || [];
+      if (State.modelMapping) {
+        availableModels = [...new Set(availableModels.map(m => resolveCanonicalModel(m, null, State.modelMapping)))].sort();
+      }
+      State.allAvailableModels = availableModels;
       State.modelDropdownInstance = UI.setupCustomDropdown(availableModels, () => {
         saveFiltersToLocalStorage();
         renderTelemetry(State.currentData);
@@ -814,7 +846,51 @@ const App = (() => {
     });
   }
 
+  function resolveCanonicalModel(modelName, timestamp, mapping) {
+    if (!modelName) return modelName;
+    if (!mapping) return modelName;
+    const mLower = String(modelName).toLowerCase().trim();
+    
+    let target = mapping[mLower];
+    if (target === undefined) {
+      for (const [k, v] of Object.entries(mapping)) {
+        if (k.toLowerCase().trim() === mLower) {
+          target = v;
+          break;
+        }
+      }
+    }
+    if (target === undefined) return modelName;
+    if (typeof target === 'string') return target;
+    if (typeof target === 'object' && target !== null && !Array.isArray(target)) {
+      const sortedDates = Object.keys(target).sort();
+      if (sortedDates.length === 0) return modelName;
+      if (!timestamp) return target[sortedDates[sortedDates.length - 1]];
+      const tsDate = String(timestamp).slice(0, 10);
+      let matched = sortedDates[0];
+      for (const d of sortedDates) {
+        if (d <= tsDate) matched = d;
+        else break;
+      }
+      return target[matched] || modelName;
+    }
+    if (Array.isArray(target)) return target[0] || modelName;
+    return modelName;
+  }
+
+  async function loadModelMapping() {
+    try {
+      const mapping = await TelemetryAPI.getModelMapping();
+      if (mapping && typeof mapping === 'object') {
+        State.modelMapping = mapping;
+      }
+    } catch (e) {
+      console.warn('Failed to load model mapping from server:', e);
+    }
+  }
+
   async function performInitialLoad() {
+    await loadModelMapping();
     await loadCosts();
     await refresh();
     await loadServerStatus();

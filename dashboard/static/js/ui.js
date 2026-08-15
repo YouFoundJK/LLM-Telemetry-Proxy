@@ -29,6 +29,7 @@ const UI = (() => {
     if (!model) return 'tag-other';
     const m = model.toLowerCase();
     if (m.includes('glm')) return 'tag-glm';
+    if (m.includes('kimi')) return 'tag-kimi';
     if (m.includes('qwen')) return 'tag-qwen';
     if (m.includes('gemma')) return 'tag-gemma';
     if (m.includes('deepseek')) return 'tag-deepseek';

@@ -34,10 +34,11 @@ const TelemetryCharts = (() => {
   // Standard model prefix mapping to preferred colors
   const PREFERRED_MODEL_COLORS = [
     { pattern: 'glm', colorName: 'accent' },
-    { pattern: 'qwen', colorName: 'cyan' },
-    { pattern: 'gemma', colorName: 'purple' },
+    { pattern: 'kimi', colorName: 'teal' },
     { pattern: 'deepseek', colorName: 'orange' },
-    { pattern: 'gpt', colorName: 'pink' }
+    { pattern: 'gpt', colorName: 'pink' },
+    { pattern: 'qwen', colorName: 'cyan' },
+    { pattern: 'gemma', colorName: 'purple' }
   ];
 
   // List of colors to cycle through for unique models
@@ -239,6 +240,7 @@ const TelemetryCharts = (() => {
   function renderTokenChart(calls, tokenMetricType, timeRange = null) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
+    const bucketSet = new Set(buckets);
 
     const byBucket = {};
     buckets.forEach(b => {
@@ -255,15 +257,15 @@ const TelemetryCharts = (() => {
       if (!c.model || c.model === 'unknown') return; // Exclude unknown/missing model
 
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
-      const m = c.model;
+      if (!bucketSet.has(bucketKey)) return;
 
-      if (!byBucket[bucketKey]) byBucket[bucketKey] = {};
+      const m = c.model;
       byBucket[bucketKey][m] = (byBucket[bucketKey][m] || 0) + tokens;
     });
 
-    const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
+    const sortedBuckets = buckets;
     const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && (byBucket[b][m] || 0) > 0));
+    const models = allModels.filter(m => sortedBuckets.some(b => (byBucket[b][m] || 0) > 0));
     
     const datasets = models.map(m => ({
       label: m,
@@ -629,6 +631,7 @@ const TelemetryCharts = (() => {
   function renderErrorChart(calls, timeRange = null) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
+    const bucketSet = new Set(buckets);
 
     const byBucket = {};
     buckets.forEach(b => {
@@ -639,14 +642,11 @@ const TelemetryCharts = (() => {
     errors.forEach(c => {
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
-      if (byBucket[bucketKey] !== undefined) {
-        byBucket[bucketKey] += cnt;
-      } else {
-        byBucket[bucketKey] = cnt;
-      }
+      if (!bucketSet.has(bucketKey)) return;
+      byBucket[bucketKey] += cnt;
     });
 
-    const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
+    const sortedBuckets = buckets;
 
     const ctx = document.getElementById('errorChart');
     if (!ctx) return;
@@ -682,6 +682,7 @@ const TelemetryCharts = (() => {
   function renderAnalyzerTokenTrendChart(calls, timeRange = null) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
+    const bucketSet = new Set(buckets);
 
     const byBucket = {};
     buckets.forEach(b => {
@@ -690,16 +691,15 @@ const TelemetryCharts = (() => {
 
     calls.forEach(c => {
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
-      if (byBucket[bucketKey] === undefined) return;
+      if (!bucketSet.has(bucketKey)) return;
       const inp = c.input_tokens || 0;
       const out = c.output_tokens || 0;
-      const callsCount = (c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1);
       byBucket[bucketKey].input += inp;
       byBucket[bucketKey].output += out;
       byBucket[bucketKey].total += (inp + out);
     });
 
-    const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
+    const sortedBuckets = buckets;
     const labels = sortedBuckets.map(b => UI.formatShortDate(b));
 
     const datasets = [
@@ -781,6 +781,7 @@ const TelemetryCharts = (() => {
   function renderAnalyzerAvgTokenChart(calls, timeRange = null) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
+    const bucketSet = new Set(buckets);
 
     const byBucket = {};
     buckets.forEach(b => {
@@ -792,7 +793,7 @@ const TelemetryCharts = (() => {
       const totalTok = (c.input_tokens || 0) + (c.output_tokens || 0);
       if (totalTok <= 0) return;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
-      if (byBucket[bucketKey] === undefined) return;
+      if (!bucketSet.has(bucketKey)) return;
       const m = c.model;
       const callsCount = (c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1);
       
@@ -803,7 +804,7 @@ const TelemetryCharts = (() => {
       byBucket[bucketKey][m].count += callsCount;
     });
 
-    const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
+    const sortedBuckets = buckets;
     const labels = sortedBuckets.map(b => UI.formatShortDate(b));
     const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
     const models = allModels.filter(m => sortedBuckets.some(b => {
@@ -1002,6 +1003,7 @@ const TelemetryCharts = (() => {
   function renderCostOverTimeChart(calls, timeRange = null) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
+    const bucketSet = new Set(buckets);
 
     const byBucket = {};
     buckets.forEach(b => {
@@ -1013,13 +1015,14 @@ const TelemetryCharts = (() => {
       const cost = c.total_cost || 0;
       if (cost <= 0) return;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
+      if (!bucketSet.has(bucketKey)) return;
       const m = c.model;
       byBucket[bucketKey][m] = (byBucket[bucketKey][m] || 0) + cost;
     });
 
-    const sortedBuckets = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
+    const sortedBuckets = buckets;
     const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => byBucket[b] && (byBucket[b][m] || 0) > 0));
+    const models = allModels.filter(m => sortedBuckets.some(b => (byBucket[b][m] || 0) > 0));
 
     const datasets = models.map(m => {
       const dataPoints = sortedBuckets.map(b => byBucket[b][m] || 0);

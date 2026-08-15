@@ -18,6 +18,8 @@
   "kimi-k3": "kimi-k3",
   "mini": "gpt-oss-120b",
   "gpt-oss-120b": "gpt-oss-120b",
+  "coder": "qwen3.5-122b",
+  "agentic": "qwen3.5-122b",
   "qwen3.5-122b": "qwen3.5-122b",
   "qwen3.5-int4": "qwen3.5-int4",
   "gemma-4": "gemma4",

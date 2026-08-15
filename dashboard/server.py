@@ -846,6 +846,12 @@ async def handle_costs_sync(request: web.Request) -> web.Response:
         return web.json_response({"error": f"Failed to sync model costs: {str(e)}"}, status=500)
 
 
+async def handle_model_mapping(request: web.Request) -> web.Response:
+    """GET /api/model-mapping — retrieves alias to canonical model mapping."""
+    mapping = load_model_mapping()
+    return web.json_response(mapping)
+
+
 async def handle_dashboard(request: web.Request) -> web.Response:
     dashboard_html = get_dashboard_html_path()
     if dashboard_html.exists():
@@ -1111,6 +1117,7 @@ def create_app():
     app.router.add_get("/api/stats", handle_query)  # alias
     app.router.add_get("/api/costs", handle_costs)
     app.router.add_post("/api/costs/sync", handle_costs_sync)
+    app.router.add_get("/api/model-mapping", handle_model_mapping)
     app.router.add_get("/health", handle_health)
     
     # Proxy lifecycle routes
