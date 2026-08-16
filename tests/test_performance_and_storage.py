@@ -48,6 +48,23 @@ class TestBulkRetrievalAndIndexes(unittest.TestCase):
         self.assertNotEqual(fp, "none")
         self.assertIn("_", fp)
 
+    def test_db_fingerprint_stability_across_inserts(self):
+        """Verify DB fingerprint does NOT change when new rows are inserted."""
+        init_db()
+        fp1 = get_db_fingerprint()
+
+        # Insert test call into api_calls
+        conn_w = sqlite3.connect(str(Path(REPO_ROOT) / "data" / "llm_telemetry.db"))
+        conn_w.execute("""
+            INSERT INTO api_calls (timestamp, model, endpoint, input_tokens, output_tokens, status_code, call_type)
+            VALUES (datetime('now'), 'test-model', '/v1/chat/completions', 100, 50, 200, 'chat')
+        """)
+        conn_w.commit()
+        conn_w.close()
+
+        fp2 = get_db_fingerprint()
+        self.assertEqual(fp1, fp2, "DB fingerprint changed on regular row insertion!")
+
     def test_raw_fetch_speed_on_large_dataset(self):
         """Verify that indexed SQLite query retrieves 100k+ rows in under 0.6 seconds."""
         t0 = time.time()
@@ -136,6 +153,21 @@ class TestBulkApiEndpoint(AioHTTPTestCase):
         data = await resp.json()
         self.assertIn("db_fingerprint", data)
         self.assertTrue(len(data["db_fingerprint"]) > 0)
+
+    @unittest_run_loop
+    async def test_api_health_endpoint(self):
+        """Test that /api/health returns 200 with db_fingerprint."""
+        resp = await self.client.request("GET", "/api/health")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertIn("db_fingerprint", data)
+
+    @unittest_run_loop
+    async def test_favicon_endpoint(self):
+        """Test that /favicon.ico returns 200 SVG to prevent 404s in browser."""
+        resp = await self.client.request("GET", "/favicon.ico")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("image/svg+xml", resp.headers.get("Content-Type", ""))
 
     def test_format_time_remaining(self):
         """Test time remaining format helper across minute/hour boundaries."""

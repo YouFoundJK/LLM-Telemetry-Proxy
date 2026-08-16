@@ -75,6 +75,9 @@ const App = (() => {
           clearBtn.disabled = true;
           clearBtn.textContent = 'Clearing...';
           await TelemetryStore.clearAll();
+          if (State.healthData && State.healthData.db_fingerprint) {
+            await TelemetryStore.setMeta('db_fingerprint', State.healthData.db_fingerprint);
+          }
           await updateCacheStatsUI();
           if (alertEl) {
             alertEl.style.display = 'block';
@@ -82,7 +85,9 @@ const App = (() => {
             alertEl.textContent = 'Browser IndexedDB cache cleared successfully.';
             setTimeout(() => { alertEl.style.display = 'none'; }, 4000);
           }
-          await refresh(true);
+          // Non-destructive refresh for active filter range
+          await refresh(false);
+          await updateCacheStatsUI();
         } catch (e) {
           if (alertEl) {
             alertEl.style.display = 'block';
@@ -128,6 +133,27 @@ const App = (() => {
   }
 
   function getSelectedDateRange() {
+    const activeRangeBtn = document.querySelector('[data-range].active');
+    if (activeRangeBtn) {
+      const range = activeRangeBtn.dataset.range;
+      const now = new Date();
+      let fromDateVal = null;
+      if (range === '1h') fromDateVal = new Date(now.getTime() - 3600000);
+      else if (range === '6h') fromDateVal = new Date(now.getTime() - 6 * 3600000);
+      else if (range === '24h') fromDateVal = new Date(now.getTime() - 24 * 3600000);
+      else if (range === '7d') fromDateVal = new Date(now.getTime() - 7 * 86400000);
+
+      if (fromDateVal) {
+        if (State.datePickerInstance) {
+          State.datePickerInstance.setDate([fromDateVal, now], false);
+        }
+        return {
+          from: UI.toLocalISOString(fromDateVal),
+          to: UI.toLocalISOString(now)
+        };
+      }
+    }
+
     let fromVal = '';
     let toVal = '';
     if (State.datePickerInstance && State.datePickerInstance.selectedDates.length === 2) {
@@ -488,11 +514,6 @@ const App = (() => {
     enrichCallsWithCosts(filteredCalls);
     State.currentFilteredCalls = filteredCalls;
 
-    const dateRange = getSelectedDateRange();
-    const minTime = dateRange.from ? new Date(dateRange.from).getTime() : null;
-    const maxTime = dateRange.to ? new Date(dateRange.to).getTime() : new Date().getTime();
-    const timeRange = { minTime, maxTime };
-
     TelemetryCharts.renderAll(filteredCalls, State.tokenMetricType, timeRange);
 
     UI.renderCostSummary(filteredCalls, State.modelCosts);
@@ -519,6 +540,13 @@ const App = (() => {
   }
 
   function showLoadingOverlays() {
+    // If we already have loaded data, keep existing UI on screen without destroying the DOM
+    if (State.currentData && State.currentData.calls && State.currentData.calls.length > 0) {
+      const statusText = document.getElementById('liveStatusText');
+      if (statusText) statusText.textContent = 'Syncing data...';
+      return;
+    }
+
     const spinner = `<div class="loading-overlay" style="display: flex;"><div class="spinner"></div><span>Retrieving data...</span></div>`;
     
     const summaryBar = document.getElementById('summaryBar');
@@ -1035,12 +1063,12 @@ const App = (() => {
         if (State.liveUpdatesEnabled) {
           if (statusText) statusText.textContent = 'Auto updates active';
           if (dot) dot.classList.remove('paused');
-          startIntervals();
-          refresh(true);
+          startTelemetryIntervals();
+          syncLiveTail();
         } else {
           if (statusText) statusText.textContent = 'Auto updates paused';
           if (dot) dot.classList.add('paused');
-          stopIntervals();
+          stopTelemetryIntervals();
         }
       });
     }
@@ -1051,7 +1079,7 @@ const App = (() => {
         State.eInfraEnabled = e.target.checked;
         saveFiltersToLocalStorage();
         loadServerStatus();
-        startIntervals();
+        startTelemetryIntervals();
       });
     }
 
@@ -1284,8 +1312,17 @@ const App = (() => {
     if (typeof TelemetryStore === 'undefined' || !State.liveUpdatesEnabled) return;
     try {
       const watermarks = await TelemetryStore.getWatermarks();
+      if (watermarks.count === 0) {
+        // If cache is empty, trigger standard refresh
+        await refresh(false);
+        return;
+      }
+
       if (watermarks.maxId > 0) {
         const tailData = await TelemetryAPI.queryBulk({ since_id: watermarks.maxId, limit: 50000 });
+        if (tailData.db_fingerprint) {
+          await TelemetryStore.setMeta('db_fingerprint', tailData.db_fingerprint);
+        }
         if (tailData.calls && tailData.calls.length > 0) {
           await TelemetryStore.putBatch(tailData.calls);
           if (tailData.available_models && tailData.available_models.length > 0) {
@@ -1969,12 +2006,10 @@ const App = (() => {
   }
 
   /**
-   * Start interval polling loops
+   * Start Live Proxy Gateway Status Heartbeat (Runs continuously when tab is visible)
    */
-  function startIntervals() {
-    stopIntervals();
-
-    // 1. Live Proxy Gateway status & Active Concurrency Heartbeat — ALWAYS active across all tabs
+  function startProxyHeartbeat() {
+    if (State.intervals.proxyStatus) return;
     State.intervals.proxyStatus = setInterval(() => {
       if (document.visibilityState === 'visible') {
         loadProxyStatus();
@@ -1984,8 +2019,20 @@ const App = (() => {
         }
       }
     }, 3000);
+  }
 
-    // 2. Telemetry query intervals (respects liveUpdatesEnabled toggle)
+  function stopProxyHeartbeat() {
+    if (State.intervals.proxyStatus) {
+      clearInterval(State.intervals.proxyStatus);
+      State.intervals.proxyStatus = null;
+    }
+  }
+
+  /**
+   * Start telemetry query interval polling loops (respects liveUpdatesEnabled toggle)
+   */
+  function startTelemetryIntervals() {
+    stopTelemetryIntervals();
     if (!State.liveUpdatesEnabled) return;
 
     State.intervals.refresh = setInterval(syncLiveTail, State.refreshRateSeconds * 1000);
@@ -1995,23 +2042,43 @@ const App = (() => {
     State.intervals.crossCheck = setInterval(loadCrossCheck, 30000);
   }
 
+  function stopTelemetryIntervals() {
+    if (State.intervals.refresh) {
+      clearInterval(State.intervals.refresh);
+      State.intervals.refresh = null;
+    }
+    if (State.intervals.serverStatus) {
+      clearInterval(State.intervals.serverStatus);
+      State.intervals.serverStatus = null;
+    }
+    if (State.intervals.crossCheck) {
+      clearInterval(State.intervals.crossCheck);
+      State.intervals.crossCheck = null;
+    }
+  }
+
   /**
-   * Stop interval polling loops
+   * Start all interval loops
+   */
+  function startIntervals() {
+    startProxyHeartbeat();
+    startTelemetryIntervals();
+  }
+
+  /**
+   * Stop all interval loops
    */
   function stopIntervals() {
-    if (State.intervals.refresh) clearInterval(State.intervals.refresh);
-    if (State.intervals.serverStatus) clearInterval(State.intervals.serverStatus);
-    if (State.intervals.crossCheck) clearInterval(State.intervals.crossCheck);
-    if (State.intervals.proxyStatus) clearInterval(State.intervals.proxyStatus);
-    if (State.intervals.rawLogStatus) clearInterval(State.intervals.rawLogStatus);
-    if (State.intervals.proxyLogs) clearInterval(State.intervals.proxyLogs);
-    
-    State.intervals.refresh = null;
-    State.intervals.serverStatus = null;
-    State.intervals.crossCheck = null;
-    State.intervals.proxyStatus = null;
-    State.intervals.rawLogStatus = null;
-    State.intervals.proxyLogs = null;
+    stopProxyHeartbeat();
+    stopTelemetryIntervals();
+    if (State.intervals.rawLogStatus) {
+      clearInterval(State.intervals.rawLogStatus);
+      State.intervals.rawLogStatus = null;
+    }
+    if (State.intervals.proxyLogs) {
+      clearInterval(State.intervals.proxyLogs);
+      State.intervals.proxyLogs = null;
+    }
   }
 
   function ensureLiveNodesConfig(allFetchedNames) {

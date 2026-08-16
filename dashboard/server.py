@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import os
 import urllib.parse
+import uuid
 from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,17 @@ DEFAULT_PORT = 9118
 
 DASHBOARD_DIR = Path(__file__).resolve().parent
 REPO_ROOT = DASHBOARD_DIR.parent
+
+# SVG Favicon icon handler
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0d1117"/><path d="M7 16h4l3-8 4 16 3-8h4" fill="none" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
+
+async def handle_favicon(request: web.Request) -> web.Response:
+    """Serve embedded SVG favicon."""
+    return web.Response(
+        body=FAVICON_SVG.encode("utf-8"),
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"}
+    )
 
 def get_dashboard_html_path() -> Path:
     candidates = [
@@ -194,10 +206,44 @@ def get_db_fingerprint() -> str:
     if not db_path.exists():
         return "none"
     try:
-        st = db_path.stat()
-        return f"{int(st.st_mtime)}_{st.st_size}"
+        conn = get_db()
+        try:
+            cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'db_instance_id'")
+            row = cur.fetchone()
+            inst_id = row[0] if row else None
+            
+            cur2 = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'compaction_version'")
+            row2 = cur2.fetchone()
+            comp_ver = row2[0] if row2 else "1"
+            
+            if inst_id:
+                return f"{inst_id}_v{comp_ver}"
+        except Exception:
+            pass
+        finally:
+            conn.close()
     except Exception:
-        return "unknown"
+        pass
+
+    # Fallback: if _telemetry_meta is not initialized yet, seed it in a write transaction
+    try:
+        conn_w = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            conn_w.execute("""
+                CREATE TABLE IF NOT EXISTS _telemetry_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            inst_id = uuid.uuid4().hex
+            conn_w.execute("INSERT OR IGNORE INTO _telemetry_meta (key, value) VALUES ('db_instance_id', ?)", (inst_id,))
+            conn_w.execute("INSERT OR IGNORE INTO _telemetry_meta (key, value) VALUES ('compaction_version', '1')")
+            conn_w.commit()
+            return f"{inst_id}_v1"
+        finally:
+            conn_w.close()
+    except Exception:
+        return "default_instance_v1"
 
 
 def get_db():
@@ -1118,7 +1164,9 @@ def create_app():
     app.router.add_get("/api/costs", handle_costs)
     app.router.add_post("/api/costs/sync", handle_costs_sync)
     app.router.add_get("/api/model-mapping", handle_model_mapping)
+    app.router.add_get("/favicon.ico", handle_favicon)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/api/health", handle_health)
     
     # Proxy lifecycle routes
     app.router.add_get("/api/proxy/status", handle_proxy_status)

@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sqlite3
+import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import sys
@@ -129,6 +130,18 @@ def run_migrations(conn):
         conn.execute("ALTER TABLE proxy_calls ADD COLUMN calls_count INTEGER DEFAULT 1")
     except sqlite3.OperationalError:
         pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _telemetry_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'db_instance_id'")
+    if not cur.fetchone():
+        conn.execute("INSERT OR IGNORE INTO _telemetry_meta (key, value) VALUES ('db_instance_id', ?)", (uuid.uuid4().hex,))
+    cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'compaction_version'")
+    if not cur.fetchone():
+        conn.execute("INSERT OR IGNORE INTO _telemetry_meta (key, value) VALUES ('compaction_version', '1')")
 
 def compress(dry_run=False):
     if not DB_PATH.exists():
@@ -360,10 +373,16 @@ def compress(dry_run=False):
                     (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count)
                 VALUES
                     (:timestamp, :endpoint, :method, :call_type, :model, :status_code, :error, :logged, :ttfb_ms, :total_ms, :calls_count)
-            """, aggregated_proxy)
+        # Update compaction version and timestamp in _telemetry_meta
+        cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'compaction_version'")
+        row = cur.fetchone()
+        curr_ver = int(row[0]) if row and row[0] and row[0].isdigit() else 1
+        new_ver = curr_ver + 1
+        conn.execute("INSERT OR REPLACE INTO _telemetry_meta (key, value) VALUES ('compaction_version', ?)", (str(new_ver),))
+        conn.execute("INSERT OR REPLACE INTO _telemetry_meta (key, value) VALUES ('last_compaction_ts', ?)", (datetime.now(timezone.utc).isoformat(),))
 
         conn.commit()
-        print("[OK] Data successfully compressed.")
+        print(f"[OK] Data successfully compressed. DB compaction version advanced to {new_ver}.")
         
         print("Vacuuming database to reclaim disk space...")
         conn.execute("VACUUM")

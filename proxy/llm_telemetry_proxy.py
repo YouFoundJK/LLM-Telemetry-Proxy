@@ -369,6 +369,21 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_api_calls_model_ts ON api_calls(model, timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_proxy_ts ON proxy_calls(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_proxy_calls_ts_id ON proxy_calls(timestamp DESC, id DESC)")
+
+    # Database Metadata Table for stable fingerprinting and compaction tracking
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _telemetry_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'db_instance_id'")
+    if not cur.fetchone():
+        conn.execute("INSERT OR IGNORE INTO _telemetry_meta (key, value) VALUES ('db_instance_id', ?)", (uuid.uuid4().hex,))
+    cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'compaction_version'")
+    if not cur.fetchone():
+        conn.execute("INSERT OR IGNORE INTO _telemetry_meta (key, value) VALUES ('compaction_version', '1')")
+
     conn.commit()
     conn.close()
 
