@@ -1005,6 +1005,72 @@ async def handle_db_compress(request: web.Request) -> web.Response:
     return web.json_response(res, status=status_code)
 
 
+def get_active_proxy_port() -> int:
+    return getattr(ProxyManager, '_last_known_port', 9090)
+
+
+def read_recent_jsonl_lines(file_path: Path, limit: int = 50) -> tuple[list[dict], int]:
+    """Efficiently read the last `limit` lines from a JSONL file without reading or parsing the whole file."""
+    if not file_path or not Path(file_path).exists():
+        return [], 0
+
+    p = Path(file_path)
+    file_size = p.stat().st_size
+    if file_size == 0:
+        return [], 0
+
+    lines = []
+    total_count = 0
+
+    if file_size < 512 * 1024:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_s = line.strip()
+                if line_s:
+                    total_count += 1
+                    lines.append(line_s)
+        recent_lines = lines[-limit:]
+    else:
+        chunk_size = 64 * 1024
+        with open(p, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            position = f.tell()
+            buffer = bytearray()
+            found_lines = []
+
+            while position > 0 and len(found_lines) <= (limit + 5):
+                read_size = min(chunk_size, position)
+                position -= read_size
+                f.seek(position, os.SEEK_SET)
+                chunk = f.read(read_size)
+                buffer = chunk + buffer
+
+                parts = buffer.split(b"\n")
+                if position > 0:
+                    buffer = parts[0]
+                    complete_lines = parts[1:]
+                else:
+                    buffer = bytearray()
+                    complete_lines = parts
+
+                for part in complete_lines:
+                    p_str = part.decode("utf-8", errors="replace").strip()
+                    if p_str:
+                        found_lines.append(p_str)
+
+            recent_lines = found_lines[-limit:]
+            total_count = max(len(found_lines), limit)
+
+    entries = []
+    for l in recent_lines:
+        try:
+            entries.append(json.loads(l))
+        except Exception:
+            pass
+
+    return list(reversed(entries)), total_count
+
+
 # ── Raw Payload Log & Inspector Endpoints ────────────────────────────────────
 async def handle_inspector(request: web.Request) -> web.Response:
     """GET /inspector and /raw-logs — serve the standalone inspector UI."""
@@ -1021,7 +1087,7 @@ async def handle_raw_log_status(request: web.Request) -> web.Response:
     size = logger_file.stat().st_size if file_exists else 0
 
     proxy_status = None
-    proxy_port = 9090
+    proxy_port = get_active_proxy_port()
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.0)) as session:
             async with session.get(f"http://127.0.0.1:{proxy_port}/v1/raw-log/status") as resp:
@@ -1057,7 +1123,7 @@ async def handle_raw_log_toggle(request: web.Request) -> web.Response:
     except Exception:
         data = {}
 
-    proxy_port = 9090
+    proxy_port = get_active_proxy_port()
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2.0)) as session:
             async with session.post(f"http://127.0.0.1:{proxy_port}/v1/raw-log/toggle", json=data) as resp:
@@ -1082,18 +1148,8 @@ async def handle_raw_log_recent(request: web.Request) -> web.Response:
         return web.json_response({"entries": [], "total_count": 0})
 
     try:
-        entries = []
-        with open(logger_file, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line_str = line.strip()
-                if line_str:
-                    try:
-                        entries.append(json.loads(line_str))
-                    except Exception:
-                        pass
-        total_count = len(entries)
-        recent_entries = entries[-limit:]
-        return web.json_response({"entries": list(reversed(recent_entries)), "total_count": total_count})
+        entries, total_count = await asyncio.to_thread(read_recent_jsonl_lines, logger_file, limit)
+        return web.json_response({"entries": entries, "total_count": total_count})
     except Exception as e:
         return web.json_response({"error": str(e), "entries": []}, status=500)
 
@@ -1101,13 +1157,14 @@ async def handle_raw_log_recent(request: web.Request) -> web.Response:
 async def handle_raw_log_clear(request: web.Request) -> web.Response:
     """POST /api/raw-log/clear — truncate the logger file."""
     logger_file = get_logger_file_path()
+    proxy_port = get_active_proxy_port()
     try:
         if logger_file.exists():
             with open(logger_file, "w", encoding="utf-8") as f:
                 f.truncate(0)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.0)) as session:
-                await session.post("http://127.0.0.1:9090/v1/raw-log/clear")
+                await session.post(f"http://127.0.0.1:{proxy_port}/v1/raw-log/clear")
         except Exception:
             pass
         return web.json_response({"success": True, "message": "Logger file cleared successfully."})
@@ -1122,14 +1179,16 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
         reason='OK',
         headers={
             'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
             'Access-Control-Allow-Origin': '*',
         }
     )
     await response.prepare(request)
 
-    proxy_url = "http://127.0.0.1:9090/v1/raw-log/stream"
+    proxy_port = get_active_proxy_port()
+    proxy_url = f"http://127.0.0.1:{proxy_port}/v1/raw-log/stream"
     try:
         timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:

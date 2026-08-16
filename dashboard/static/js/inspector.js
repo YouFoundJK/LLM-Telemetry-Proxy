@@ -177,6 +177,29 @@
     setInterval(updateStatusMeta, 5000);
   }
 
+  function updateStatusMetaDisplay() {
+    if (els.metaFilePath && State.metaFilePath) {
+      els.metaFilePath.textContent = State.metaFilePath;
+    }
+    if (els.metaFileSize && State.metaFileSize) {
+      els.metaFileSize.textContent = State.metaFileSize;
+    }
+
+    if (els.toggleBtn && els.toggleBtnText) {
+      if (State.isLoggingEnabled) {
+        els.toggleBtn.className = 'btn-mini';
+        els.toggleBtn.style.color = '#f85149';
+        els.toggleBtn.style.borderColor = 'rgba(248, 81, 73, 0.4)';
+        els.toggleBtnText.textContent = 'Disable Logging';
+      } else {
+        els.toggleBtn.className = 'btn-mini btn-mini-primary';
+        els.toggleBtn.style.color = '';
+        els.toggleBtn.style.borderColor = '';
+        els.toggleBtnText.textContent = 'Enable Logging';
+      }
+    }
+  }
+
   /**
    * Fetch current logging state & file size from server
    */
@@ -185,27 +208,10 @@
       const status = await TelemetryAPI.getRawLogStatus();
       const prevLoggingState = State.isLoggingEnabled;
       State.isLoggingEnabled = Boolean(status.enabled);
+      State.metaFilePath = status.rel_path || 'logger/payloads.jsonl';
+      State.metaFileSize = status.file_size_formatted || '0 B';
 
-      if (els.metaFilePath) {
-        els.metaFilePath.textContent = status.rel_path || 'logger/payloads.jsonl';
-      }
-      if (els.metaFileSize) {
-        els.metaFileSize.textContent = status.file_size_formatted || '0 B';
-      }
-
-      if (els.toggleBtn && els.toggleBtnText) {
-        if (State.isLoggingEnabled) {
-          els.toggleBtn.className = 'btn-mini';
-          els.toggleBtn.style.color = '#f85149';
-          els.toggleBtn.style.borderColor = 'rgba(248, 81, 73, 0.4)';
-          els.toggleBtnText.textContent = 'Disable Logging';
-        } else {
-          els.toggleBtn.className = 'btn-mini btn-mini-primary';
-          els.toggleBtn.style.color = '';
-          els.toggleBtn.style.borderColor = '';
-          els.toggleBtnText.textContent = 'Enable Logging';
-        }
-      }
+      updateStatusMetaDisplay();
 
       // Re-render empty state if logging state changed and no events exist yet
       if (State.events.length === 0 && prevLoggingState !== State.isLoggingEnabled) {
@@ -221,13 +227,19 @@
    */
   async function handleToggleLogging() {
     try {
+      if (els.toggleBtn) els.toggleBtn.disabled = true;
       const res = await TelemetryAPI.toggleRawLog();
-      await updateStatusMeta();
+      State.isLoggingEnabled = Boolean(res.enabled);
+      State.metaFilePath = res.rel_path || State.metaFilePath || 'logger/payloads.jsonl';
+      State.metaFileSize = res.file_size_formatted || State.metaFileSize || '0 B';
+      updateStatusMetaDisplay();
       if (State.events.length === 0) {
         renderFeed();
       }
     } catch (e) {
       alert('Error toggling logging: ' + e.message);
+    } finally {
+      if (els.toggleBtn) els.toggleBtn.disabled = false;
     }
   }
 
@@ -280,6 +292,23 @@
         const payload = JSON.parse(event.data);
         if (payload.type === 'connected') {
           setConnStatus('connected', 'Live (Connected)');
+          if (typeof payload.enabled === 'boolean') {
+            const prev = State.isLoggingEnabled;
+            State.isLoggingEnabled = payload.enabled;
+            updateStatusMetaDisplay();
+            if (State.events.length === 0 && prev !== State.isLoggingEnabled) {
+              renderFeed();
+            }
+          }
+          return;
+        }
+        if (payload.type === 'status_update') {
+          const prev = State.isLoggingEnabled;
+          State.isLoggingEnabled = Boolean(payload.enabled);
+          updateStatusMetaDisplay();
+          if (State.events.length === 0 && prev !== State.isLoggingEnabled) {
+            renderFeed();
+          }
           return;
         }
         appendEvent(payload, true);
@@ -327,30 +356,32 @@
   }
 
   /**
-   * Append a single raw payload event to the feed without destroying existing DOM nodes
+   * Append or update a raw payload event in the feed without destroying existing DOM nodes
    */
   function appendEvent(record, renderImmediately = true) {
     if (!record || !record.id) return;
 
-    // Deduplicate if already present
-    if (State.events.some(e => e.id === record.id)) return;
-
-    let hasNewModel = false;
-    // Track model for dropdown filter
-    if (record.model) {
-      if (!State.models.has(record.model)) {
-        State.models.add(record.model);
-        hasNewModel = true;
+    // Check if event already exists in State (e.g. updating in-progress to completed)
+    const existingIndex = State.events.findIndex(e => e.id === record.id);
+    let isUpdate = false;
+    if (existingIndex >= 0) {
+      State.events[existingIndex] = record;
+      isUpdate = true;
+    } else {
+      State.events.push(record);
+      if (State.events.length > State.maxDisplayed) {
+        const removed = State.events.shift();
+        if (removed && els.feed) {
+          const oldCard = els.feed.querySelector(`[data-event-id="${removed.id}"]`);
+          if (oldCard) oldCard.remove();
+        }
       }
     }
 
-    State.events.push(record);
-    if (State.events.length > State.maxDisplayed) {
-      const removed = State.events.shift();
-      if (removed && els.feed) {
-        const oldCard = els.feed.querySelector(`[data-event-id="${removed.id}"]`);
-        if (oldCard) oldCard.remove();
-      }
+    let hasNewModel = false;
+    if (record.model && !State.models.has(record.model)) {
+      State.models.add(record.model);
+      hasNewModel = true;
     }
 
     if (hasNewModel) {
@@ -362,20 +393,33 @@
       const emptyStateEl = els.feed.querySelector('.empty-state');
       if (emptyStateEl) emptyStateEl.remove();
 
-      // Create and append ONLY the new card to preserve state of existing cards
+      const existingCard = els.feed.querySelector(`[data-event-id="${record.id}"]`);
       const cardEl = createPayloadCard(record);
       cardEl.setAttribute('data-event-id', record.id);
+
       const isVisible = matchesFilters(record);
       if (!isVisible) {
         cardEl.style.display = 'none';
       }
-      els.feed.appendChild(cardEl);
+
+      if (existingCard) {
+        // Preserve open/collapsed state of existing card
+        const oldBody = existingCard.querySelector('.card-body');
+        const newBody = cardEl.querySelector('.card-body');
+        if (oldBody && newBody && oldBody.style.display === 'none') {
+          newBody.style.display = 'none';
+          const newIcon = cardEl.querySelector('.card-expand-icon');
+          if (newIcon) newIcon.textContent = '▶';
+        }
+        existingCard.replaceWith(cardEl);
+      } else {
+        els.feed.appendChild(cardEl);
+        if (State.autoScroll && isVisible) {
+          window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        }
+      }
 
       updateDisplayedCount();
-
-      if (State.autoScroll && isVisible) {
-        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      }
     }
   }
 
@@ -587,13 +631,15 @@
       }
     }
 
-    // Status filter
+    const isInProgress = record.status === 'in_progress';
     const status = record.response?.status_code;
-    if (State.filterStatus === 'success' && status !== 200) {
-      return false;
+
+    // Status filter
+    if (State.filterStatus === 'success') {
+      if (isInProgress || status !== 200) return false;
     }
-    if (State.filterStatus === 'errors' && (!status || status === 200)) {
-      return false;
+    if (State.filterStatus === 'errors') {
+      if (isInProgress || (!status || status === 200)) return false;
     }
 
     // Search query filter
@@ -602,14 +648,20 @@
       const modelMatch = record.model && record.model.toLowerCase().includes(q);
       const endpointMatch = record.endpoint && record.endpoint.toLowerCase().includes(q);
       const contentMatch = record.response?.content?.text && record.response.content.text.toLowerCase().includes(q);
+      const reasoningMatch = record.response?.content?.reasoning_content && record.response.content.reasoning_content.toLowerCase().includes(q);
       const promptMatch = record.request?.prompt && String(record.request.prompt).toLowerCase().includes(q);
+      const inputMatch = record.request?.input && JSON.stringify(record.request.input).toLowerCase().includes(q);
       
       let msgsMatch = false;
       if (record.request?.messages && Array.isArray(record.request.messages)) {
-        msgsMatch = record.request.messages.some(m => m.content && String(m.content).toLowerCase().includes(q));
+        msgsMatch = record.request.messages.some(m => {
+          const content = m.content ? String(m.content).toLowerCase() : '';
+          const role = m.role ? String(m.role).toLowerCase() : '';
+          return content.includes(q) || role.includes(q);
+        });
       }
 
-      if (!modelMatch && !endpointMatch && !contentMatch && !promptMatch && !msgsMatch) {
+      if (!modelMatch && !endpointMatch && !contentMatch && !reasoningMatch && !promptMatch && !inputMatch && !msgsMatch) {
         return false;
       }
     }
@@ -622,36 +674,42 @@
    */
   function createPayloadCard(record) {
     const card = document.createElement('div');
-    const isError = Boolean(record.response?.error || (record.response?.status_code && record.response.status_code >= 400));
-    card.className = `payload-card ${isError ? 'error-call' : 'success-call'}`;
+    const isInProgress = record.status === 'in_progress';
+    const isError = !isInProgress && Boolean(record.response?.error || (record.response?.status_code && record.response.status_code >= 400));
+    
+    card.className = `payload-card ${isInProgress ? 'in-progress-call' : (isError ? 'error-call' : 'success-call')}`;
 
     const usage = record.response?.usage || {};
-    const inTokens = usage.prompt_tokens ?? (record.request?.payload?.messages ? '—' : 0);
-    const outTokens = usage.completion_tokens ?? (isError ? 0 : '—');
+    const inTokens = usage.prompt_tokens ?? (record.request?.messages?.length ? `${record.request.messages.length} msgs` : (record.request?.prompt ? '1 prompt' : '—'));
+    const outTokens = usage.completion_tokens ?? (isInProgress ? '...' : (isError ? 0 : '—'));
     const reasoningTokens = usage.reasoning_tokens ?? 0;
     const totalTokens = usage.total_tokens ?? (typeof inTokens === 'number' && typeof outTokens === 'number' ? inTokens + outTokens : '—');
 
-    const totalMs = record.response?.total_ms ? `${(record.response.total_ms / 1000).toFixed(2)}s` : '—';
+    const totalMs = record.response?.total_ms ? `${(record.response.total_ms / 1000).toFixed(2)}s` : (isInProgress ? 'Streaming...' : '—');
     const ttfbMs = record.response?.ttfb_ms ? `${Math.round(record.response.ttfb_ms)}ms` : '—';
     const tps = record.response?.tokens_per_s ? `${Math.round(record.response.tokens_per_s)} tok/s` : '';
 
     const timestamp = record.timestamp ? new Date(record.timestamp).toLocaleTimeString() : '';
-    const status = record.response?.status_code || (isError ? 'ERR' : 200);
+    const status = record.response?.status_code || (isInProgress ? 'IN-FLIGHT' : (isError ? 'ERR' : 200));
 
-    // Card Header
-    const header = document.createElement('div');
-    header.className = 'payload-card-header';
-    header.innerHTML = `
-      <div class="card-title-left">
-        <span class="card-expand-icon" style="font-size: 11px; color: #8b949e;">▼</span>
-        <span class="method-badge">${escapeHtml(record.method || 'POST')}</span>
-        <span class="model-badge-lg">${escapeHtml(record.model || 'Unknown Model')}</span>
-        <span class="status-pill ${status === 200 ? 'status-200' : 'status-err'}">${status}</span>
-        <span style="font-size: 11px; color: #8b949e; font-family: var(--font-mono);">${timestamp}</span>
-        <span style="font-size: 11px; color: #6e7681; font-family: var(--font-mono);">${escapeHtml(record.endpoint || '')}</span>
-      </div>
+    let statusPillHtml;
+    if (isInProgress) {
+      statusPillHtml = `<span class="status-pill status-inflight"><span class="spin">⚡</span> IN-FLIGHT</span>`;
+    } else if (status === 200) {
+      statusPillHtml = `<span class="status-pill status-200">200 OK</span>`;
+    } else {
+      statusPillHtml = `<span class="status-pill status-err">${escapeHtml(String(status))}</span>`;
+    }
 
-      <div class="token-pills-row">
+    let tokenPillsHtml;
+    if (isInProgress) {
+      tokenPillsHtml = `
+        <span class="tok-in" title="Input">In: <strong>${inTokens}</strong></span>
+        <span>•</span>
+        <span style="color: #d29922; font-style: italic; font-size: 11px;">⏱ Active stream in-flight...</span>
+      `;
+    } else {
+      tokenPillsHtml = `
         <span class="tok-in" title="Prompt Tokens">In: <strong>${inTokens}</strong></span>
         <span>•</span>
         <span class="tok-out" title="Completion Tokens">Out: <strong>${outTokens}</strong></span>
@@ -661,6 +719,24 @@
         ${tps ? `<span>•</span><span style="color: #39d2c0;">${tps}</span>` : ''}
         <span>•</span>
         <span style="color: #8b949e;" title="TTFB / Total RTT">⏱ ${ttfbMs} / ${totalMs}</span>
+      `;
+    }
+
+    // Card Header
+    const header = document.createElement('div');
+    header.className = 'payload-card-header';
+    header.innerHTML = `
+      <div class="card-title-left">
+        <span class="card-expand-icon" style="font-size: 11px; color: #8b949e;">▼</span>
+        <span class="method-badge">${escapeHtml(record.method || 'POST')}</span>
+        <span class="model-badge-lg">${escapeHtml(record.model || 'Unknown Model')}</span>
+        ${statusPillHtml}
+        <span style="font-size: 11px; color: #8b949e; font-family: var(--font-mono);">${timestamp}</span>
+        <span style="font-size: 11px; color: #6e7681; font-family: var(--font-mono);">${escapeHtml(record.endpoint || '')}</span>
+      </div>
+
+      <div class="token-pills-row">
+        ${tokenPillsHtml}
       </div>
     `;
 

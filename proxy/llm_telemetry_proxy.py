@@ -598,6 +598,81 @@ def format_size(bytes_val: int) -> str:
         return f"{bytes_val / (1024 * 1024):.2f} MB"
 
 
+def make_raw_payload_start_record(
+    req_id: str,
+    path: str,
+    method: str,
+    call_type: str,
+    model: str,
+    client_ip: str,
+    req_headers: dict,
+    payload_obj: any,
+    is_stream: bool,
+) -> dict:
+    safe_req_headers = {}
+    sensitive_keys = {"authorization", "api-key", "x-api-key", "x-auth-token", "proxy-authorization"}
+    for k, v in (req_headers or {}).items():
+        k_lower = str(k).lower()
+        if k_lower in sensitive_keys and isinstance(v, str):
+            if v.startswith("Bearer ") and len(v) > 17:
+                token = v[7:]
+                masked = f"Bearer {token[:4]}...{token[-4:]}"
+            elif len(v) > 10:
+                masked = f"{v[:4]}...{v[-4:]}"
+            else:
+                masked = "***"
+            safe_req_headers[k] = masked
+        else:
+            safe_req_headers[k] = v
+
+    return {
+        "id": req_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "in_progress",
+        "endpoint": path,
+        "method": method,
+        "call_type": call_type,
+        "model": model,
+        "client": {
+            "ip": client_ip,
+            "headers": safe_req_headers,
+            "user_agent": safe_req_headers.get("User-Agent") or safe_req_headers.get("user-agent", ""),
+        },
+        "request": {
+            "headers": safe_req_headers,
+            "payload": payload_obj,
+            "messages": payload_obj.get("messages") if isinstance(payload_obj, dict) else None,
+            "prompt": payload_obj.get("prompt") if isinstance(payload_obj, dict) else None,
+            "input": payload_obj.get("input") if isinstance(payload_obj, dict) else None,
+            "parameters": {
+                k: v for k, v in payload_obj.items()
+                if k not in ("messages", "prompt", "input")
+            } if isinstance(payload_obj, dict) else {},
+        },
+        "response": {
+            "status_code": None,
+            "headers": {},
+            "is_stream": bool(is_stream),
+            "ttfb_ms": None,
+            "total_ms": None,
+            "tokens_per_s": None,
+            "usage": {
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "reasoning_tokens": None,
+                "total_tokens": None,
+            },
+            "content": {
+                "text": None,
+                "reasoning_content": None,
+                "tool_calls": None,
+            },
+            "raw_json": None,
+            "error": None,
+        },
+    }
+
+
 def make_raw_payload_record(
     req_id: str,
     path: str,
@@ -641,6 +716,7 @@ def make_raw_payload_record(
     return {
         "id": req_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "completed",
         "endpoint": path,
         "method": method,
         "call_type": call_type,
@@ -683,6 +759,68 @@ def make_raw_payload_record(
             "error": error,
         },
     }
+
+
+def read_recent_jsonl_lines(file_path: Path, limit: int = 50) -> tuple[list[dict], int]:
+    """Efficiently read the last `limit` lines from a JSONL file without reading or parsing the whole file."""
+    if not file_path or not Path(file_path).exists():
+        return [], 0
+
+    p = Path(file_path)
+    file_size = p.stat().st_size
+    if file_size == 0:
+        return [], 0
+
+    lines = []
+    total_count = 0
+
+    if file_size < 512 * 1024:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_s = line.strip()
+                if line_s:
+                    total_count += 1
+                    lines.append(line_s)
+        recent_lines = lines[-limit:]
+    else:
+        chunk_size = 64 * 1024
+        with open(p, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            position = f.tell()
+            buffer = bytearray()
+            found_lines = []
+
+            while position > 0 and len(found_lines) <= (limit + 5):
+                read_size = min(chunk_size, position)
+                position -= read_size
+                f.seek(position, os.SEEK_SET)
+                chunk = f.read(read_size)
+                buffer = chunk + buffer
+
+                parts = buffer.split(b"\n")
+                if position > 0:
+                    buffer = parts[0]
+                    complete_lines = parts[1:]
+                else:
+                    buffer = bytearray()
+                    complete_lines = parts
+
+                for part in complete_lines:
+                    p_str = part.decode("utf-8", errors="replace").strip()
+                    if p_str:
+                        found_lines.append(p_str)
+
+            recent_lines = found_lines[-limit:]
+            total_count = max(len(found_lines), limit)
+
+    entries = []
+    for l in recent_lines:
+        try:
+            entries.append(json.loads(l))
+        except Exception:
+            pass
+
+    return list(reversed(entries)), total_count
 
 
 def append_raw_payload(record: dict):
@@ -754,6 +892,21 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     reasoning_tokens = None
     tokens_per_s = None
     logged = False
+
+    is_stream_req = bool(payload.get("stream") if isinstance(payload, dict) else False)
+    if _raw_logging_enabled and _raw_subscribers:
+        start_record = make_raw_payload_start_record(
+            req_id=req_id,
+            path=path,
+            method=method,
+            call_type=call_type,
+            model=model,
+            client_ip=request.remote,
+            req_headers=dict(request.headers),
+            payload_obj=payload,
+            is_stream=is_stream_req,
+        )
+        asyncio.create_task(broadcast_raw_payload(start_record))
 
     try:
         timeout = aiohttp.ClientTimeout(total=300)
@@ -862,34 +1015,34 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             logged = True
                             log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
 
-                            raw_record = make_raw_payload_record(
-                                req_id=req_id,
-                                path=path,
-                                method=method,
-                                call_type=call_type,
-                                model=model,
-                                client_ip=request.remote,
-                                req_headers=dict(request.headers),
-                                payload_obj=payload,
-                                status_code=status_code,
-                                resp_headers=dict(upstream_resp.headers),
-                                is_stream=True,
-                                ttfb_ms=ttfb_ms,
-                                total_ms=t_total,
-                                tokens_per_s=tokens_per_s,
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                reasoning_tokens=reasoning_tokens,
-                                content_text=collected_content,
-                                reasoning_text=collected_reasoning,
-                                tool_calls=collected_tool_calls if collected_tool_calls else None,
-                                raw_resp_json=None,
-                                error=error,
-                            )
                             if _raw_logging_enabled:
+                                raw_record = make_raw_payload_record(
+                                    req_id=req_id,
+                                    path=path,
+                                    method=method,
+                                    call_type=call_type,
+                                    model=model,
+                                    client_ip=request.remote,
+                                    req_headers=dict(request.headers),
+                                    payload_obj=payload,
+                                    status_code=status_code,
+                                    resp_headers=dict(upstream_resp.headers),
+                                    is_stream=True,
+                                    ttfb_ms=ttfb_ms,
+                                    total_ms=t_total,
+                                    tokens_per_s=tokens_per_s,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    reasoning_tokens=reasoning_tokens,
+                                    content_text=collected_content,
+                                    reasoning_text=collected_reasoning,
+                                    tool_calls=collected_tool_calls if collected_tool_calls else None,
+                                    raw_resp_json=None,
+                                    error=error,
+                                )
                                 append_raw_payload(raw_record)
-                            if _raw_subscribers:
-                                asyncio.create_task(broadcast_raw_payload(raw_record))
+                                if _raw_subscribers:
+                                    asyncio.create_task(broadcast_raw_payload(raw_record))
                         except Exception as tel_err:
                             print(f"[telemetry] streaming telemetry error: {tel_err}", file=sys.stderr)
 
@@ -980,34 +1133,34 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             logged = True
                             log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
 
-                            raw_record = make_raw_payload_record(
-                                req_id=req_id,
-                                path=path,
-                                method=method,
-                                call_type=call_type,
-                                model=model,
-                                client_ip=request.remote,
-                                req_headers=dict(request.headers),
-                                payload_obj=payload,
-                                status_code=status_code,
-                                resp_headers=dict(upstream_resp.headers),
-                                is_stream=False,
-                                ttfb_ms=ttfb_ms,
-                                total_ms=t_total,
-                                tokens_per_s=tokens_per_s,
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                reasoning_tokens=reasoning_tokens,
-                                content_text=resp_text,
-                                reasoning_text=resp_reasoning,
-                                tool_calls=resp_tool_calls,
-                                raw_resp_json=resp_data,
-                                error=error,
-                            )
                             if _raw_logging_enabled:
+                                raw_record = make_raw_payload_record(
+                                    req_id=req_id,
+                                    path=path,
+                                    method=method,
+                                    call_type=call_type,
+                                    model=model,
+                                    client_ip=request.remote,
+                                    req_headers=dict(request.headers),
+                                    payload_obj=payload,
+                                    status_code=status_code,
+                                    resp_headers=dict(upstream_resp.headers),
+                                    is_stream=False,
+                                    ttfb_ms=ttfb_ms,
+                                    total_ms=t_total,
+                                    tokens_per_s=tokens_per_s,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    reasoning_tokens=reasoning_tokens,
+                                    content_text=resp_text,
+                                    reasoning_text=resp_reasoning,
+                                    tool_calls=resp_tool_calls,
+                                    raw_resp_json=resp_data,
+                                    error=error,
+                                )
                                 append_raw_payload(raw_record)
-                            if _raw_subscribers:
-                                asyncio.create_task(broadcast_raw_payload(raw_record))
+                                if _raw_subscribers:
+                                    asyncio.create_task(broadcast_raw_payload(raw_record))
                         except Exception as tel_err:
                             print(f"[telemetry] batch telemetry error: {tel_err}", file=sys.stderr)
 
@@ -1050,6 +1203,35 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         except Exception:
             pass
 
+        if _raw_logging_enabled:
+            err_record = make_raw_payload_record(
+                req_id=req_id,
+                path=path,
+                method=method,
+                call_type=call_type,
+                model=model,
+                client_ip=request.remote,
+                req_headers=dict(request.headers),
+                payload_obj=payload,
+                status_code=504,
+                resp_headers={},
+                is_stream=is_stream_req,
+                ttfb_ms=ttfb_ms,
+                total_ms=t_total,
+                tokens_per_s=None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                content_text="",
+                reasoning_text="",
+                tool_calls=None,
+                raw_resp_json=None,
+                error="upstream timeout",
+            )
+            append_raw_payload(err_record)
+            if _raw_subscribers:
+                asyncio.create_task(broadcast_raw_payload(err_record))
+
         return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
 
     except Exception as e:
@@ -1063,6 +1245,35 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total)
         except Exception:
             pass
+
+        if _raw_logging_enabled:
+            err_record = make_raw_payload_record(
+                req_id=req_id,
+                path=path,
+                method=method,
+                call_type=call_type,
+                model=model,
+                client_ip=request.remote,
+                req_headers=dict(request.headers),
+                payload_obj=payload,
+                status_code=status_code or 502,
+                resp_headers={},
+                is_stream=is_stream_req,
+                ttfb_ms=ttfb_ms,
+                total_ms=t_total,
+                tokens_per_s=None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                content_text="",
+                reasoning_text="",
+                tool_calls=None,
+                raw_resp_json=None,
+                error=error,
+            )
+            append_raw_payload(err_record)
+            if _raw_subscribers:
+                asyncio.create_task(broadcast_raw_payload(err_record))
 
         return web.json_response({"error": {"message": str(e)}}, status=502)
 
@@ -1198,6 +1409,14 @@ async def handle_raw_log_toggle(request: web.Request) -> web.Response:
         _raw_logging_enabled = not _raw_logging_enabled
 
     file_size = LOGGER_FILE.stat().st_size if LOGGER_FILE.exists() else 0
+
+    if _raw_subscribers:
+        asyncio.create_task(broadcast_raw_payload({
+            "type": "status_update",
+            "enabled": _raw_logging_enabled,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }))
+
     return web.json_response({
         "success": True,
         "enabled": _raw_logging_enabled,
@@ -1219,18 +1438,8 @@ async def handle_raw_log_recent(request: web.Request) -> web.Response:
         return web.json_response({"entries": [], "total_count": 0})
 
     try:
-        entries = []
-        with open(LOGGER_FILE, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except Exception:
-                        pass
-        total_count = len(entries)
-        recent_entries = entries[-limit:]
-        return web.json_response({"entries": list(reversed(recent_entries)), "total_count": total_count})
+        entries, total_count = await asyncio.to_thread(read_recent_jsonl_lines, LOGGER_FILE, limit)
+        return web.json_response({"entries": entries, "total_count": total_count})
     except Exception as e:
         return web.json_response({"error": str(e), "entries": []}, status=500)
 
@@ -1253,8 +1462,9 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
         reason='OK',
         headers={
             'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
             'Access-Control-Allow-Origin': '*',
         }
     )
@@ -1263,7 +1473,7 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
     q = asyncio.Queue(maxsize=100)
     _raw_subscribers.add(q)
     try:
-        # Initial connect ping
+        # Initial connect ping with active state
         init_payload = json.dumps({"type": "connected", "enabled": _raw_logging_enabled, "timestamp": datetime.now(timezone.utc).isoformat()})
         await response.write(f"data: {init_payload}\n\n".encode("utf-8"))
         await response.drain()
