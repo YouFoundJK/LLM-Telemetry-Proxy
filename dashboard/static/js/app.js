@@ -514,15 +514,16 @@ const App = (() => {
     enrichCallsWithCosts(filteredCalls);
     State.currentFilteredCalls = filteredCalls;
 
-    TelemetryCharts.renderAll(filteredCalls, State.tokenMetricType, timeRange);
+    const isUserFiltered = selectedModels.length > 0;
+    TelemetryCharts.renderAll(filteredCalls, State.tokenMetricType, timeRange, isUserFiltered);
 
     UI.renderCostSummary(filteredCalls, State.modelCosts);
     UI.renderCostTables(filteredCalls, State.modelCosts, State.currentGroupBy);
-    TelemetryCharts.renderCostCharts(filteredCalls, State.modelCosts, timeRange);
+    TelemetryCharts.renderCostCharts(filteredCalls, State.modelCosts, timeRange, isUserFiltered);
 
     const hourData = UI.renderPerformanceAnalyzer(filteredCalls);
     if (hourData) {
-      TelemetryCharts.renderAnalyzerCharts(hourData, filteredCalls, timeRange);
+      TelemetryCharts.renderAnalyzerCharts(hourData, filteredCalls, timeRange, isUserFiltered);
     }
 
     const modelStatsData = {
@@ -918,14 +919,20 @@ const App = (() => {
   }
 
   async function performInitialLoad() {
-    await loadModelMapping();
-    await loadCosts();
-    await refresh();
-    await loadServerStatus();
-    await loadCrossCheck();
-    await loadHealth();
-    await loadProxyStatus();
-    await loadRawLogStatus();
+    try {
+      await loadModelMapping();
+      await loadCosts();
+      await refresh();
+      await loadProxyStatus();
+      // Non-critical background status staggered cleanly to avoid reverse proxy micro-burst 429
+      setTimeout(() => {
+        loadHealth();
+        loadRawLogStatus();
+        if (State.eInfraEnabled) loadServerStatus();
+      }, 200);
+    } catch (e) {
+      console.warn('Initial load sequence finished with warnings:', e);
+    }
   }
 
   /**
@@ -1011,7 +1018,9 @@ const App = (() => {
           const minTime = dateRange.from ? new Date(dateRange.from).getTime() : null;
           const maxTime = dateRange.to ? new Date(dateRange.to).getTime() : new Date().getTime();
           const timeRange = { minTime, maxTime };
-          TelemetryCharts.renderTokenChart(State.currentFilteredCalls, State.tokenMetricType, timeRange);
+          const selectedModels = State.modelDropdownInstance ? State.modelDropdownInstance.getSelectedModels() : [];
+          const isUserFiltered = selectedModels.length > 0;
+          TelemetryCharts.renderTokenChart(State.currentFilteredCalls, State.tokenMetricType, timeRange, isUserFiltered);
         }
       });
     });
@@ -1042,8 +1051,21 @@ const App = (() => {
 
     const refreshBtn = document.getElementById('manualRefreshBtn');
     if (refreshBtn) {
-      refreshBtn.addEventListener('click', () => {
-        performInitialLoad();
+      refreshBtn.addEventListener('click', async () => {
+        if (refreshBtn.disabled) return;
+        try {
+          refreshBtn.disabled = true;
+          refreshBtn.style.opacity = '0.6';
+          refreshBtn.style.cursor = 'wait';
+          await refresh();
+          await loadProxyStatus();
+        } catch (e) {
+          console.warn('Manual refresh failed:', e);
+        } finally {
+          refreshBtn.disabled = false;
+          refreshBtn.style.opacity = '1';
+          refreshBtn.style.cursor = 'pointer';
+        }
       });
     }
   }
@@ -1116,7 +1138,7 @@ const App = (() => {
   }
 
   /**
-   * Gather inputs and query local cache / API
+   * Gather inputs and query local cache / API with seamless Delta Sync
    */
   async function refresh(forceFetch = false) {
     // If a quick range button is selected, update date range dynamically based on current time
@@ -1139,44 +1161,7 @@ const App = (() => {
     const fromVal = dateRange.from ? new Date(dateRange.from).toISOString() : '';
     const toVal = dateRange.to ? new Date(dateRange.to).toISOString() : '';
 
-    let watermarks = { count: 0, maxId: 0, earliestTs: null, latestTs: null };
-    if (typeof TelemetryStore !== 'undefined') {
-      try {
-        watermarks = await TelemetryStore.getWatermarks();
-      } catch (e) {
-        console.warn('Failed to query watermarks:', e);
-      }
-    }
-
-    // 1. If cold cache (0 records) or forceFetch explicitly requested, fetch bulk from server
-    if (watermarks.count === 0 || forceFetch) {
-      await fetchTelemetryDelta(fromVal, toVal, false, forceFetch);
-      return;
-    }
-
-    // 2. Local IndexedDB Cache Hit: Query local store instantly (0 network requests)
-    let cachedCalls = [];
-    if (typeof TelemetryStore !== 'undefined') {
-      try {
-        cachedCalls = await TelemetryStore.getRange(fromVal, toVal);
-      } catch (e) {
-        console.warn('Failed to query local IndexedDB cache range:', e);
-      }
-    }
-
-    const initialPayload = {
-      calls: cachedCalls,
-      available_models: State.allAvailableModels || [],
-      available_types: State.allAvailableTypes || []
-    };
-    State.currentData = initialPayload;
-    renderTelemetry(initialPayload);
-    updateCacheStatsUI();
-
-    // 3. Only if requested range extends earlier than our earliest cached date, backfill gap
-    if (fromVal && watermarks.earliestTs && fromVal < watermarks.earliestTs) {
-      fetchTelemetryDelta(fromVal, toVal, true, false);
-    }
+    await fetchTelemetryDelta(fromVal, toVal, false, forceFetch);
   }
 
   /**
@@ -1238,7 +1223,31 @@ const App = (() => {
           }
         }
       } else {
-        // Smart Delta Sync: Fetch missing older historical window if fromVal is earlier than cached earliestTs
+        // 1. Delta Tail Sync: Always fetch newly logged calls since watermarks.maxId
+        if (watermarks.maxId > 0) {
+          try {
+            const tailData = await TelemetryAPI.queryBulk({ since_id: watermarks.maxId, limit: 50000 }, { signal });
+            if (tailData.calls && tailData.calls.length > 0) {
+              await TelemetryStore.putBatch(tailData.calls);
+            }
+            if (tailData.db_fingerprint) {
+              await TelemetryStore.setMeta('db_fingerprint', tailData.db_fingerprint);
+            }
+            if (tailData.available_models && tailData.available_models.length > 0) {
+              State.allAvailableModels = tailData.available_models;
+              if (State.modelDropdownInstance && State.modelDropdownInstance.updateModels) {
+                State.modelDropdownInstance.updateModels(State.allAvailableModels);
+              }
+            }
+            if (tailData.available_types && tailData.available_types.length > 0) {
+              State.allAvailableTypes = tailData.available_types;
+            }
+          } catch (e) {
+            console.warn('[TelemetryStore] Delta tail sync deferred:', e);
+          }
+        }
+
+        // 2. Delta Gap Sync: Fetch missing older historical window if fromVal is earlier than cached earliestTs
         if (fromVal && (!watermarks.earliestTs || fromVal < watermarks.earliestTs)) {
           const histFilters = {
             from: fromVal,
@@ -1249,6 +1258,9 @@ const App = (() => {
             const histData = await TelemetryAPI.queryBulk(histFilters, { signal });
             if (histData.calls && histData.calls.length > 0) {
               await TelemetryStore.putBatch(histData.calls);
+            }
+            if (histData.db_fingerprint) {
+              await TelemetryStore.setMeta('db_fingerprint', histData.db_fingerprint);
             }
           } catch (e) {
             console.warn('[TelemetryStore] Historical gap sync deferred:', e);
@@ -2018,7 +2030,7 @@ const App = (() => {
           loadRawLogStatus();
         }
       }
-    }, 3000);
+    }, 4000);
   }
 
   function stopProxyHeartbeat() {
@@ -2037,9 +2049,9 @@ const App = (() => {
 
     State.intervals.refresh = setInterval(syncLiveTail, State.refreshRateSeconds * 1000);
     if (State.eInfraEnabled) {
-      State.intervals.serverStatus = setInterval(loadServerStatus, 15000);
+      State.intervals.serverStatus = setInterval(loadServerStatus, 25000);
     }
-    State.intervals.crossCheck = setInterval(loadCrossCheck, 30000);
+    State.intervals.crossCheck = setInterval(loadCrossCheck, 45000);
   }
 
   function stopTelemetryIntervals() {

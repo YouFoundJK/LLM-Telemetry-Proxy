@@ -1,6 +1,6 @@
 /**
  * Telemetry Dashboard Charts Module
- * Manages Chart.js instances and rendering configurations.
+ * Manages Chart.js instances and rendering configurations with smart model aggregation.
  */
 
 const TelemetryCharts = (() => {
@@ -62,6 +62,13 @@ const TelemetryCharts = (() => {
     if (!model) return COLORS.text;
     const m = model.toLowerCase().trim();
 
+    if (m === 'other' || m === 'other models' || m.startsWith('other')) {
+      return '#6e7681'; // Neutral slate grey for aggregated other models
+    }
+    if (m === 'system / non-inference') {
+      return '#8b949e';
+    }
+
     // Check if already registered
     if (modelColorRegistry[m]) {
       return COLORS[modelColorRegistry[m]] || modelColorRegistry[m];
@@ -102,6 +109,94 @@ const TelemetryCharts = (() => {
   }
 
   /**
+   * Smart Model Aggregator for Time Series & Breakdown Charts:
+   * - Eliminates models with zero/negative totals.
+   * - Orders models descending by total contribution.
+   * - If not explicitly user-filtered and there are > maxModels (default 6) or long-tail noise (< minSharePct):
+   *   retains top (maxModels - 1) models and aggregates the remaining minor models into 'Other Models'.
+   * - Returns: { models: string[], byBucket: object, modelTotals: object }
+   */
+  function prepareModelSeries(byBucket, sortedBuckets, isUserFiltered = false, maxModels = 6, minSharePct = 0.005) {
+    const modelTotals = {};
+
+    // 1. Calculate sum of metric for each model across all buckets
+    sortedBuckets.forEach(b => {
+      const bucketObj = byBucket[b] || {};
+      Object.keys(bucketObj).forEach(m => {
+        const val = bucketObj[m] || 0;
+        if (val > 0) {
+          modelTotals[m] = (modelTotals[m] || 0) + val;
+        }
+      });
+    });
+
+    // 2. Filter out models with total <= 0 and sort descending
+    const activeModels = Object.keys(modelTotals)
+      .filter(m => (modelTotals[m] || 0) > 0)
+      .sort((a, b) => modelTotals[b] - modelTotals[a]);
+
+    if (activeModels.length === 0) {
+      return { models: [], byBucket, modelTotals: {} };
+    }
+
+    // If user explicitly selected specific models in the dropdown filter, or <= maxModels:
+    // keep all active selected models directly without grouping into "Other Models"
+    if (isUserFiltered || activeModels.length <= maxModels) {
+      return { models: activeModels, byBucket, modelTotals };
+    }
+
+    // 3. Smart Top-N + "Other Models" aggregation
+    const topLimit = maxModels - 1; // e.g. top 5
+    const topModels = [];
+    const otherModels = [];
+
+    activeModels.forEach((m, idx) => {
+      if (idx < topLimit) {
+        topModels.push(m);
+      } else {
+        otherModels.push(m);
+      }
+    });
+
+    if (otherModels.length === 0) {
+      return { models: topModels, byBucket, modelTotals };
+    }
+
+    // Clone byBucket to avoid mutating caller reference
+    const newByBucket = {};
+    sortedBuckets.forEach(b => {
+      newByBucket[b] = {};
+      const bucketObj = byBucket[b] || {};
+
+      topModels.forEach(m => {
+        if (bucketObj[m] !== undefined) {
+          newByBucket[b][m] = bucketObj[m];
+        }
+      });
+
+      let otherSum = 0;
+      otherModels.forEach(m => {
+        otherSum += (bucketObj[m] || 0);
+      });
+      if (otherSum > 0) {
+        newByBucket[b]['Other Models'] = otherSum;
+      }
+    });
+
+    const otherTotal = otherModels.reduce((acc, m) => acc + (modelTotals[m] || 0), 0);
+    if (otherTotal > 0) {
+      modelTotals['Other Models'] = otherTotal;
+      topModels.push('Other Models');
+    }
+
+    return {
+      models: topModels,
+      byBucket: newByBucket,
+      modelTotals
+    };
+  }
+
+  /**
    * Destroy all active chart instances.
    */
   function destroyAll() {
@@ -127,12 +222,12 @@ const TelemetryCharts = (() => {
   /**
    * Render all dashboard charts with filtered data.
    */
-  function renderAll(calls, tokenMetricType = 'input', timeRange = null) {
+  function renderAll(calls, tokenMetricType = 'input', timeRange = null, isUserFiltered = false) {
     destroyAll();
     if (!calls || !calls.length) return;
 
     // 1. Token Usage Over Time (Stacked by Model)
-    renderTokenChart(calls, tokenMetricType, timeRange);
+    renderTokenChart(calls, tokenMetricType, timeRange, isUserFiltered);
 
     // 2. RTT Distribution (Histogram)
     renderRttChart(calls);
@@ -219,11 +314,11 @@ const TelemetryCharts = (() => {
       minTime = Math.min(...timestamps);
       maxTime = Math.max(...timestamps);
     }
-    
+
     const buckets = [];
     let current = getBucketKey(minTime, intervalMinutes);
     const end = getBucketKey(maxTime, intervalMinutes);
-    
+
     const maxSteps = 1000;
     let steps = 0;
     while (current <= end && steps < maxSteps) {
@@ -237,42 +332,42 @@ const TelemetryCharts = (() => {
   /**
    * Token Usage Chart
    */
-  function renderTokenChart(calls, tokenMetricType, timeRange = null) {
+  function renderTokenChart(calls, tokenMetricType = 'input', timeRange = null, isUserFiltered = false) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
     const bucketSet = new Set(buckets);
 
-    const byBucket = {};
+    const rawByBucket = {};
     buckets.forEach(b => {
-      byBucket[b] = {};
+      rawByBucket[b] = {};
     });
 
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       let tokens = 0;
       if (tokenMetricType === 'input') tokens = c.input_tokens || 0;
       else if (tokenMetricType === 'output') tokens = c.output_tokens || 0;
       else tokens = (c.input_tokens || 0) + (c.output_tokens || 0);
 
       if (tokens <= 0) return;
-      if (!c.model || c.model === 'unknown') return; // Exclude unknown/missing model
+      if (!c.model || c.model === 'unknown') return;
 
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
       if (!bucketSet.has(bucketKey)) return;
 
       const m = c.model;
-      byBucket[bucketKey][m] = (byBucket[bucketKey][m] || 0) + tokens;
+      rawByBucket[bucketKey][m] = (rawByBucket[bucketKey][m] || 0) + tokens;
     });
 
     const sortedBuckets = buckets;
-    const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => (byBucket[b][m] || 0) > 0));
-    
+    const { models, byBucket } = prepareModelSeries(rawByBucket, sortedBuckets, isUserFiltered, 6, 0.005);
+
     const datasets = models.map(m => ({
       label: m,
       data: sortedBuckets.map(b => byBucket[b][m] || 0),
-      backgroundColor: getModelColor(m) + '30',
+      backgroundColor: m === 'Other Models' ? '#6e768120' : getModelColor(m) + '30',
       borderColor: getModelColor(m),
-      borderWidth: 1.5,
+      borderWidth: m === 'Other Models' ? 1.5 : 2,
+      borderDash: m === 'Other Models' ? [4, 4] : undefined,
       fill: true,
       tension: 0.2,
       pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
@@ -297,9 +392,13 @@ const TelemetryCharts = (() => {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+          legend: {
+            display: datasets.length > 0,
+            labels: { color: COLORS.text, font: { family: 'Outfit' } }
+          },
           tooltip: {
             filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0,
+            itemSort: (a, b) => (Number(b.raw) || 0) - (Number(a.raw) || 0),
             callbacks: {
               label: function(context) {
                 let label = context.dataset.label || '';
@@ -317,7 +416,8 @@ const TelemetryCharts = (() => {
           },
           y: {
             ticks: { color: COLORS.text, callback: v => fmtNum(v) },
-            grid: { color: COLORS.grid }
+            grid: { color: COLORS.grid },
+            beginAtZero: true
           }
         },
         interaction: { mode: 'index', intersect: false }
@@ -330,7 +430,7 @@ const TelemetryCharts = (() => {
    */
   function renderRttChart(calls) {
     const rttBuckets = { '<1s': 0, '1-3s': 0, '3-10s': 0, '10-30s': 0, '30-60s': 0, '60-120s': 0, '>120s': 0 };
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       if (!c.total_ms) return;
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const s = c.total_ms / 1000;
@@ -365,7 +465,7 @@ const TelemetryCharts = (() => {
         plugins: { legend: { display: false } },
         scales: {
           x: { ticks: { color: COLORS.text }, grid: { color: COLORS.grid } },
-          y: { ticks: { color: COLORS.text, precision: 0 }, grid: { color: COLORS.grid } }
+          y: { ticks: { color: COLORS.text, precision: 0 }, grid: { color: COLORS.grid }, beginAtZero: true }
         }
       }
     });
@@ -376,7 +476,7 @@ const TelemetryCharts = (() => {
    */
   function renderTtfbChart(calls) {
     const ttfbBuckets = { '<500ms': 0, '500ms-1s': 0, '1-3s': 0, '3-10s': 0, '10-30s': 0, '>30s': 0 };
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       if (!c.ttfb_ms) return;
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const ms = c.ttfb_ms;
@@ -410,7 +510,7 @@ const TelemetryCharts = (() => {
         plugins: { legend: { display: false } },
         scales: {
           x: { ticks: { color: COLORS.text }, grid: { color: COLORS.grid } },
-          y: { ticks: { color: COLORS.text, precision: 0 }, grid: { color: COLORS.grid } }
+          y: { ticks: { color: COLORS.text, precision: 0 }, grid: { color: COLORS.grid }, beginAtZero: true }
         }
       }
     });
@@ -451,8 +551,8 @@ const TelemetryCharts = (() => {
    * Server Load vs RTT Scatter Chart
    */
   function renderLoadChart(calls) {
-    const rawLoadPoints = calls
-      .filter(c => c.server_running !== null && c.total_ms)
+    const rawLoadPoints = (calls || [])
+      .filter(c => c.server_running !== null && c.server_running !== undefined && c.total_ms && c.total_ms > 0)
       .map(c => ({
         x: c.server_running,
         y: c.total_ms / 1000,
@@ -498,12 +598,14 @@ const TelemetryCharts = (() => {
           x: {
             title: { display: true, text: 'Server Load (running tasks)', color: COLORS.text },
             ticks: { color: COLORS.text },
-            grid: { color: COLORS.grid }
+            grid: { color: COLORS.grid },
+            beginAtZero: true
           },
           y: {
             title: { display: true, text: 'RTT (seconds)', color: COLORS.text },
             ticks: { color: COLORS.text },
-            grid: { color: COLORS.grid }
+            grid: { color: COLORS.grid },
+            beginAtZero: true
           }
         }
       }
@@ -514,7 +616,7 @@ const TelemetryCharts = (() => {
    * Throughput Scatter Chart
    */
   function renderThroughputChart(calls, timeRange = null) {
-    const rawTpsData = calls
+    const rawTpsData = (calls || [])
       .filter(c => c.tokens_per_s && c.tokens_per_s > 0)
       .map(c => ({
         x: new Date(c.timestamp).getTime(),
@@ -572,7 +674,8 @@ const TelemetryCharts = (() => {
           y: {
             title: { display: true, text: 'tokens/sec', color: COLORS.text },
             ticks: { color: COLORS.text },
-            grid: { color: COLORS.grid }
+            grid: { color: COLORS.grid },
+            beginAtZero: true
           }
         }
       }
@@ -584,7 +687,7 @@ const TelemetryCharts = (() => {
    */
   function renderInputSizeChart(calls) {
     const sizeBuckets = { '<1K': 0, '1-10K': 0, '10-50K': 0, '50-100K': 0, '100-150K': 0, '150-200K': 0, '>200K': 0 };
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       if (!c.input_tokens || c.input_tokens <= 0) return;
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const t = c.input_tokens / cnt; // Token size per call
@@ -619,7 +722,7 @@ const TelemetryCharts = (() => {
         plugins: { legend: { display: false } },
         scales: {
           x: { ticks: { color: COLORS.text }, grid: { color: COLORS.grid } },
-          y: { ticks: { color: COLORS.text, precision: 0 }, grid: { color: COLORS.grid } }
+          y: { ticks: { color: COLORS.text, precision: 0 }, grid: { color: COLORS.grid }, beginAtZero: true }
         }
       }
     });
@@ -638,7 +741,7 @@ const TelemetryCharts = (() => {
       byBucket[b] = 0;
     });
 
-    const errors = calls.filter(c => Boolean(c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))));
+    const errors = (calls || []).filter(c => Boolean(c.error || (c.status_code && (c.status_code < 200 || c.status_code >= 300))));
     errors.forEach(c => {
       const cnt = c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
@@ -669,7 +772,7 @@ const TelemetryCharts = (() => {
         maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
-          x: { ticks: { color: COLORS.text, maxRotation: 45 }, grid: { color: COLORS.grid } },
+          x: { ticks: { color: COLORS.text, maxRotation: 45, autoSkip: true, maxTicksLimit: 12 }, grid: { color: COLORS.grid } },
           y: { ticks: { color: COLORS.text, stepSize: 1, precision: 0 }, grid: { color: COLORS.grid }, beginAtZero: true }
         }
       }
@@ -689,7 +792,7 @@ const TelemetryCharts = (() => {
       byBucket[b] = { input: 0, output: 0, total: 0 };
     });
 
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
       if (!bucketSet.has(bucketKey)) return;
       const inp = c.input_tokens || 0;
@@ -757,6 +860,7 @@ const TelemetryCharts = (() => {
           legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
           tooltip: {
             filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0,
+            itemSort: (a, b) => (Number(b.raw) || 0) - (Number(a.raw) || 0),
             callbacks: {
               label: function(context) {
                 let label = context.dataset.label || '';
@@ -768,7 +872,7 @@ const TelemetryCharts = (() => {
           }
         },
         scales: {
-          x: { ticks: { color: COLORS.text, maxRotation: 45 }, grid: { color: COLORS.grid } },
+          x: { ticks: { color: COLORS.text, maxRotation: 45, autoSkip: true, maxTicksLimit: 12 }, grid: { color: COLORS.grid } },
           y: { ticks: { color: COLORS.text, callback: v => fmtNum(v) }, grid: { color: COLORS.grid }, beginAtZero: true }
         }
       }
@@ -778,7 +882,7 @@ const TelemetryCharts = (() => {
   /**
    * Render Average Tokens per Call Chart by Model
    */
-  function renderAnalyzerAvgTokenChart(calls, timeRange = null) {
+  function renderAnalyzerAvgTokenChart(calls, timeRange = null, isUserFiltered = false) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
     const bucketSet = new Set(buckets);
@@ -788,7 +892,10 @@ const TelemetryCharts = (() => {
       byBucket[b] = {};
     });
 
-    calls.forEach(c => {
+    const modelTotals = {};
+    const modelCallsCount = {};
+
+    (calls || []).forEach(c => {
       if (!c.model || c.model === 'unknown') return;
       const totalTok = (c.input_tokens || 0) + (c.output_tokens || 0);
       if (totalTok <= 0) return;
@@ -796,21 +903,27 @@ const TelemetryCharts = (() => {
       if (!bucketSet.has(bucketKey)) return;
       const m = c.model;
       const callsCount = (c.calls_count !== undefined && c.calls_count !== null ? c.calls_count : 1);
-      
+
       if (!byBucket[bucketKey][m]) {
         byBucket[bucketKey][m] = { sum: 0, count: 0 };
       }
       byBucket[bucketKey][m].sum += totalTok;
       byBucket[bucketKey][m].count += callsCount;
+
+      modelTotals[m] = (modelTotals[m] || 0) + totalTok;
+      modelCallsCount[m] = (modelCallsCount[m] || 0) + callsCount;
     });
 
     const sortedBuckets = buckets;
     const labels = sortedBuckets.map(b => UI.formatShortDate(b));
-    const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => {
-      const entry = byBucket[b][m];
-      return entry && entry.count > 0 && entry.sum > 0;
-    }));
+
+    // Filter models with real calls and sort descending by call volume
+    const activeModels = Object.keys(modelCallsCount)
+      .filter(m => (modelCallsCount[m] || 0) > 0 && (modelTotals[m] || 0) > 0)
+      .sort((a, b) => (modelCallsCount[b] || 0) - (modelCallsCount[a] || 0));
+
+    // Limit to top active models (e.g. top 5) if unfiltered
+    const models = (isUserFiltered || activeModels.length <= 5) ? activeModels : activeModels.slice(0, 5);
 
     const datasets = models.map(m => {
       return {
@@ -845,9 +958,13 @@ const TelemetryCharts = (() => {
         maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { labels: { color: COLORS.text, font: { family: 'Outfit' } } },
+          legend: {
+            display: datasets.length > 0,
+            labels: { color: COLORS.text, font: { family: 'Outfit' } }
+          },
           tooltip: {
             filter: (tooltipItem) => tooltipItem.raw !== null && (Number(tooltipItem.raw) || 0) > 0,
+            itemSort: (a, b) => (Number(b.raw) || 0) - (Number(a.raw) || 0),
             callbacks: {
               label: function(context) {
                 let label = context.dataset.label || '';
@@ -859,7 +976,7 @@ const TelemetryCharts = (() => {
           }
         },
         scales: {
-          x: { ticks: { color: COLORS.text, maxRotation: 45 }, grid: { color: COLORS.grid } },
+          x: { ticks: { color: COLORS.text, maxRotation: 45, autoSkip: true, maxTicksLimit: 12 }, grid: { color: COLORS.grid } },
           y: {
             title: { display: true, text: 'Tokens per Call', color: COLORS.text, font: { family: 'Outfit' } },
             ticks: { color: COLORS.text, callback: v => fmtNum(v) },
@@ -874,7 +991,7 @@ const TelemetryCharts = (() => {
   /**
    * Render Hourly Analysis Charts
    */
-  function renderAnalyzerCharts(hourData, calls, timeRange = null) {
+  function renderAnalyzerCharts(hourData, calls, timeRange = null, isUserFiltered = false) {
     if (!hourData) return;
 
     // Destroy existing instances if any to prevent memory leaks
@@ -990,39 +1107,38 @@ const TelemetryCharts = (() => {
     // 3. Token Trend & Avg Token per Call Charts
     if (calls) {
       renderAnalyzerTokenTrendChart(calls, timeRange);
-      renderAnalyzerAvgTokenChart(calls, timeRange);
+      renderAnalyzerAvgTokenChart(calls, timeRange, isUserFiltered);
     }
   }
 
-  function renderCostCharts(calls, modelCosts, timeRange = null) {
+  function renderCostCharts(calls, modelCosts, timeRange = null, isUserFiltered = false) {
     if (!calls || !calls.length) return;
-    renderCostOverTimeChart(calls, timeRange);
-    renderCostShareChart(calls);
+    renderCostOverTimeChart(calls, timeRange, isUserFiltered);
+    renderCostShareChart(calls, isUserFiltered);
   }
 
-  function renderCostOverTimeChart(calls, timeRange = null) {
+  function renderCostOverTimeChart(calls, timeRange = null, isUserFiltered = false) {
     const intervalMinutes = getIntervalMinutes(calls, timeRange);
     const buckets = getTimeBuckets(calls, intervalMinutes, timeRange);
     const bucketSet = new Set(buckets);
 
-    const byBucket = {};
+    const rawByBucket = {};
     buckets.forEach(b => {
-      byBucket[b] = {};
+      rawByBucket[b] = {};
     });
 
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       if (!c.model || c.model === 'unknown') return;
       const cost = c.total_cost || 0;
       if (cost <= 0) return;
       const bucketKey = getBucketKey(c.timestamp, intervalMinutes);
       if (!bucketSet.has(bucketKey)) return;
       const m = c.model;
-      byBucket[bucketKey][m] = (byBucket[bucketKey][m] || 0) + cost;
+      rawByBucket[bucketKey][m] = (rawByBucket[bucketKey][m] || 0) + cost;
     });
 
     const sortedBuckets = buckets;
-    const allModels = [...new Set(calls.map(c => c.model).filter(m => m && m !== 'unknown'))].sort();
-    const models = allModels.filter(m => sortedBuckets.some(b => (byBucket[b][m] || 0) > 0));
+    const { models, byBucket } = prepareModelSeries(rawByBucket, sortedBuckets, isUserFiltered, 6, 0.005);
 
     const datasets = models.map(m => {
       const dataPoints = sortedBuckets.map(b => byBucket[b][m] || 0);
@@ -1030,9 +1146,10 @@ const TelemetryCharts = (() => {
       return {
         label: m,
         data: dataPoints,
-        backgroundColor: getModelColor(m) + '20',
+        backgroundColor: m === 'Other Models' ? '#6e768115' : getModelColor(m) + '20',
         borderColor: getModelColor(m),
-        borderWidth: 2,
+        borderWidth: m === 'Other Models' ? 1.5 : 2,
+        borderDash: m === 'Other Models' ? [4, 4] : undefined,
         fill: true,
         tension: 0.2,
         pointRadius: (ctx) => (Number(ctx.raw) > 0 ? 3 : 0),
@@ -1062,15 +1179,17 @@ const TelemetryCharts = (() => {
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: {
+            display: datasets.length > 0,
             position: 'top',
             labels: { color: COLORS.text, font: { family: 'Outfit' } }
           },
           tooltip: {
             filter: (tooltipItem) => (Number(tooltipItem.raw) || 0) > 0,
+            itemSort: (a, b) => (Number(b.raw) || 0) - (Number(a.raw) || 0),
             callbacks: {
               label: function(context) {
                 const val = Number(context.raw) || 0;
-                return `${context.dataset.label}: $${val.toFixed(4)}`;
+                return `${context.dataset.label}: $${val < 0.01 ? val.toFixed(4) : val.toFixed(2)}`;
               }
             }
           }
@@ -1078,14 +1197,14 @@ const TelemetryCharts = (() => {
         scales: {
           x: {
             grid: { color: COLORS.grid },
-            ticks: { color: COLORS.text, maxRotation: 45, minRotation: 45 }
+            ticks: { color: COLORS.text, maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 12 }
           },
           y: {
             grid: { color: COLORS.grid },
             ticks: {
               color: COLORS.text,
               callback: function(value) {
-                return '$' + value.toFixed(2);
+                return '$' + (value < 1 && value > 0 ? value.toFixed(3) : value.toFixed(2));
               }
             },
             title: {
@@ -1101,9 +1220,9 @@ const TelemetryCharts = (() => {
     });
   }
 
-  function renderCostShareChart(calls) {
+  function renderCostShareChart(calls, isUserFiltered = false) {
     const byModel = {};
-    calls.forEach(c => {
+    (calls || []).forEach(c => {
       if (!c.model || c.model === 'unknown') return;
       const cost = c.total_cost || 0;
       if (cost <= 0) return;
@@ -1112,8 +1231,6 @@ const TelemetryCharts = (() => {
     });
 
     const sortedModels = Object.keys(byModel).filter(m => (byModel[m] || 0) > 0).sort((a, b) => byModel[b] - byModel[a]);
-    const data = sortedModels.map(m => byModel[m]);
-    const backgroundColors = sortedModels.map(m => getModelColor(m));
 
     const ctx = document.getElementById('costShareChart');
     if (!ctx) return;
@@ -1122,8 +1239,8 @@ const TelemetryCharts = (() => {
       instances.costShare.destroy();
     }
 
-    const totalCost = data.reduce((a, b) => a + b, 0);
-    if (totalCost === 0) {
+    const totalCost = sortedModels.reduce((sum, m) => sum + byModel[m], 0);
+    if (totalCost === 0 || sortedModels.length === 0) {
       instances.costShare = new Chart(ctx, {
         type: 'doughnut',
         data: {
@@ -1145,12 +1262,27 @@ const TelemetryCharts = (() => {
       return;
     }
 
+    // Top-N + Other Models for Doughnut
+    let displayModels = sortedModels;
+    let displayData = [];
+    if (!isUserFiltered && sortedModels.length > 6) {
+      const top5 = sortedModels.slice(0, 5);
+      const otherModels = sortedModels.slice(5);
+      const otherCost = otherModels.reduce((sum, m) => sum + byModel[m], 0);
+      displayModels = [...top5, 'Other Models'];
+      displayData = [...top5.map(m => byModel[m]), otherCost];
+    } else {
+      displayData = displayModels.map(m => byModel[m]);
+    }
+
+    const backgroundColors = displayModels.map(m => getModelColor(m));
+
     instances.costShare = new Chart(ctx, {
       type: 'doughnut',
       data: {
-        labels: sortedModels,
+        labels: displayModels,
         datasets: [{
-          data,
+          data: displayData,
           backgroundColor: backgroundColors.map(c => c + 'cc'),
           borderColor: backgroundColors,
           borderWidth: 1
@@ -1169,7 +1301,7 @@ const TelemetryCharts = (() => {
               label: function(context) {
                 const val = context.raw;
                 const pct = ((val / totalCost) * 100).toFixed(1);
-                return ` ${context.label}: $${val.toFixed(4)} (${pct}%)`;
+                return ` ${context.label}: $${val < 0.01 ? val.toFixed(4) : val.toFixed(2)} (${pct}%)`;
               }
             }
           }
@@ -1178,13 +1310,20 @@ const TelemetryCharts = (() => {
     });
   }
 
-  return {
+  const moduleExports = {
     renderAll,
     destroyAll,
     getModelColor,
     COLORS,
     renderAnalyzerCharts,
     renderCostCharts,
-    renderTokenChart
+    renderTokenChart,
+    prepareModelSeries
   };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = moduleExports;
+  }
+
+  return moduleExports;
 })();

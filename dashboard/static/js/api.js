@@ -18,6 +18,28 @@ const TelemetryAPI = (() => {
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+  // Concurrency Gate: Restricts concurrent in-flight requests to prevent reverse proxy burst 429 errors
+  const MAX_CONCURRENT_REQUESTS = 2;
+  let _activeRequests = 0;
+  const _requestQueue = [];
+
+  function _acquireSlot() {
+    if (_activeRequests < MAX_CONCURRENT_REQUESTS) {
+      _activeRequests++;
+      return Promise.resolve();
+    }
+    return new Promise(resolve => _requestQueue.push(resolve));
+  }
+
+  function _releaseSlot() {
+    _activeRequests--;
+    if (_requestQueue.length > 0) {
+      _activeRequests++;
+      const next = _requestQueue.shift();
+      setTimeout(next, 35);
+    }
+  }
+
   /**
    * Helper to format fetch errors.
    */
@@ -41,44 +63,49 @@ const TelemetryAPI = (() => {
    * Robust fetch wrapper with automatic rate-limit (429) and transient error (503) retry with exponential backoff.
    */
   async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+    await _acquireSlot();
     let attempt = 0;
-    let delay = 350;
+    let delay = 1000;
 
-    while (true) {
-      try {
-        const response = await fetch(url, options);
+    try {
+      while (true) {
+        try {
+          const response = await fetch(url, options);
 
-        if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
-          const retryAfter = response.headers.get('Retry-After');
-          let waitMs = delay + Math.random() * 150;
-          if (retryAfter) {
-            const parsedSec = parseFloat(retryAfter);
-            if (!isNaN(parsedSec)) {
-              waitMs = Math.max(parsedSec * 1000, waitMs);
+          if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
+            const retryAfter = response.headers.get('Retry-After');
+            let waitMs = delay + Math.random() * 300;
+            if (retryAfter) {
+              const parsedSec = parseFloat(retryAfter);
+              if (!isNaN(parsedSec)) {
+                waitMs = Math.max(parsedSec * 1000, waitMs);
+              }
             }
+            console.warn(`[TelemetryAPI] Received HTTP ${response.status} from ${url}. Backing off ${Math.round(waitMs)}ms (attempt ${attempt + 1}/${maxRetries})...`);
+            await sleep(waitMs);
+            delay *= 2;
+            attempt++;
+            continue;
           }
-          console.warn(`[TelemetryAPI] Received HTTP ${response.status} from ${url}. Retrying in ${Math.round(waitMs)}ms (attempt ${attempt + 1}/${maxRetries})...`);
-          await sleep(waitMs);
-          delay *= 2;
-          attempt++;
-          continue;
-        }
 
-        return response;
-      } catch (err) {
-        if (err.name === 'AbortError') {
+          return response;
+        } catch (err) {
+          if (err.name === 'AbortError') {
+            throw err;
+          }
+          if (attempt < maxRetries) {
+            const waitMs = delay + Math.random() * 300;
+            console.warn(`[TelemetryAPI] Network fetch error (${err.message}) on ${url}. Retrying in ${Math.round(waitMs)}ms...`);
+            await sleep(waitMs);
+            delay *= 2;
+            attempt++;
+            continue;
+          }
           throw err;
         }
-        if (attempt < maxRetries) {
-          const waitMs = delay + Math.random() * 150;
-          console.warn(`[TelemetryAPI] Network fetch error (${err.message}) on ${url}. Retrying in ${Math.round(waitMs)}ms...`);
-          await sleep(waitMs);
-          delay *= 2;
-          attempt++;
-          continue;
-        }
-        throw err;
       }
+    } finally {
+      _releaseSlot();
     }
   }
 
