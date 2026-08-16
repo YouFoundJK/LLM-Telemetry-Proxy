@@ -32,6 +32,11 @@
     events: [],
     models: new Set(),
     selectedModels: getStoredModels(), // null = All Models, or Array of strings
+    selectedThread: 'all', // 'all' | rootRecordId | 'single'
+    threads: new Map(), // rootId -> Array<record>
+    threadRoots: new Map(), // record.id -> rootId
+    predecessors: new Map(), // record.id -> predRecord.id
+    diffs: new Map(), // record.id -> diffInfo
     sse: null,
     isLoggingEnabled: false,
     autoScroll: true,
@@ -68,6 +73,7 @@
       clearDiskFileBtn: document.getElementById('clearDiskFileBtn'),
       emptyStateEnableBtn: document.getElementById('emptyStateEnableBtn'),
       searchInput: document.getElementById('searchInput'),
+      threadFilterSelect: document.getElementById('threadFilterSelect'),
       modelSelectWrapper: document.getElementById('inspectorModelSelectWrapper'),
       modelSelectTrigger: document.getElementById('inspectorModelSelectTrigger'),
       modelDropdown: document.getElementById('inspectorModelDropdown'),
@@ -122,6 +128,7 @@
     if (els.clearScreenBtn) {
       els.clearScreenBtn.addEventListener('click', () => {
         State.events = [];
+        clusterThreads();
         renderFeed();
       });
     }
@@ -133,6 +140,7 @@
         try {
           await TelemetryAPI.clearRawLogs();
           State.events = [];
+          clusterThreads();
           renderFeed();
           await updateStatusMeta();
         } catch (err) {
@@ -146,6 +154,15 @@
       els.searchInput.addEventListener('input', (e) => {
         State.filterText = e.target.value.toLowerCase().trim();
         applyClientFilters();
+      });
+    }
+
+    // Thread Filter Selection
+    if (els.threadFilterSelect) {
+      els.threadFilterSelect.addEventListener('change', (e) => {
+        State.selectedThread = e.target.value;
+        renderFeed();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       });
     }
 
@@ -281,6 +298,7 @@
         for (const entry of data.entries.reverse()) {
           appendEvent(entry, false);
         }
+        clusterThreads();
         updateModelDropdown();
       }
     } catch (e) {
@@ -415,6 +433,8 @@
       updateModelDropdown();
     }
 
+    clusterThreads();
+
     if (renderImmediately && els.feed) {
       // Remove empty state placeholder if present
       const emptyStateEl = els.feed.querySelector('.empty-state');
@@ -429,6 +449,7 @@
         cardEl.style.display = 'none';
       }
 
+      const existingCard = els.feed.querySelector(`[data-event-id="${record.id}"]`);
       if (existingCard) {
         // Preserve open/collapsed state of existing card
         const oldBody = existingCard.querySelector('.card-body');
@@ -647,7 +668,135 @@
     els.metaTotalCalls.textContent = `${visibleCount} / ${State.events.length}`;
   }
 
+  // ── Conversation Thread Clustering & Identification ──────────────────────────
+
+  function getThreadTitle(rootRecord) {
+    if (!rootRecord) return 'Agent Thread';
+    const msgs = rootRecord.request?.messages;
+    if (!Array.isArray(msgs) || msgs.length === 0) {
+      const ep = rootRecord.endpoint || '';
+      if (ep.includes('embeddings')) return 'Embedding Vector Call';
+      return `${rootRecord.model || 'Single Call'}`;
+    }
+
+    let fullText = '';
+    for (let i = 0; i < Math.min(3, msgs.length); i++) {
+      const c = msgs[i]?.content;
+      if (typeof c === 'string') fullText += ' ' + c;
+      else if (Array.isArray(c)) {
+        fullText += ' ' + c.map(part => part?.text || '').join(' ');
+      }
+    }
+
+    const lower = fullText.toLowerCase();
+    if (lower.includes('inductive reasoning')) return 'Inductive Reasoning Agent';
+    if (lower.includes('deductive reasoning')) return 'Deductive Reasoning Agent';
+    if (lower.includes('context synthesis')) return 'Context Synthesis Agent';
+    if (lower.includes('build/completion task') || lower.includes('build task')) return 'Hermes Subagent · Build Task';
+    if (lower.includes('adversarial verification') || lower.includes('verification task')) return 'Hermes Subagent · Verif Task';
+    if (lower.includes('hermes')) return 'Hermes Main Agent';
+
+    const firstContent = msgs[0]?.content || msgs[1]?.content || '';
+    const snippet = String(typeof firstContent === 'string' ? firstContent : JSON.stringify(firstContent))
+      .replace(/[\r\n\t]+/g, ' ')
+      .trim()
+      .slice(0, 32);
+    if (snippet.length > 0) {
+      return `${rootRecord.model || 'Agent'}: "${snippet}..."`;
+    }
+    return `${rootRecord.model || 'Agent Thread'}`;
+  }
+
+  function clusterThreads() {
+    const predecessors = new Map();
+    const diffs = new Map();
+
+    State.events.forEach((record, index) => {
+      const diff = findPredecessorDiff(record, index);
+      if (diff && diff.matchedRecord) {
+        predecessors.set(record.id, diff.matchedRecord.id);
+        diffs.set(record.id, diff);
+      }
+    });
+
+    const threadRoots = new Map();
+    const threads = new Map();
+
+    State.events.forEach(record => {
+      let currId = record.id;
+      while (predecessors.has(currId)) {
+        currId = predecessors.get(currId);
+      }
+      threadRoots.set(record.id, currId);
+
+      if (!threads.has(currId)) {
+        threads.set(currId, []);
+      }
+      threads.get(currId).push(record);
+    });
+
+    State.threadRoots = threadRoots;
+    State.threads = threads;
+    State.predecessors = predecessors;
+    State.diffs = diffs;
+
+    updateThreadDropdown();
+  }
+
+  function updateThreadDropdown() {
+    if (!els.threadFilterSelect) return;
+    const currentVal = State.selectedThread || 'all';
+
+    const options = [];
+    options.push(`<option value="all">🧵 All Threads (${State.events.length} calls)</option>`);
+
+    let threadIndex = 1;
+    let singleCount = 0;
+
+    if (State.threads) {
+      State.threads.forEach((records, rootId) => {
+        const rootRecord = State.events.find(e => e.id === rootId);
+        const rootIndex = State.events.indexOf(rootRecord);
+        const rootSeq = getCallSeq(rootRecord, rootIndex);
+        const title = getThreadTitle(rootRecord);
+        const callSeqs = records.map(r => getCallSeq(r, State.events.indexOf(r)));
+
+        if (records.length > 1) {
+          options.push(
+            `<option value="${rootId}">🧵 Thread #${threadIndex++}: ${title} (${records.length} turns: #${callSeqs.join(', #')})</option>`
+          );
+        } else {
+          singleCount++;
+        }
+      });
+    }
+
+    if (singleCount > 0) {
+      options.push(`<option value="single">📦 Single Calls / Embeddings (${singleCount} calls)</option>`);
+    }
+
+    els.threadFilterSelect.innerHTML = options.join('');
+
+    if (currentVal && (currentVal === 'all' || currentVal === 'single' || (State.threads && State.threads.has(currentVal)))) {
+      els.threadFilterSelect.value = currentVal;
+    } else {
+      State.selectedThread = 'all';
+      els.threadFilterSelect.value = 'all';
+    }
+  }
+
   function matchesFilters(record) {
+    // Thread filter
+    if (State.selectedThread && State.selectedThread !== 'all') {
+      const rootId = State.threadRoots ? State.threadRoots.get(record.id) : record.id;
+      if (State.selectedThread === 'single') {
+        const thread = State.threads ? State.threads.get(rootId) : null;
+        if (thread && thread.length > 1) return false;
+      } else {
+        if (rootId !== State.selectedThread) return false;
+      }
+    }
+
     // Multi-model filter
     if (State.selectedModels !== null && Array.isArray(State.selectedModels)) {
       if (State.selectedModels.length === 0) {
@@ -984,6 +1133,25 @@
       `;
     }
 
+    // Thread Badge
+    const rootId = State.threadRoots ? State.threadRoots.get(record.id) : record.id;
+    const threadRecords = rootId && State.threads ? State.threads.get(rootId) : null;
+    const threadSize = threadRecords ? threadRecords.length : 1;
+    let threadBadgeHtml = '';
+
+    if (threadRecords && threadSize > 1) {
+      const turnIdx = threadRecords.findIndex(r => r.id === record.id);
+      const isRoot = (turnIdx === 0);
+      const multiThreadKeys = Array.from(State.threads.keys()).filter(id => State.threads.get(id).length > 1);
+      const threadNum = multiThreadKeys.indexOf(rootId) + 1;
+      const threadTitle = getThreadTitle(threadRecords[0]);
+      threadBadgeHtml = `
+        <span class="thread-badge ${isRoot ? 'is-root' : ''}" data-thread-root="${rootId}" title="Click to filter feed to this conversation thread (${threadTitle})">
+          🧵 Thread #${threadNum > 0 ? threadNum : ''} · Turn ${turnIdx + 1}/${threadSize}
+        </span>
+      `;
+    }
+
     // Card Header
     const header = document.createElement('div');
     header.className = 'payload-card-header';
@@ -991,6 +1159,7 @@
       <div class="card-title-left">
         <span class="card-expand-icon" style="font-size: 11px; color: #8b949e;">▼</span>
         <span class="call-seq-badge">#${seq}</span>
+        ${threadBadgeHtml}
         <span class="method-badge">${escapeHtml(record.method || 'POST')}</span>
         ${diffToggleHtml}
         <span class="model-badge-lg">${escapeHtml(record.model || 'Unknown Model')}</span>
@@ -1003,6 +1172,20 @@
         ${tokenPillsHtml}
       </div>
     `;
+
+    // Thread badge click to filter
+    header.querySelectorAll('.thread-badge').forEach(badge => {
+      badge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const root = badge.getAttribute('data-thread-root');
+        if (root && els.threadFilterSelect) {
+          State.selectedThread = root;
+          els.threadFilterSelect.value = root;
+          renderFeed();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+      });
+    });
 
     // Card Body
     const body = document.createElement('div');

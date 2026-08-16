@@ -1057,8 +1057,12 @@ const App = (() => {
           refreshBtn.disabled = true;
           refreshBtn.style.opacity = '0.6';
           refreshBtn.style.cursor = 'wait';
-          await refresh();
-          await loadProxyStatus();
+          await Promise.allSettled([
+            refresh(),
+            loadProxyStatus(),
+            State.eInfraEnabled ? loadServerStatus() : Promise.resolve(),
+            loadCrossCheck()
+          ]);
         } catch (e) {
           console.warn('Manual refresh failed:', e);
         } finally {
@@ -1105,7 +1109,7 @@ const App = (() => {
       });
     }
 
-    const openEditLiveNodesBtn = document.getElementById('openEditLiveNodesBtn');
+    const openEditLiveNodesBtn = document.getElementById('openEditLiveNodesBtn') || document.getElementById('editLiveNodesBtn');
     const modal = document.getElementById('liveNodesModal');
     const closeBtn = document.getElementById('closeLiveNodesModalBtn');
 
@@ -1160,6 +1164,10 @@ const App = (() => {
     const dateRange = getSelectedDateRange();
     const fromVal = dateRange.from ? new Date(dateRange.from).toISOString() : '';
     const toVal = dateRange.to ? new Date(dateRange.to).toISOString() : '';
+
+    if (State.eInfraEnabled) {
+      loadServerStatus();
+    }
 
     await fetchTelemetryDelta(fromVal, toVal, false, forceFetch);
   }
@@ -1321,7 +1329,14 @@ const App = (() => {
    * Live tail sync poller (runs periodically when live updates are enabled)
    */
   async function syncLiveTail() {
-    if (typeof TelemetryStore === 'undefined' || !State.liveUpdatesEnabled) return;
+    if (!State.liveUpdatesEnabled) return;
+    if (State.eInfraEnabled) {
+      loadServerStatus();
+    }
+    if (typeof TelemetryStore === 'undefined') {
+      await refresh(false);
+      return;
+    }
     try {
       const watermarks = await TelemetryStore.getWatermarks();
       if (watermarks.count === 0) {
@@ -2048,9 +2063,6 @@ const App = (() => {
     if (!State.liveUpdatesEnabled) return;
 
     State.intervals.refresh = setInterval(syncLiveTail, State.refreshRateSeconds * 1000);
-    if (State.eInfraEnabled) {
-      State.intervals.serverStatus = setInterval(loadServerStatus, 25000);
-    }
     State.intervals.crossCheck = setInterval(loadCrossCheck, 45000);
   }
 

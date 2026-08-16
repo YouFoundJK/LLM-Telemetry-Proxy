@@ -759,13 +759,38 @@
       display: flex;
       align-items: center;
       gap: 12px;
-      z-index: 1000;
-      color: #f0f6fc;
       font-size: 13px;
-      animation: slide-up 0.25s ease-out;
+      color: #f0f6fc;
+      z-index: 9999;
+      animation: toast-slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
-    @keyframes slide-up {
+    /* Thread Badge Pill */
+    .thread-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      background: rgba(187, 128, 179, 0.15);
+      border: 1px solid rgba(187, 128, 179, 0.35);
+      color: #d2a8ff;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+    .thread-badge:hover {
+      background: rgba(187, 128, 179, 0.28);
+      border-color: rgba(187, 128, 179, 0.6);
+      transform: translateY(-1px);
+    }
+    .thread-badge.is-root {
+      background: rgba(56, 139, 253, 0.15);
+      border-color: rgba(56, 139, 253, 0.35);
+      color: #58a6ff;
+    }@keyframes slide-up {
       from { transform: translateY(20px); opacity: 0; }
       to { transform: translateY(0); opacity: 1; }
     }
@@ -853,6 +878,11 @@
       <div class="filter-group">
         <input type="text" id="searchInput" class="filter-input" placeholder="🔍 Search prompts, responses, or models...">
         
+        <!-- Thread Filter Dropdown (Auto-populated with multi-turn agent threads) -->
+        <select id="threadFilterSelect" class="filter-select" style="min-width: 220px; max-width: 340px;">
+          <option value="all">🧵 All Threads</option>
+        </select>
+
         <!-- Custom Multi-select Dropdown for Models with Persistence -->
         <div class="custom-select-wrapper" id="inspectorModelSelectWrapper">
           <div class="custom-select-trigger" id="inspectorModelSelectTrigger">All Models</div>
