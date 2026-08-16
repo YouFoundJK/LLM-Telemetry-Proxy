@@ -7,7 +7,6 @@
   <!-- Favicon -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d1117'/%3E%3Cpath d='M7 16h4l3-8 4 16 3-8h4' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="static/css/style.css">
 
   <style>
@@ -633,6 +632,144 @@
       background: rgba(88, 166, 255, 0.25);
     }
 
+    /* Call Sequence Badge */
+    .call-seq-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(110, 118, 129, 0.2);
+      color: #e6edf3;
+      border: 1px solid rgba(110, 118, 129, 0.4);
+      font-family: var(--font-mono, monospace);
+    }
+
+    /* Diff / Full Toggle Button on Card Header */
+    .btn-toggle-diff {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: inherit;
+      transition: all 0.15s ease;
+      border: 1px solid rgba(88, 166, 255, 0.4);
+      background: rgba(88, 166, 255, 0.12);
+      color: #58a6ff;
+    }
+
+    .btn-toggle-diff:hover {
+      background: rgba(88, 166, 255, 0.25);
+      border-color: #58a6ff;
+    }
+
+    .btn-toggle-diff.viewing-full {
+      background: rgba(110, 118, 129, 0.15);
+      border-color: rgba(110, 118, 129, 0.4);
+      color: #8b949e;
+    }
+
+    .btn-toggle-diff.viewing-full:hover {
+      background: rgba(110, 118, 129, 0.3);
+      color: #f0f6fc;
+    }
+
+    /* Diff Banner in Messages Section */
+    .diff-banner {
+      background: linear-gradient(90deg, rgba(88, 166, 255, 0.08) 0%, rgba(22, 27, 34, 0.7) 100%);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      font-family: var(--font-sans, inherit);
+    }
+
+    .diff-banner-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .diff-jump-link {
+      color: #58a6ff;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: color 0.15s;
+    }
+
+    .diff-jump-link:hover {
+      color: #79c0ff;
+      text-decoration: underline;
+    }
+
+    .diff-badge-delta {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: rgba(63, 185, 80, 0.15);
+      color: #3fb950;
+      border: 1px solid rgba(63, 185, 80, 0.3);
+      font-family: var(--font-mono, monospace);
+    }
+
+    /* Target Call Highlight Keyframe Animation */
+    @keyframes highlight-call-pulse {
+      0% {
+        box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.8), 0 0 20px rgba(88, 166, 255, 0.4);
+        border-color: #58a6ff;
+      }
+      50% {
+        box-shadow: 0 0 0 6px rgba(88, 166, 255, 0.4), 0 0 35px rgba(88, 166, 255, 0.6);
+        border-color: #79c0ff;
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(88, 166, 255, 0), 0 0 0 rgba(88, 166, 255, 0);
+      }
+    }
+
+    .call-highlight-pulse {
+      animation: highlight-call-pulse 2s ease-out !important;
+      border-color: #58a6ff !important;
+    }
+
+    /* Floating Return Toast */
+    .jump-return-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: rgba(22, 27, 34, 0.95);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(88, 166, 255, 0.5);
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
+      border-radius: 8px;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 1000;
+      color: #f0f6fc;
+      font-size: 13px;
+      animation: slide-up 0.25s ease-out;
+    }
+
+    @keyframes slide-up {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
     /* Empty state */
     .empty-state {
       text-align: center;
@@ -657,6 +794,7 @@
     }
   </style>
 
+  <!-- Modular Frontend Logic (Deferred loading matching dashboard.html) -->
   <script src="static/js/api.js" defer></script>
   <script src="static/js/inspector.js" defer></script>
 </head>
@@ -679,6 +817,11 @@
         <!-- Logging Toggle Button -->
         <button id="inspectorToggleLoggingBtn" class="btn-mini btn-mini-primary" style="padding: 5px 12px; font-size: 12px;">
           ⚡ <span id="inspectorToggleLoggingText">Toggle Logging</span>
+        </button>
+
+        <!-- Global Diff Mode Toggle Button -->
+        <button id="toggleAllDiffsBtn" class="btn-mini btn-mini-primary" style="padding: 5px 10px; font-size: 12px;" title="Toggle all cards between Diff View and Full View">
+          ⚡ <span id="toggleAllDiffsText">Diff Mode: ON</span>
         </button>
 
         <!-- Auto-scroll Checkbox -->

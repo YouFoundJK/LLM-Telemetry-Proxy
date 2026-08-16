@@ -110,6 +110,49 @@ class TestRawPayloadHelpers(unittest.TestCase):
         self.assertEqual(record["response"]["usage"]["total_tokens"], 69)
         self.assertEqual(record["response"]["content"]["reasoning_content"], "First analyze quantum state...")
 
+    def test_sequence_numbering_in_records(self):
+        """Verify seq field is properly assigned in start and completed records."""
+        start_rec = make_raw_payload_start_record(
+            req_id="req_seq_1",
+            path="/v1/chat/completions",
+            method="POST",
+            call_type="chat",
+            model="DeepSeek-V3",
+            client_ip="127.0.0.1",
+            req_headers={},
+            payload_obj={"messages": []},
+            is_stream=True,
+            seq=42,
+        )
+        self.assertEqual(start_rec["seq"], 42)
+
+        comp_rec = make_raw_payload_record(
+            req_id="req_seq_1",
+            path="/v1/chat/completions",
+            method="POST",
+            call_type="chat",
+            model="DeepSeek-V3",
+            client_ip="127.0.0.1",
+            req_headers={},
+            payload_obj={},
+            status_code=200,
+            resp_headers={},
+            is_stream=True,
+            ttfb_ms=10.0,
+            total_ms=50.0,
+            tokens_per_s=20.0,
+            input_tokens=10,
+            output_tokens=10,
+            reasoning_tokens=0,
+            content_text="test",
+            reasoning_text="",
+            tool_calls=None,
+            raw_resp_json=None,
+            error=None,
+            seq=42,
+        )
+        self.assertEqual(comp_rec["seq"], 42)
+
     def test_fast_tail_reader_small_file(self):
         """Test read_recent_jsonl_lines on small files."""
         # Create 10 lines

@@ -725,6 +725,15 @@ async def fetch_server_load(model_hint=None):
 
 
 # ── Raw Payload Logging Helpers ─────────────────────────────────────────────
+_raw_payload_counter = 0
+
+
+def next_raw_payload_seq() -> int:
+    global _raw_payload_counter
+    _raw_payload_counter += 1
+    return _raw_payload_counter
+
+
 def format_size(bytes_val: int) -> str:
     if bytes_val < 1024:
         return f"{bytes_val} B"
@@ -744,6 +753,7 @@ def make_raw_payload_start_record(
     req_headers: dict,
     payload_obj: any,
     is_stream: bool,
+    seq: int = None,
 ) -> dict:
     safe_req_headers = {}
     sensitive_keys = {"authorization", "api-key", "x-api-key", "x-auth-token", "proxy-authorization"}
@@ -763,6 +773,7 @@ def make_raw_payload_start_record(
 
     return {
         "id": req_id,
+        "seq": seq,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "in_progress",
         "endpoint": path,
@@ -832,6 +843,7 @@ def make_raw_payload_record(
     tool_calls: any,
     raw_resp_json: any,
     error: str,
+    seq: int = None,
 ) -> dict:
     safe_req_headers = {}
     sensitive_keys = {"authorization", "api-key", "x-api-key", "x-auth-token", "proxy-authorization"}
@@ -851,6 +863,7 @@ def make_raw_payload_record(
 
     return {
         "id": req_id,
+        "seq": seq,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "completed",
         "endpoint": path,
@@ -1020,6 +1033,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         headers["Content-Length"] = str(len(body))
 
     req_id = f"req_{uuid.uuid4().hex[:12]}"
+    req_seq = next_raw_payload_seq()
     t_start = time.monotonic()
     ttfb_ms = None
     status_code = None
@@ -1041,6 +1055,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             req_headers=dict(request.headers),
             payload_obj=payload,
             is_stream=is_stream_req,
+            seq=req_seq,
         )
         asyncio.create_task(broadcast_raw_payload(start_record))
 
@@ -1203,6 +1218,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         tool_calls=collected_tool_calls if collected_tool_calls else None,
                                         raw_resp_json=None,
                                         error=error,
+                                        seq=req_seq,
                                     )
                                     append_raw_payload(raw_record)
                                     if _raw_subscribers:
@@ -1321,6 +1337,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         tool_calls=resp_tool_calls,
                                         raw_resp_json=resp_data,
                                         error=error,
+                                        seq=req_seq,
                                     )
                                     append_raw_payload(raw_record)
                                     if _raw_subscribers:
@@ -1398,6 +1415,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 tool_calls=None,
                 raw_resp_json=None,
                 error="upstream timeout",
+                seq=req_seq,
             )
             append_raw_payload(err_record)
             if _raw_subscribers:
@@ -1441,6 +1459,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 tool_calls=None,
                 raw_resp_json=None,
                 error=error,
+                seq=req_seq,
             )
             append_raw_payload(err_record)
             if _raw_subscribers:
@@ -1483,6 +1502,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 tool_calls=None,
                 raw_resp_json=None,
                 error=error,
+                seq=req_seq,
             )
             append_raw_payload(err_record)
             if _raw_subscribers:
@@ -1721,18 +1741,15 @@ async def handle_raw_log_stream(request: web.StreamResponse) -> web.StreamRespon
         # Initial connect ping with active state
         init_payload = json.dumps({"type": "connected", "enabled": _raw_logging_enabled, "timestamp": datetime.now(timezone.utc).isoformat()})
         await response.write(f"data: {init_payload}\n\n".encode("utf-8"))
-        await response.drain()
 
         while True:
             try:
                 record = await asyncio.wait_for(q.get(), timeout=15.0)
                 data = json.dumps(record, ensure_ascii=False)
                 await response.write(f"data: {data}\n\n".encode("utf-8"))
-                await response.drain()
             except asyncio.TimeoutError:
                 # Keep-alive heartbeat comment
                 await response.write(b": keepalive\n\n")
-                await response.drain()
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     finally:

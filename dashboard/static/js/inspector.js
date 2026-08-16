@@ -38,6 +38,8 @@
     filterText: '',
     filterStatus: 'all',
     maxDisplayed: 200,
+    globalDiffMode: true,
+    cardDiffOverrides: new Map(), // Map<string|number, 'diff' | 'full'>
   };
 
   // DOM Elements
@@ -57,6 +59,8 @@
       liveConnText: document.getElementById('liveConnText'),
       toggleBtn: document.getElementById('inspectorToggleLoggingBtn'),
       toggleBtnText: document.getElementById('inspectorToggleLoggingText'),
+      toggleAllDiffsBtn: document.getElementById('toggleAllDiffsBtn'),
+      toggleAllDiffsText: document.getElementById('toggleAllDiffsText'),
       autoScrollCheck: document.getElementById('autoScrollCheck'),
       expandAllBtn: document.getElementById('expandAllBtn'),
       collapseAllBtn: document.getElementById('collapseAllBtn'),
@@ -81,6 +85,16 @@
     }
     if (els.emptyStateEnableBtn) {
       els.emptyStateEnableBtn.addEventListener('click', handleToggleLogging);
+    }
+
+    // Global Diff Mode Toggle
+    if (els.toggleAllDiffsBtn) {
+      els.toggleAllDiffsBtn.addEventListener('click', () => {
+        State.globalDiffMode = !State.globalDiffMode;
+        State.cardDiffOverrides.clear();
+        updateGlobalDiffBtnDisplay();
+        renderFeed();
+      });
     }
 
     // Auto-scroll checkbox
@@ -169,6 +183,7 @@
 
   async function initInspector() {
     updateHeaderHeight();
+    updateGlobalDiffBtnDisplay();
     await updateStatusMeta();
     await loadRecentEvents();
     connectSSE();
@@ -177,7 +192,19 @@
     setInterval(updateStatusMeta, 5000);
   }
 
+  function updateGlobalDiffBtnDisplay() {
+    if (!els.toggleAllDiffsBtn || !els.toggleAllDiffsText) return;
+    if (State.globalDiffMode) {
+      els.toggleAllDiffsBtn.className = 'btn-mini btn-mini-primary';
+      els.toggleAllDiffsText.textContent = 'Diff Mode: ON';
+    } else {
+      els.toggleAllDiffsBtn.className = 'btn-mini';
+      els.toggleAllDiffsText.textContent = 'Diff Mode: OFF';
+    }
+  }
+
   function updateStatusMetaDisplay() {
+    updateGlobalDiffBtnDisplay();
     if (els.metaFilePath && State.metaFilePath) {
       els.metaFilePath.textContent = State.metaFilePath;
     }
@@ -248,9 +275,9 @@
    */
   async function loadRecentEvents() {
     try {
-      const data = await TelemetryAPI.getRecentRawLogs(80);
+      const data = await TelemetryAPI.getRecentRawLogs(200);
       if (data && data.entries && data.entries.length > 0) {
-        // data.entries is already sorted newest first
+        // data.entries is sorted newest first by server
         for (const entry of data.entries.reverse()) {
           appendEvent(entry, false);
         }
@@ -393,8 +420,8 @@
       const emptyStateEl = els.feed.querySelector('.empty-state');
       if (emptyStateEl) emptyStateEl.remove();
 
-      const existingCard = els.feed.querySelector(`[data-event-id="${record.id}"]`);
-      const cardEl = createPayloadCard(record);
+      const eventIdx = existingIndex >= 0 ? existingIndex : State.events.length - 1;
+      const cardEl = createPayloadCard(record, eventIdx);
       cardEl.setAttribute('data-event-id', record.id);
 
       const isVisible = matchesFilters(record);
@@ -576,9 +603,9 @@
     let visibleCount = 0;
 
     // Render events in chronological order
-    for (const record of State.events) {
+    State.events.forEach((record, index) => {
       const isVisible = matchesFilters(record);
-      const cardEl = createPayloadCard(record);
+      const cardEl = createPayloadCard(record, index);
       cardEl.setAttribute('data-event-id', record.id);
       if (!isVisible) {
         cardEl.style.display = 'none';
@@ -586,7 +613,7 @@
         visibleCount++;
       }
       els.feed.appendChild(cardEl);
-    }
+    });
 
     if (els.metaTotalCalls) {
       els.metaTotalCalls.textContent = `${visibleCount} / ${State.events.length}`;
@@ -669,15 +696,240 @@
     return true;
   }
 
+  // ── Call Numbering, Diffing & Jump Navigation Helpers ───────────────────────
+
+  function getCallSeq(record, index) {
+    if (record && typeof record.seq === 'number') return record.seq;
+    if (record && typeof record._uiSeq === 'number') return record._uiSeq;
+    if (typeof index === 'number' && index >= 0) {
+      const seq = index + 1;
+      if (record) record._uiSeq = seq;
+      return seq;
+    }
+    return 1;
+  }
+
+  function deepEqual(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null || typeof a !== typeof b) return false;
+    if (typeof a === 'string') return a.trim() === (typeof b === 'string' ? b.trim() : '');
+    if (typeof a !== 'object') return a === b;
+
+    if (Array.isArray(a)) {
+      if (!Array.isArray(b) || a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (!deepEqual(a[i], b[i])) return false;
+      }
+      return true;
+    }
+
+    if (Array.isArray(b)) return false;
+
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+
+    for (const k of keysA) {
+      if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+      if (!deepEqual(a[k], b[k])) return false;
+    }
+    return true;
+  }
+
+  function messagesEqual(a, b) {
+    if (!a || !b) return a === b;
+    if (typeof a !== 'object' || typeof b !== 'object') return a === b;
+
+    const roleA = (a.role || '').toLowerCase().trim();
+    const roleB = (b.role || '').toLowerCase().trim();
+    if (roleA !== roleB) return false;
+
+    if ((a.name || '') !== (b.name || '')) return false;
+    if ((a.tool_call_id || '') !== (b.tool_call_id || '')) return false;
+
+    if (!deepEqual(a.content, b.content)) return false;
+
+    if (Boolean(a.tool_calls) !== Boolean(b.tool_calls)) return false;
+    if (a.tool_calls && b.tool_calls) {
+      if (!deepEqual(a.tool_calls, b.tool_calls)) return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Find the longest prefix predecessor across earlier calls (handles multi-agent interleaved logs)
+   */
+  function findPredecessorDiff(record, historyIndex) {
+    if (!record || !Array.isArray(State.events)) return null;
+    const idx = (typeof historyIndex === 'number' && historyIndex >= 0)
+      ? historyIndex
+      : State.events.findIndex(e => e.id === record.id);
+    if (idx <= 0) return null;
+
+    const currMsgs = record.request?.messages;
+    if (Array.isArray(currMsgs) && currMsgs.length > 1) {
+      let bestMatch = null;
+      let maxMatchCount = 0;
+
+      for (let i = idx - 1; i >= 0; i--) {
+        const candidate = State.events[i];
+        if (!candidate) continue;
+        const candMsgs = candidate.request?.messages;
+        if (!Array.isArray(candMsgs) || candMsgs.length === 0) continue;
+
+        let commonCount = 0;
+        const maxCheck = Math.min(candMsgs.length, currMsgs.length);
+        for (let j = 0; j < maxCheck; j++) {
+          if (messagesEqual(currMsgs[j], candMsgs[j])) {
+            commonCount++;
+          } else {
+            break;
+          }
+        }
+
+        if (commonCount > 0 && commonCount > maxMatchCount && commonCount < currMsgs.length) {
+          maxMatchCount = commonCount;
+          bestMatch = {
+            type: 'messages',
+            matchedRecord: candidate,
+            matchedSeq: getCallSeq(candidate, i),
+            matchedCount: commonCount,
+            totalCount: currMsgs.length,
+            newMessages: currMsgs.slice(commonCount),
+          };
+          if (maxMatchCount === currMsgs.length - 1) break;
+        }
+      }
+
+      if (bestMatch) return bestMatch;
+    }
+
+    // Fallback for prompt strings (e.g. /v1/completions)
+    const currPrompt = record.request?.prompt;
+    if (typeof currPrompt === 'string' && currPrompt.length > 30) {
+      let bestPromptMatch = null;
+      let maxPromptLen = 0;
+
+      for (let i = idx - 1; i >= 0; i--) {
+        const candidate = State.events[i];
+        if (!candidate) continue;
+        const candPrompt = candidate.request?.prompt;
+        if (typeof candPrompt !== 'string' || candPrompt.length < 20) continue;
+        if (candPrompt.length >= currPrompt.length) continue;
+
+        if (currPrompt.startsWith(candPrompt) && candPrompt.length > maxPromptLen) {
+          maxPromptLen = candPrompt.length;
+          bestPromptMatch = {
+            type: 'prompt',
+            matchedRecord: candidate,
+            matchedSeq: getCallSeq(candidate, i),
+            matchedCount: candPrompt.length,
+            newPromptSuffix: currPrompt.slice(candPrompt.length),
+          };
+        }
+      }
+
+      if (bestPromptMatch) return bestPromptMatch;
+    }
+
+    return null;
+  }
+
+  let returnToastEl = null;
+  let returnToastTimer = null;
+
+  function jumpToCall(targetSeq, fromSeq) {
+    const targetCard = els.feed?.querySelector(`[data-call-seq="${targetSeq}"]`);
+    if (!targetCard) {
+      alert(`Call #${targetSeq} is no longer in the active screen buffer.`);
+      return;
+    }
+
+    // Expand target card body if collapsed
+    const body = targetCard.querySelector('.card-body');
+    if (body) body.style.display = 'flex';
+    const icon = targetCard.querySelector('.card-expand-icon');
+    if (icon) icon.textContent = '▼';
+
+    // Expand target card messages section if collapsed
+    const msgFold = targetCard.querySelector('.messages-foldable-content');
+    if (msgFold) msgFold.style.display = 'flex';
+    const msgFoldIcon = targetCard.querySelector('.messages-fold-icon');
+    if (msgFoldIcon) msgFoldIcon.textContent = '▼';
+
+    targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    targetCard.classList.remove('call-highlight-pulse');
+    void targetCard.offsetWidth; // trigger reflow
+    targetCard.classList.add('call-highlight-pulse');
+    setTimeout(() => targetCard.classList.remove('call-highlight-pulse'), 2200);
+
+    if (fromSeq && fromSeq !== targetSeq) {
+      showReturnToast(targetSeq, fromSeq);
+    }
+  }
+
+  function showReturnToast(targetSeq, fromSeq) {
+    if (returnToastEl) {
+      returnToastEl.remove();
+      returnToastEl = null;
+    }
+    if (returnToastTimer) {
+      clearTimeout(returnToastTimer);
+      returnToastTimer = null;
+    }
+
+    const toast = document.createElement('div');
+    toast.className = 'jump-return-toast';
+    toast.innerHTML = `
+      <span>Jumped to <strong>Call #${targetSeq}</strong></span>
+      <button class="btn-mini btn-mini-primary btn-return-jump" style="padding: 4px 10px; font-weight: 600;">
+        ↩ Return to Call #${fromSeq}
+      </button>
+      <button class="btn-mini btn-close-toast" style="padding: 2px 6px;">✕</button>
+    `;
+
+    toast.querySelector('.btn-return-jump')?.addEventListener('click', () => {
+      jumpToCall(fromSeq, null);
+      toast.remove();
+      returnToastEl = null;
+    });
+
+    toast.querySelector('.btn-close-toast')?.addEventListener('click', () => {
+      toast.remove();
+      returnToastEl = null;
+    });
+
+    document.body.appendChild(toast);
+    returnToastEl = toast;
+
+    returnToastTimer = setTimeout(() => {
+      if (returnToastEl) {
+        returnToastEl.remove();
+        returnToastEl = null;
+      }
+    }, 12000);
+  }
+
   /**
    * Build the complete DOM element for a payload card
    */
-  function createPayloadCard(record) {
+  function createPayloadCard(record, historyIndex) {
     const card = document.createElement('div');
     const isInProgress = record.status === 'in_progress';
     const isError = !isInProgress && Boolean(record.response?.error || (record.response?.status_code && record.response.status_code >= 400));
     
     card.className = `payload-card ${isInProgress ? 'in-progress-call' : (isError ? 'error-call' : 'success-call')}`;
+
+    const seq = getCallSeq(record, historyIndex);
+    card.setAttribute('data-event-id', record.id);
+    card.setAttribute('data-call-seq', String(seq));
+    card.id = `call-${seq}`;
+
+    const diffInfo = findPredecessorDiff(record, historyIndex);
+    const override = State.cardDiffOverrides.get(seq) || State.cardDiffOverrides.get(record.id);
+    const isDiffActive = override ? (override === 'diff') : (State.globalDiffMode && Boolean(diffInfo));
 
     const usage = record.response?.usage || {};
     const inTokens = usage.prompt_tokens ?? (record.request?.messages?.length ? `${record.request.messages.length} msgs` : (record.request?.prompt ? '1 prompt' : '—'));
@@ -722,13 +974,25 @@
       `;
     }
 
+    // Toggle Diff button inside card header if diffInfo exists
+    let diffToggleHtml = '';
+    if (diffInfo) {
+      diffToggleHtml = `
+        <button class="btn-toggle-diff ${isDiffActive ? '' : 'viewing-full'}" data-action="toggle-card-diff" title="Click to toggle between Diff View and Full View">
+          ${isDiffActive ? '⚡ Diff View' : '📄 Full View'}
+        </button>
+      `;
+    }
+
     // Card Header
     const header = document.createElement('div');
     header.className = 'payload-card-header';
     header.innerHTML = `
       <div class="card-title-left">
         <span class="card-expand-icon" style="font-size: 11px; color: #8b949e;">▼</span>
+        <span class="call-seq-badge">#${seq}</span>
         <span class="method-badge">${escapeHtml(record.method || 'POST')}</span>
+        ${diffToggleHtml}
         <span class="model-badge-lg">${escapeHtml(record.model || 'Unknown Model')}</span>
         ${statusPillHtml}
         <span style="font-size: 11px; color: #8b949e; font-family: var(--font-mono);">${timestamp}</span>
@@ -746,8 +1010,8 @@
 
     // Toggle card body on header click
     header.addEventListener('click', (e) => {
-      // Don't toggle if clicking a button inside header
-      if (e.target.tagName === 'BUTTON') return;
+      // Don't toggle if clicking a button or link inside header
+      if (e.target.tagName === 'BUTTON' || e.target.closest('button') || e.target.closest('a')) return;
       const isHidden = body.style.display === 'none';
       body.style.display = isHidden ? 'flex' : 'none';
       const icon = header.querySelector('.card-expand-icon');
@@ -755,8 +1019,36 @@
     });
 
     // 1. Prompts & Messages Section
-    const msgSection = buildMessagesSection(record);
+    const msgSection = buildMessagesSection(record, diffInfo, isDiffActive, seq);
     if (msgSection) body.appendChild(msgSection);
+
+    // Toggle button handler
+    const diffBtn = header.querySelector('[data-action="toggle-card-diff"]');
+    if (diffBtn) {
+      diffBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const currentMode = diffBtn.classList.contains('viewing-full') ? 'full' : 'diff';
+        const newMode = currentMode === 'diff' ? 'full' : 'diff';
+        State.cardDiffOverrides.set(seq, newMode);
+        State.cardDiffOverrides.set(record.id, newMode);
+
+        if (newMode === 'diff') {
+          diffBtn.className = 'btn-toggle-diff';
+          diffBtn.textContent = '⚡ Diff View';
+        } else {
+          diffBtn.className = 'btn-toggle-diff viewing-full';
+          diffBtn.textContent = '📄 Full View';
+        }
+
+        const existingSection = body.querySelector('.messages-foldable-section');
+        const newSection = buildMessagesSection(record, diffInfo, newMode === 'diff', seq);
+        if (existingSection && newSection) {
+          existingSection.replaceWith(newSection);
+        } else if (!existingSection && newSection) {
+          body.insertBefore(newSection, body.firstChild);
+        }
+      });
+    }
 
     // 2. Generated Response & Reasoning Section
     const respSection = buildResponseSection(record);
@@ -776,9 +1068,9 @@
   }
 
   /**
-   * Build Messages / Conversation History Section
+   * Build Messages / Conversation History Section with Diff Support
    */
-  function buildMessagesSection(record) {
+  function buildMessagesSection(record, diffInfo = null, isDiffMode = false, callSeq = 1) {
     const messages = record.request?.messages || [];
     const prompt = record.request?.prompt;
     const input = record.request?.input;
@@ -786,18 +1078,27 @@
     if (!messages.length && !prompt && !input) return null;
 
     const container = document.createElement('div');
-    container.className = 'foldable-section';
+    container.className = 'foldable-section messages-foldable-section';
 
     const header = document.createElement('div');
     header.className = 'foldable-header';
-    const totalCount = messages.length || (Array.isArray(input) ? input.length : 1);
+
+    let headerLabel = `💬 Incoming Prompt & Input (${messages.length || (Array.isArray(input) ? input.length : 1)})`;
+    if (isDiffMode && diffInfo) {
+      if (diffInfo.type === 'messages') {
+        headerLabel = `💬 Incoming Messages (${diffInfo.newMessages.length} new / ${diffInfo.totalCount} total)`;
+      } else if (diffInfo.type === 'prompt') {
+        headerLabel = `💬 Incoming Prompt (Diff / Delta View)`;
+      }
+    }
+
     header.innerHTML = `
-      <span>💬 Incoming Prompt & Input (${totalCount})</span>
-      <span class="fold-icon">▼</span>
+      <span>${escapeHtml(headerLabel)}</span>
+      <span class="fold-icon messages-fold-icon">▼</span>
     `;
 
     const content = document.createElement('div');
-    content.className = 'foldable-content';
+    content.className = 'foldable-content messages-foldable-content';
 
     if (input) {
       const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
@@ -824,168 +1125,233 @@
     }
 
     if (prompt) {
-      const pCard = document.createElement('div');
-      pCard.className = 'msg-card msg-user';
-      pCard.innerHTML = `
-        <div class="msg-header">
-          <span style="color: #58a6ff;">Prompt</span>
-          <button class="btn-mini btn-copy-prompt">Copy</button>
-        </div>
-        <div class="msg-text">${escapeHtml(String(prompt))}</div>
-      `;
-      pCard.querySelector('.btn-copy-prompt')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        navigator.clipboard.writeText(String(prompt));
-        const btn = e.target;
-        const orig = btn.textContent;
-        btn.textContent = '✓ Copied';
-        setTimeout(() => btn.textContent = orig, 1500);
-      });
-      content.appendChild(pCard);
+      if (isDiffMode && diffInfo && diffInfo.type === 'prompt') {
+        const banner = document.createElement('div');
+        banner.className = 'diff-banner';
+        banner.innerHTML = `
+          <div class="diff-banner-left">
+            <span style="font-size: 13px;">⚡</span>
+            <span>Prompt prefix (${diffInfo.matchedCount.toLocaleString()} chars) is identical to <a class="diff-jump-link" href="#call-${diffInfo.matchedSeq}">Call #${diffInfo.matchedSeq}</a></span>
+          </div>
+          <div class="diff-badge-delta">+${diffInfo.newPromptSuffix.length.toLocaleString()} new chars</div>
+        `;
+        banner.querySelector('.diff-jump-link')?.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          jumpToCall(diffInfo.matchedSeq, callSeq);
+        });
+        content.appendChild(banner);
+
+        const pCard = document.createElement('div');
+        pCard.className = 'msg-card msg-user';
+        pCard.innerHTML = `
+          <div class="msg-header">
+            <span style="color: #58a6ff;">New Prompt Suffix / Delta</span>
+            <button class="btn-mini btn-copy-prompt">Copy Delta</button>
+          </div>
+          <div class="msg-text">${escapeHtml(diffInfo.newPromptSuffix)}</div>
+        `;
+        pCard.querySelector('.btn-copy-prompt')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          navigator.clipboard.writeText(diffInfo.newPromptSuffix);
+          const btn = e.target;
+          const orig = btn.textContent;
+          btn.textContent = '✓ Copied';
+          setTimeout(() => btn.textContent = orig, 1500);
+        });
+        content.appendChild(pCard);
+      } else {
+        const pCard = document.createElement('div');
+        pCard.className = 'msg-card msg-user';
+        pCard.innerHTML = `
+          <div class="msg-header">
+            <span style="color: #58a6ff;">Prompt</span>
+            <button class="btn-mini btn-copy-prompt">Copy</button>
+          </div>
+          <div class="msg-text">${escapeHtml(String(prompt))}</div>
+        `;
+        pCard.querySelector('.btn-copy-prompt')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          navigator.clipboard.writeText(String(prompt));
+          const btn = e.target;
+          const orig = btn.textContent;
+          btn.textContent = '✓ Copied';
+          setTimeout(() => btn.textContent = orig, 1500);
+        });
+        content.appendChild(pCard);
+      }
     }
 
-    messages.forEach((msg, idx) => {
-      const role = (msg.role || 'user').toLowerCase();
-      let roleClass = 'msg-user';
-      let roleColor = '#58a6ff';
+    if (messages.length > 0) {
+      let msgsToRender = messages;
+      let startIndex = 0;
 
-      const isToolMessage = (role === 'tool' || role === 'function');
-      const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+      if (isDiffMode && diffInfo && diffInfo.type === 'messages') {
+        const banner = document.createElement('div');
+        banner.className = 'diff-banner';
+        const modelName = diffInfo.matchedRecord.model ? ` (${diffInfo.matchedRecord.model})` : '';
+        banner.innerHTML = `
+          <div class="diff-banner-left">
+            <span style="font-size: 13px;">⚡</span>
+            <span>Messages <strong>1–${diffInfo.matchedCount}</strong> are identical to <a class="diff-jump-link" href="#call-${diffInfo.matchedSeq}">Call #${diffInfo.matchedSeq}${escapeHtml(modelName)}</a></span>
+          </div>
+          <div class="diff-badge-delta">+${diffInfo.newMessages.length} new message${diffInfo.newMessages.length > 1 ? 's' : ''}</div>
+        `;
+        banner.querySelector('.diff-jump-link')?.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          jumpToCall(diffInfo.matchedSeq, callSeq);
+        });
+        content.appendChild(banner);
 
-      if (role === 'system') {
-        roleClass = 'msg-system';
-        roleColor = '#bc8cff';
-      } else if (role === 'assistant') {
-        roleClass = 'msg-assistant';
-        roleColor = '#3fb950';
-      } else if (isToolMessage) {
-        roleClass = 'msg-tool';
-        roleColor = '#d29922';
+        msgsToRender = diffInfo.newMessages;
+        startIndex = diffInfo.matchedCount;
       }
 
-      const msgCard = document.createElement('div');
-      
-      const contentText = msg.content !== null && msg.content !== undefined
-        ? (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2))
-        : '';
+      msgsToRender.forEach((msg, relIdx) => {
+        const idx = startIndex + relIdx;
+        const role = (msg.role || 'user').toLowerCase();
+        let roleClass = 'msg-user';
+        let roleColor = '#58a6ff';
 
-      if (isToolMessage) {
-        // Tool Message Turn (collapsed by default so inspector stays concise)
-        msgCard.className = `msg-card ${roleClass} msg-card-collapsible`;
-        const toolName = msg.name || msg.tool_call_id || '';
-        const toolLabel = toolName ? `#${idx + 1} ${role.toUpperCase()} [${escapeHtml(toolName)}]` : `#${idx + 1} ${role.toUpperCase()}`;
-        const charCount = contentText.length;
+        const isToolMessage = (role === 'tool' || role === 'function');
+        const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
 
-        msgCard.innerHTML = `
-          <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
-            <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-              <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
-              <span style="color: ${roleColor}; font-weight: 700; flex-shrink: 0;">${toolLabel}</span>
-              <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${charCount.toLocaleString()} chars)</span>
-            </div>
-            <button class="btn-mini btn-copy-msg" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
-          </div>
-          <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(contentText)}</div>
-        `;
-
-        const mHeader = msgCard.querySelector('.msg-header');
-        const mText = msgCard.querySelector('.msg-text');
-        const mFoldIcon = msgCard.querySelector('.msg-fold-icon');
-
-        mHeader.addEventListener('click', (e) => {
-          if (e.target.closest('.btn-copy-msg')) return;
-          const isHidden = mText.style.display === 'none';
-          mText.style.display = isHidden ? 'block' : 'none';
-          mFoldIcon.textContent = isHidden ? '▼' : '▶';
-          mHeader.style.marginBottom = isHidden ? '6px' : '0';
-        });
-
-        msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', (e) => {
-          e.stopPropagation();
-          navigator.clipboard.writeText(contentText);
-          const btn = e.target;
-          const orig = btn.textContent;
-          btn.textContent = '✓ Copied';
-          setTimeout(() => btn.textContent = orig, 1500);
-        });
-
-        content.appendChild(msgCard);
-      } else {
-        // Normal message turn (user, system, assistant)
-        msgCard.className = `msg-card ${roleClass}`;
-        
-        let headerHtml = `
-          <div class="msg-header">
-            <span style="color: ${roleColor}; font-weight: 700;">#${idx + 1} ${role.toUpperCase()}</span>
-            <button class="btn-mini btn-copy-msg">Copy</button>
-          </div>
-        `;
-
-        let bodyHtml = '';
-        if (contentText) {
-          bodyHtml += `<div class="msg-text">${escapeHtml(contentText)}</div>`;
+        if (role === 'system') {
+          roleClass = 'msg-system';
+          roleColor = '#bc8cff';
+        } else if (role === 'assistant') {
+          roleClass = 'msg-assistant';
+          roleColor = '#3fb950';
+        } else if (isToolMessage) {
+          roleClass = 'msg-tool';
+          roleColor = '#d29922';
         }
 
-        msgCard.innerHTML = headerHtml + bodyHtml;
+        const msgCard = document.createElement('div');
+        
+        const contentText = msg.content !== null && msg.content !== undefined
+          ? (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2))
+          : '';
 
-        msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const copyText = contentText || (hasToolCalls ? JSON.stringify(msg.tool_calls, null, 2) : '');
-          navigator.clipboard.writeText(copyText);
-          const btn = e.target;
-          const orig = btn.textContent;
-          btn.textContent = '✓ Copied';
-          setTimeout(() => btn.textContent = orig, 1500);
-        });
+        if (isToolMessage) {
+          // Tool Message Turn (collapsed by default so inspector stays concise)
+          msgCard.className = `msg-card ${roleClass} msg-card-collapsible`;
+          const toolName = msg.name || msg.tool_call_id || '';
+          const toolLabel = toolName ? `#${idx + 1} ${role.toUpperCase()} [${escapeHtml(toolName)}]` : `#${idx + 1} ${role.toUpperCase()}`;
+          const charCount = contentText.length;
 
-        // If message has historical tool_calls, render them as a collapsed sub-box
-        if (hasToolCalls) {
-          const toolJson = JSON.stringify(msg.tool_calls, null, 2);
-          const toolNames = msg.tool_calls.map(t => t?.function?.name || t?.name || t?.type).filter(Boolean).join(', ');
-          const toolLabel = toolNames ? `Tool Calls: ${toolNames} (${msg.tool_calls.length})` : `Tool Calls (${msg.tool_calls.length})`;
-
-          const toolCallsBox = document.createElement('div');
-          toolCallsBox.className = 'msg-card msg-tool msg-card-collapsible';
-          toolCallsBox.style.marginTop = contentText ? '8px' : '0';
-          toolCallsBox.innerHTML = `
+          msgCard.innerHTML = `
             <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
               <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                 <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
-                <span style="color: #d29922; font-weight: 700; flex-shrink: 0;">🔧 ${escapeHtml(toolLabel)}</span>
-                <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${toolJson.length.toLocaleString()} chars)</span>
+                <span style="color: ${roleColor}; font-weight: 700; flex-shrink: 0;">${toolLabel}</span>
+                <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${charCount.toLocaleString()} chars)</span>
               </div>
-              <button class="btn-mini btn-copy-nested-tool" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
+              <button class="btn-mini btn-copy-msg" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
             </div>
-            <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(toolJson)}</div>
+            <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(contentText)}</div>
           `;
 
-          const tcHeader = toolCallsBox.querySelector('.msg-header');
-          const tcText = toolCallsBox.querySelector('.msg-text');
-          const tcFoldIcon = toolCallsBox.querySelector('.msg-fold-icon');
+          const mHeader = msgCard.querySelector('.msg-header');
+          const mText = msgCard.querySelector('.msg-text');
+          const mFoldIcon = msgCard.querySelector('.msg-fold-icon');
 
-          tcHeader.addEventListener('click', (e) => {
-            if (e.target.closest('.btn-copy-nested-tool')) return;
-            const isHidden = tcText.style.display === 'none';
-            tcText.style.display = isHidden ? 'block' : 'none';
-            tcFoldIcon.textContent = isHidden ? '▼' : '▶';
-            tcHeader.style.marginBottom = isHidden ? '6px' : '0';
+          mHeader.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-copy-msg')) return;
+            const isHidden = mText.style.display === 'none';
+            mText.style.display = isHidden ? 'block' : 'none';
+            mFoldIcon.textContent = isHidden ? '▼' : '▶';
+            mHeader.style.marginBottom = isHidden ? '6px' : '0';
           });
 
-          toolCallsBox.querySelector('.btn-copy-nested-tool')?.addEventListener('click', (e) => {
+          msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', (e) => {
             e.stopPropagation();
-            navigator.clipboard.writeText(toolJson);
+            navigator.clipboard.writeText(contentText);
             const btn = e.target;
             const orig = btn.textContent;
             btn.textContent = '✓ Copied';
             setTimeout(() => btn.textContent = orig, 1500);
           });
 
-          msgCard.appendChild(toolCallsBox);
-        }
+          content.appendChild(msgCard);
+        } else {
+          // Normal message turn (user, system, assistant)
+          msgCard.className = `msg-card ${roleClass}`;
+          
+          let headerHtml = `
+            <div class="msg-header">
+              <span style="color: ${roleColor}; font-weight: 700;">#${idx + 1} ${role.toUpperCase()}</span>
+              <button class="btn-mini btn-copy-msg">Copy</button>
+            </div>
+          `;
 
-        content.appendChild(msgCard);
-      }
-    });
+          let bodyHtml = '';
+          if (contentText) {
+            bodyHtml += `<div class="msg-text">${escapeHtml(contentText)}</div>`;
+          }
+
+          msgCard.innerHTML = headerHtml + bodyHtml;
+
+          msgCard.querySelector('.btn-copy-msg')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const copyText = contentText || (hasToolCalls ? JSON.stringify(msg.tool_calls, null, 2) : '');
+            navigator.clipboard.writeText(copyText);
+            const btn = e.target;
+            const orig = btn.textContent;
+            btn.textContent = '✓ Copied';
+            setTimeout(() => btn.textContent = orig, 1500);
+          });
+
+          // If message has historical tool_calls, render them as a collapsed sub-box
+          if (hasToolCalls) {
+            const toolJson = JSON.stringify(msg.tool_calls, null, 2);
+            const toolNames = msg.tool_calls.map(t => t?.function?.name || t?.name || t?.type).filter(Boolean).join(', ');
+            const toolLabel = toolNames ? `Tool Calls: ${toolNames} (${msg.tool_calls.length})` : `Tool Calls (${msg.tool_calls.length})`;
+
+            const toolCallsBox = document.createElement('div');
+            toolCallsBox.className = 'msg-card msg-tool msg-card-collapsible';
+            toolCallsBox.style.marginTop = contentText ? '8px' : '0';
+            toolCallsBox.innerHTML = `
+              <div class="msg-header" style="cursor: pointer; user-select: none; margin-bottom: 0;">
+                <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  <span class="msg-fold-icon" style="font-size: 10px; color: #8b949e; flex-shrink: 0;">▶</span>
+                  <span style="color: #d29922; font-weight: 700; flex-shrink: 0;">🔧 ${escapeHtml(toolLabel)}</span>
+                  <span style="font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none;">(${toolJson.length.toLocaleString()} chars)</span>
+                </div>
+                <button class="btn-mini btn-copy-nested-tool" style="flex-shrink: 0; margin-left: 8px;">Copy</button>
+              </div>
+              <div class="msg-text" style="display: none; margin-top: 8px;">${escapeHtml(toolJson)}</div>
+            `;
+
+            const tcHeader = toolCallsBox.querySelector('.msg-header');
+            const tcText = toolCallsBox.querySelector('.msg-text');
+            const tcFoldIcon = toolCallsBox.querySelector('.msg-fold-icon');
+
+            tcHeader.addEventListener('click', (e) => {
+              if (e.target.closest('.btn-copy-nested-tool')) return;
+              const isHidden = tcText.style.display === 'none';
+              tcText.style.display = isHidden ? 'block' : 'none';
+              tcFoldIcon.textContent = isHidden ? '▼' : '▶';
+              tcHeader.style.marginBottom = isHidden ? '6px' : '0';
+            });
+
+            toolCallsBox.querySelector('.btn-copy-nested-tool')?.addEventListener('click', (e) => {
+              e.stopPropagation();
+              navigator.clipboard.writeText(toolJson);
+              const btn = e.target;
+              const orig = btn.textContent;
+              btn.textContent = '✓ Copied';
+              setTimeout(() => btn.textContent = orig, 1500);
+            });
+
+            msgCard.appendChild(toolCallsBox);
+          }
+
+          content.appendChild(msgCard);
+        }
+      });
+    }
 
     header.addEventListener('click', () => {
       const hidden = content.style.display === 'none';

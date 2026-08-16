@@ -62,7 +62,6 @@ def get_dashboard_html_path() -> Path:
 def get_inspector_html_path() -> Path:
     candidates = [
         DASHBOARD_DIR / "static" / "raw_log_inspector.html",
-        DASHBOARD_DIR / "raw_log_inspector.html",
         REPO_ROOT / "raw_log_inspector.html",
     ]
     for c in candidates:
@@ -1054,45 +1053,53 @@ def read_recent_jsonl_lines(file_path: Path, limit: int = 50) -> tuple[list[dict
                     total_count += 1
                     lines.append(line_s)
         recent_lines = lines[-limit:]
+        entries = []
+        for l in reversed(recent_lines):
+            try:
+                entries.append(json.loads(l))
+            except Exception:
+                pass
+        return entries, total_count
     else:
+        # Backward chunk reader for large files
         chunk_size = 64 * 1024
+        collected_lines: list[str] = []
         with open(p, "rb") as f:
             f.seek(0, os.SEEK_END)
             position = f.tell()
-            buffer = bytearray()
-            found_lines = []
+            remainder = b""
 
-            while position > 0 and len(found_lines) <= (limit + 5):
+            while position > 0 and len(collected_lines) < limit:
                 read_size = min(chunk_size, position)
                 position -= read_size
                 f.seek(position, os.SEEK_SET)
-                chunk = f.read(read_size)
-                buffer = chunk + buffer
+                chunk = f.read(read_size) + remainder
 
-                parts = buffer.split(b"\n")
+                parts = chunk.split(b"\n")
                 if position > 0:
-                    buffer = parts[0]
-                    complete_lines = parts[1:]
+                    remainder = parts[0]
+                    complete_parts = parts[1:]
                 else:
-                    buffer = bytearray()
-                    complete_lines = parts
+                    remainder = b""
+                    complete_parts = parts
 
-                for part in complete_lines:
+                for part in reversed(complete_parts):
                     p_str = part.decode("utf-8", errors="replace").strip()
                     if p_str:
-                        found_lines.append(p_str)
+                        collected_lines.append(p_str)
+                        if len(collected_lines) >= limit:
+                            break
 
-            recent_lines = found_lines[-limit:]
-            total_count = max(len(found_lines), limit)
+            total_count = max(len(collected_lines), limit)
 
-    entries = []
-    for l in recent_lines:
-        try:
-            entries.append(json.loads(l))
-        except Exception:
-            pass
+        entries = []
+        for l in collected_lines:
+            try:
+                entries.append(json.loads(l))
+            except Exception:
+                pass
 
-    return list(reversed(entries)), total_count
+        return entries, total_count
 
 
 # ── Raw Payload Log & Inspector Endpoints ────────────────────────────────────
@@ -1219,22 +1226,49 @@ async def handle_raw_log_stream(request: web.Request) -> web.StreamResponse:
             async with session.get(proxy_url) as proxy_resp:
                 if proxy_resp.status != 200:
                     await response.write(b"event: error\ndata: {\"error\": \"Proxy SSE unavailable\"}\n\n")
-                    await response.drain()
                     return response
                 async for chunk in proxy_resp.content.iter_any():
                     if chunk:
                         await response.write(chunk)
-                        await response.drain()
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     except Exception as e:
         try:
             err_json = json.dumps({"error": str(e)})
             await response.write(f"event: error\ndata: {err_json}\n\n".encode("utf-8"))
-            await response.drain()
         except Exception:
             pass
     return response
+
+
+# ── Asset Handlers ───────────────────────────────────────────────────────────
+
+async def handle_js_asset(request: web.Request) -> web.Response:
+    """Handler for JS assets."""
+    filename = request.match_info.get("filename", "")
+    candidates = [
+        DASHBOARD_DIR / "static" / "js" / filename,
+        DASHBOARD_DIR / "static" / filename,
+        REPO_ROOT / "dashboard" / "static" / "js" / filename,
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return web.FileResponse(p, headers={"Content-Type": "application/javascript; charset=utf-8"})
+    return web.Response(text=f"JavaScript file {filename} not found", status=404)
+
+
+async def handle_css_asset(request: web.Request) -> web.Response:
+    """Handler for CSS assets."""
+    filename = request.match_info.get("filename", "")
+    candidates = [
+        DASHBOARD_DIR / "static" / "css" / filename,
+        DASHBOARD_DIR / "static" / filename,
+        REPO_ROOT / "dashboard" / "static" / "css" / filename,
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return web.FileResponse(p, headers={"Content-Type": "text/css; charset=utf-8"})
+    return web.Response(text=f"CSS file {filename} not found", status=404)
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -1267,14 +1301,30 @@ def create_app():
     app.router.add_post("/api/raw-log/clear", handle_raw_log_clear)
     app.router.add_get("/api/raw-log/stream", handle_raw_log_stream)
 
+    # Inspector UI routes
     app.router.add_get("/", handle_dashboard)
     app.router.add_get("/dashboard", handle_dashboard)
+    app.router.add_get("/dashboard/", handle_dashboard)
     app.router.add_get("/inspector", handle_inspector)
+    app.router.add_get("/inspector/", handle_inspector)
     app.router.add_get("/raw-logs", handle_inspector)
+    app.router.add_get("/raw-logs/", handle_inspector)
+    app.router.add_get("/raw_log_inspector.html", handle_inspector)
+
+    # Direct Asset Fallback Handlers (guarantees 100% 200 OK regardless of path structure)
+    app.router.add_get("/static/js/{filename}", handle_js_asset)
+    app.router.add_get("/static/css/{filename}", handle_css_asset)
+    app.router.add_get("/js/{filename}", handle_js_asset)
+    app.router.add_get("/css/{filename}", handle_css_asset)
+    app.router.add_get("/inspector/static/js/{filename}", handle_js_asset)
+    app.router.add_get("/inspector/static/css/{filename}", handle_css_asset)
+    app.router.add_get("/inspector/js/{filename}", handle_js_asset)
+    app.router.add_get("/inspector/css/{filename}", handle_css_asset)
 
     static_dir = get_static_dir_path()
     static_dir.mkdir(exist_ok=True)
-    app.router.add_static("/static/", path=static_dir, name="static")
+    app.router.add_static("/static", path=static_dir, name="static")
+    app.router.add_static("/static/", path=static_dir)
 
     return app
 
