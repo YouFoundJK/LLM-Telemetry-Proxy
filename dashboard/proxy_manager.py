@@ -362,6 +362,9 @@ class ProxyManager:
         upstream: str = DEFAULT_UPSTREAM,
         token_limit: int = DEFAULT_TOKEN_LIMIT,
         db_path: Optional[Path] = None,
+        max_concurrent: Optional[int] = None,
+        slot_cooldown_ms: Optional[int] = None,
+        retry_429_max: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Start the proxy server as a background process."""
         # 1. Check if already running
@@ -398,6 +401,12 @@ class ProxyManager:
             "--upstream", upstream,
             "--token-limit", str(token_limit),
         ]
+        if max_concurrent is not None:
+            cmd.extend(["--max-concurrent", str(max_concurrent)])
+        if slot_cooldown_ms is not None:
+            cmd.extend(["--slot-cooldown-ms", str(slot_cooldown_ms)])
+        if retry_429_max is not None:
+            cmd.extend(["--retry-429-max", str(retry_429_max)])
         if db_path:
             cmd.extend(["--db", str(db_path)])
 
@@ -504,11 +513,23 @@ class ProxyManager:
         upstream: str = DEFAULT_UPSTREAM,
         token_limit: int = DEFAULT_TOKEN_LIMIT,
         db_path: Optional[Path] = None,
+        max_concurrent: Optional[int] = None,
+        slot_cooldown_ms: Optional[int] = None,
+        retry_429_max: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Restart the proxy server."""
         await cls.stop(force=True)
         await asyncio.sleep(0.8)
-        return await cls.start(port=port, host=host, upstream=upstream, token_limit=token_limit, db_path=db_path)
+        return await cls.start(
+            port=port,
+            host=host,
+            upstream=upstream,
+            token_limit=token_limit,
+            db_path=db_path,
+            max_concurrent=max_concurrent,
+            slot_cooldown_ms=slot_cooldown_ms,
+            retry_429_max=retry_429_max,
+        )
 
     @classmethod
     def get_logs(cls, lines: int = 150) -> Dict[str, Any]:

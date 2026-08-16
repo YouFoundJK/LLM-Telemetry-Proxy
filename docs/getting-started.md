@@ -85,6 +85,10 @@ python proxy/llm_telemetry_proxy.py \
 | `--port` | `9090` | TCP port the proxy listens on. |
 | `--host` | `0.0.0.0` | Bind host address. |
 | `--upstream` | `https://llm.ai.e-infra.cz/v1` | Upstream OpenAI-compatible API base URL. |
+| `--max-concurrent` | `4` | Maximum parallel upstream in-flight requests. |
+| `--slot-cooldown-ms` | `50` | Cooldown gap (ms) before waking next queued request when maxed out. |
+| `--retry-429-max` | `0` | Opt-in max retries with exponential backoff on upstream 429 errors (default `0`, disabled). |
+| `--token-limit` | `480000000` | Rolling 24-hour token budget cap. |
 | `--db` | `data/llm_telemetry.db` | Target SQLite database path. |
 | `--pid-file` | `data/.proxy.pid` | Process ID tracking file. |
 

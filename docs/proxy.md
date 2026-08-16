@@ -8,17 +8,13 @@ The **LLM Telemetry Proxy** is an asynchronous reverse proxy built with Python `
 
 ### 1. Adaptive Rate Limiting & Concurrency Control
 
-Many upstream LLM providers (or private clusters) enforce strict concurrent request limits per API key or tenant (e.g., maximum 4 parallel requests). When client code fires parallel async queries, this often results in `429 Too Many Requests` errors.
+Many upstream LLM providers (or private clusters) enforce strict concurrent request limits per API key or tenant (e.g., maximum 4 parallel requests). When client code fires parallel async queries, this often results in `429 Too Many Requests` errors or connection teardown race conditions.
 
-The proxy utilizes an async semaphore to throttle in-flight calls:
+The proxy utilizes an asynchronous FIFO concurrency manager with slot cooldown gating and transparent 429 auto-retries:
 
-```python
-MAX_CONCURRENT = 4
-_upstream_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-```
-
-- When all 4 slots are busy, subsequent incoming requests wait gracefully in an async queue.
-- As soon as an active stream completes (or fails), waiting requests are immediately dispatched without hitting upstream rate limits.
+- **Strict Max Concurrency**: Gated by `UpstreamConcurrencyLimiter` (default `4`, configurable via `--max-concurrent` or `MAX_CONCURRENT`).
+- **Slot Cooldown Gap (50ms)**: When active concurrency is maxed out and queued requests are waiting, a small cooldown gap (`--slot-cooldown-ms 50` or `CONCURRENCY_SLOT_COOLDOWN_MS`) is strictly enforced when releasing a slot before admitting the next queued request. This ensures upstream TCP sockets, reverse proxy gateways, and vLLM/engine sequence teardown complete cleanly before the next request arrives.
+- **Opt-in 429 Auto-Retry with Exponential Backoff**: By default (`--retry-429-max 0`), upstream 429 responses are passed directly to the caller and logged to SQLite immediately to preserve 100% telemetry fidelity and avoid compounding retries with downstream agents (e.g. Hermes). If desired for dumb scripts, passing `--retry-429-max N` enables automatic exponential backoff retries with jitter before failing.
 
 ---
 

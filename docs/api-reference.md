@@ -30,7 +30,12 @@ Returns proxy health status, semaphore utilization, rolling 24-hour token budget
   "rate_limiter": {
     "max_concurrent": 4,
     "active": 1,
-    "queued": 0
+    "queued": 0,
+    "slot_cooldown_ms": 50,
+    "total_admitted": 124,
+    "total_queued": 15,
+    "total_retries_429": 0,
+    "peak_active": 4
   },
   "token_budget": {
     "daily_limit": 480000000,

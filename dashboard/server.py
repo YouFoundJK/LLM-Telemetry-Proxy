@@ -951,8 +951,20 @@ async def handle_proxy_start(request: web.Request) -> web.Response:
     host = data.get("host", "0.0.0.0")
     upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
     token_limit = parse_token_limit(data.get("token_limit", 480_000_000))
+    max_concurrent = int(data.get("max_concurrent")) if data.get("max_concurrent") is not None else None
+    slot_cooldown_ms = int(data.get("slot_cooldown_ms")) if data.get("slot_cooldown_ms") is not None else None
+    retry_429_max = int(data.get("retry_429_max")) if data.get("retry_429_max") is not None else None
     db_path = get_db_path()
-    res = await ProxyManager.start(port=port, host=host, upstream=upstream, token_limit=token_limit, db_path=db_path)
+    res = await ProxyManager.start(
+        port=port,
+        host=host,
+        upstream=upstream,
+        token_limit=token_limit,
+        db_path=db_path,
+        max_concurrent=max_concurrent,
+        slot_cooldown_ms=slot_cooldown_ms,
+        retry_429_max=retry_429_max,
+    )
     status_code = 200 if res.get("success") else 500
     return web.json_response(res, status=status_code)
 
@@ -978,8 +990,20 @@ async def handle_proxy_restart(request: web.Request) -> web.Response:
     host = data.get("host", "0.0.0.0")
     upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
     token_limit = parse_token_limit(data.get("token_limit", 480_000_000))
+    max_concurrent = int(data.get("max_concurrent")) if data.get("max_concurrent") is not None else None
+    slot_cooldown_ms = int(data.get("slot_cooldown_ms")) if data.get("slot_cooldown_ms") is not None else None
+    retry_429_max = int(data.get("retry_429_max")) if data.get("retry_429_max") is not None else None
     db_path = get_db_path()
-    res = await ProxyManager.restart(port=port, host=host, upstream=upstream, token_limit=token_limit, db_path=db_path)
+    res = await ProxyManager.restart(
+        port=port,
+        host=host,
+        upstream=upstream,
+        token_limit=token_limit,
+        db_path=db_path,
+        max_concurrent=max_concurrent,
+        slot_cooldown_ms=slot_cooldown_ms,
+        retry_429_max=retry_429_max,
+    )
     status_code = 200 if res.get("success") else 500
     return web.json_response(res, status=status_code)
 
