@@ -409,12 +409,6 @@ class ModelRouter:
             "routes": routes_stats,
         }
 
-    def apply_auth_and_headers(self, headers: Dict[str, str], resolution: RouteResolutionResult) -> Dict[str, str]:
-        """
-        Passthrough request headers untouched. Client credentials flow directly to upstream.
-        """
-        return headers
-
     def to_dict(self, mask_keys: bool = True) -> Dict[str, Any]:
         return {
             "default_route": {

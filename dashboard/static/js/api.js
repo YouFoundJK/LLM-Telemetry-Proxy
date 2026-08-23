@@ -459,6 +459,30 @@ const TelemetryAPI = (() => {
   }
 
   /**
+   * GET /api/control-panel/bundle — retrieves unified proxy status, health, routes, logs, and raw-log status in ONE request.
+   */
+  async function getControlPanelBundle(port, lines = 150, options = {}) {
+    const params = new URLSearchParams();
+    if (port) params.append('port', port.toString());
+    if (lines) params.append('lines', lines.toString());
+    if (options.includeLogs !== undefined) {
+      params.append('include_logs', options.includeLogs ? '1' : '0');
+    }
+    const url = `${BASE_URL}/api/control-panel/bundle?${params.toString()}`;
+    const response = await fetchWithRetry(url, { isBackground: true, ...options });
+    return handleResponse(response);
+  }
+
+  /**
+   * GET /api/dashboard/bundle — retrieves model mapping, costs, health, proxy status, and routes in ONE request.
+   */
+  async function getDashboardBundle(options = {}) {
+    const url = `${BASE_URL}/api/dashboard/bundle`;
+    const response = await fetchWithRetry(url, { isBackground: true, ...options });
+    return handleResponse(response);
+  }
+
+  /**
    * Returns the SSE stream URL for live raw logs.
    */
   function getRawLogStreamUrl() {
@@ -487,6 +511,8 @@ const TelemetryAPI = (() => {
     toggleRawLog,
     getRecentRawLogs,
     clearRawLogs,
+    getControlPanelBundle,
+    getDashboardBundle,
     getRawLogStreamUrl,
     isRateLimited,
     BASE_URL
@@ -496,4 +522,5 @@ const TelemetryAPI = (() => {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = TelemetryAPI;
 }
+
 

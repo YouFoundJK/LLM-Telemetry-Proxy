@@ -473,7 +473,9 @@ def init_db():
             status_code   INTEGER,
             error         TEXT,
             call_type     TEXT DEFAULT 'chat',
-            calls_count   INTEGER DEFAULT 1
+            calls_count   INTEGER DEFAULT 1,
+            route_name    TEXT,
+            upstream_url  TEXT
         )
     """)
     # Migrations for existing DBs
@@ -483,6 +485,14 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE api_calls ADD COLUMN calls_count INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN route_name TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN upstream_url TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -501,11 +511,21 @@ def init_db():
             logged        INTEGER DEFAULT 0,
             ttfb_ms       REAL,
             total_ms      REAL,
-            calls_count   INTEGER DEFAULT 1
+            calls_count   INTEGER DEFAULT 1,
+            route_name    TEXT,
+            upstream_url  TEXT
         )
     """)
     try:
         conn.execute("ALTER TABLE proxy_calls ADD COLUMN calls_count INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE proxy_calls ADD COLUMN route_name TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE proxy_calls ADD COLUMN upstream_url TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -544,6 +564,7 @@ def load_model_mapping():
     candidates = [
         REPO_ROOT / "data" / "model_mapping.json",
         REPO_ROOT / "model_mapping.json",
+        REPO_ROOT / "data" / "model_mappings.json",
     ]
     for p in candidates:
         if p.exists():
@@ -560,7 +581,7 @@ def load_model_mapping():
 
 def resolve_canonical_model(model_name: str, timestamp: str = None) -> str:
     if not model_name:
-        return model_name
+        return "Unknown"
     mapping = load_model_mapping()
     if not mapping:
         return model_name
@@ -604,43 +625,115 @@ def resolve_canonical_model(model_name: str, timestamp: str = None) -> str:
 def log_call(model, endpoint, input_tokens, output_tokens,
              ttfb_ms, total_ms, tokens_per_s,
              server_running, server_tok_s, server_model,
-             status_code, error, call_type='chat'):
+             status_code, error, call_type='chat',
+             route_name=None, upstream_url=None):
     try:
         model = resolve_canonical_model(model)
         conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
-        conn.execute("""
-            INSERT INTO api_calls
-                (timestamp, model, endpoint, input_tokens, output_tokens,
-                 ttfb_ms, total_ms, tokens_per_s,
-                 server_running, server_tok_s, server_model,
-                 status_code, error, call_type, calls_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """, (
-            datetime.now(timezone.utc).isoformat(),
-            model, endpoint, input_tokens, output_tokens,
-            ttfb_ms, total_ms, tokens_per_s,
-            server_running, server_tok_s, server_model,
-            status_code, error, call_type,
-        ))
+        try:
+            conn.execute("""
+                INSERT INTO api_calls
+                    (timestamp, model, endpoint, input_tokens, output_tokens,
+                     ttfb_ms, total_ms, tokens_per_s,
+                     server_running, server_tok_s, server_model,
+                     status_code, error, call_type, calls_count,
+                     route_name, upstream_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (
+                datetime.now(timezone.utc).isoformat(),
+                model, endpoint, input_tokens, output_tokens,
+                ttfb_ms, total_ms, tokens_per_s,
+                server_running, server_tok_s, server_model,
+                status_code, error, call_type,
+                route_name, upstream_url
+            ))
+        except sqlite3.OperationalError as op_err:
+            if "route_name" in str(op_err):
+                try:
+                    conn.execute("ALTER TABLE api_calls ADD COLUMN route_name TEXT")
+                    conn.execute("ALTER TABLE api_calls ADD COLUMN upstream_url TEXT")
+                    conn.execute("""
+                        INSERT INTO api_calls
+                            (timestamp, model, endpoint, input_tokens, output_tokens,
+                             ttfb_ms, total_ms, tokens_per_s,
+                             server_running, server_tok_s, server_model,
+                             status_code, error, call_type, calls_count,
+                             route_name, upstream_url)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """, (
+                        datetime.now(timezone.utc).isoformat(),
+                        model, endpoint, input_tokens, output_tokens,
+                        ttfb_ms, total_ms, tokens_per_s,
+                        server_running, server_tok_s, server_model,
+                        status_code, error, call_type,
+                        route_name, upstream_url
+                    ))
+                except Exception:
+                    conn.execute("""
+                        INSERT INTO api_calls
+                            (timestamp, model, endpoint, input_tokens, output_tokens,
+                             ttfb_ms, total_ms, tokens_per_s,
+                             server_running, server_tok_s, server_model,
+                             status_code, error, call_type, calls_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """, (
+                        datetime.now(timezone.utc).isoformat(),
+                        model, endpoint, input_tokens, output_tokens,
+                        ttfb_ms, total_ms, tokens_per_s,
+                        server_running, server_tok_s, server_model,
+                        status_code, error, call_type
+                    ))
+            else:
+                raise
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"[telemetry] log_call error: {e}", file=sys.stderr)
 
 
-def log_proxy_call(endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms):
+def log_proxy_call(endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
+                   route_name=None, upstream_url=None):
     """Log EVERY request through the proxy — even ones that fail before logging to api_calls."""
     try:
         model = resolve_canonical_model(model)
         conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
-        conn.execute("""
-            INSERT INTO proxy_calls
-                (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """, (
-            datetime.now(timezone.utc).isoformat(),
-            endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
-        ))
+        try:
+            conn.execute("""
+                INSERT INTO proxy_calls
+                    (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count,
+                     route_name, upstream_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (
+                datetime.now(timezone.utc).isoformat(),
+                endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
+                route_name, upstream_url
+            ))
+        except sqlite3.OperationalError as op_err:
+            if "route_name" in str(op_err):
+                try:
+                    conn.execute("ALTER TABLE proxy_calls ADD COLUMN route_name TEXT")
+                    conn.execute("ALTER TABLE proxy_calls ADD COLUMN upstream_url TEXT")
+                    conn.execute("""
+                        INSERT INTO proxy_calls
+                            (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count,
+                             route_name, upstream_url)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """, (
+                        datetime.now(timezone.utc).isoformat(),
+                        endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
+                        route_name, upstream_url
+                    ))
+                except Exception:
+                    conn.execute("""
+                        INSERT INTO proxy_calls
+                            (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """, (
+                        datetime.now(timezone.utc).isoformat(),
+                        endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms
+                    ))
+            else:
+                raise
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1037,13 +1130,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     # Dynamic model route resolution
     route_res = _model_router.resolve(model)
+    route_name = route_res.route_name
     resolved_base = UPSTREAM if (route_res.is_default and UPSTREAM != DEFAULT_UPSTREAM) else route_res.upstream_url
     upstream_url = build_upstream_url(resolved_base, path)
 
     headers = dict(request.headers)
     headers.pop("Host", None)
     headers.pop("host", None)
-    headers = _model_router.apply_auth_and_headers(headers, route_res)
     if body and "Content-Length" in headers:
         headers["Content-Length"] = str(len(body))
 
@@ -1207,9 +1300,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 log_call(model, path, input_tokens, output_tokens,
                                          ttfb_ms, t_total, tokens_per_s,
                                          server_running, server_tok_s, server_model,
-                                         status_code, error, call_type)
+                                         status_code, error, call_type,
+                                         route_name=route_name, upstream_url=upstream_url)
                                 logged = True
-                                log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
+                                log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total,
+                                               route_name=route_name, upstream_url=upstream_url)
 
                                 if _raw_logging_enabled:
                                     raw_record = make_raw_payload_record(
@@ -1326,9 +1421,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 log_call(model, path, input_tokens, output_tokens,
                                          ttfb_ms, t_total, tokens_per_s,
                                          server_running, server_tok_s, server_model,
-                                         status_code, error, call_type)
+                                         status_code, error, call_type,
+                                         route_name=route_name, upstream_url=upstream_url)
                                 logged = True
-                                log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total)
+                                log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total,
+                                               route_name=route_name, upstream_url=upstream_url)
 
                                 if _raw_logging_enabled:
                                     raw_record = make_raw_payload_record(
@@ -1403,8 +1500,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             log_call(model, path, input_tokens, output_tokens,
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
-                     504, error, call_type)
-            log_proxy_call(path, method, call_type, model, 504, error, 1 if logged else 0, ttfb_ms, t_total)
+                     504, error, call_type,
+                     route_name=route_name, upstream_url=upstream_url)
+            log_proxy_call(path, method, call_type, model, 504, error, 1 if logged else 0, ttfb_ms, t_total,
+                           route_name=route_name, upstream_url=upstream_url)
         except Exception:
             pass
 
@@ -1447,8 +1546,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             log_call(model, path, input_tokens, output_tokens,
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
-                     499, error, call_type)
-            log_proxy_call(path, method, call_type, model, 499, error, 1 if logged else 0, ttfb_ms, t_total)
+                     499, error, call_type,
+                     route_name=route_name, upstream_url=upstream_url)
+            log_proxy_call(path, method, call_type, model, 499, error, 1 if logged else 0, ttfb_ms, t_total,
+                           route_name=route_name, upstream_url=upstream_url)
         except Exception:
             pass
 
@@ -1490,8 +1591,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             log_call(model, path, input_tokens, output_tokens,
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
-                     status_code, error, call_type)
-            log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total)
+                     status_code, error, call_type,
+                     route_name=route_name, upstream_url=upstream_url)
+            log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total,
+                           route_name=route_name, upstream_url=upstream_url)
         except Exception:
             pass
 
@@ -1536,7 +1639,6 @@ async def _simple_forward(request, path, method):
     headers = dict(request.headers)
     headers.pop("Host", None)
     headers.pop("host", None)
-    headers = _model_router.apply_auth_and_headers(headers, route_res)
 
     t_start = time.monotonic()
     status_code = None
@@ -1586,7 +1688,8 @@ async def _simple_forward(request, path, method):
                                 error = f"HTTP {status_code}"
                             
                             try:
-                                log_proxy_call(path, method, classify_endpoint(path), None, status_code, error, 0, None, t_total)
+                                log_proxy_call(path, method, classify_endpoint(path), None, status_code, error, 0, None, t_total,
+                                               route_name=_model_router.default_name, upstream_url=upstream_url)
                             except Exception as tel_err:
                                 print(f"[telemetry] _simple_forward log error: {tel_err}", file=sys.stderr)
 
@@ -1619,13 +1722,15 @@ async def _simple_forward(request, path, method):
 
     except asyncio.TimeoutError:
         try:
-            log_proxy_call(path, method, classify_endpoint(path), None, 504, "timeout", 0, None, (time.monotonic() - t_start) * 1000)
+            log_proxy_call(path, method, classify_endpoint(path), None, 504, "timeout", 0, None, (time.monotonic() - t_start) * 1000,
+                           route_name=_model_router.default_name, upstream_url=upstream_url)
         except Exception:
             pass
         return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
     except asyncio.CancelledError:
         try:
-            log_proxy_call(path, method, classify_endpoint(path), None, 499, "client_cancelled", 0, None, (time.monotonic() - t_start) * 1000)
+            log_proxy_call(path, method, classify_endpoint(path), None, 499, "client_cancelled", 0, None, (time.monotonic() - t_start) * 1000,
+                           route_name=_model_router.default_name, upstream_url=upstream_url)
         except Exception:
             pass
         raise
@@ -1633,7 +1738,8 @@ async def _simple_forward(request, path, method):
         error = str(e)[:200]
         t_total = (time.monotonic() - t_start) * 1000
         try:
-            log_proxy_call(path, method, classify_endpoint(path), None, None, error, 0, None, t_total)
+            log_proxy_call(path, method, classify_endpoint(path), None, None, error, 0, None, t_total,
+                           route_name=_model_router.default_name, upstream_url=upstream_url)
         except Exception:
             pass
         return web.json_response({"error": {"message": str(e)}}, status=502)
@@ -1917,8 +2023,11 @@ def main():
     DB_PATH = Path(args.db)
     PID_FILE = Path(args.pid_file)
 
-    if args.upstream and (not ROUTES_CONFIG_FILE.exists() or not _model_router.default_upstream_url):
+    if args.upstream and args.upstream != DEFAULT_UPSTREAM:
         _model_router.default_upstream_url = args.upstream
+        UPSTREAM = args.upstream
+    elif _model_router.default_upstream_url:
+        UPSTREAM = _model_router.default_upstream_url
 
     _concurrency_limiter.max_concurrent = MAX_CONCURRENT
     _concurrency_limiter.slot_cooldown_seconds = max(0.0, SLOT_COOLDOWN_MS / 1000.0)

@@ -542,9 +542,16 @@ async def handle_query(request: web.Request) -> web.Response:
                 504: "HTTP 504 Gateway Timeout"
             }
             calls = []
+            router = ModelRouter(config_path=get_routes_config_path()) if ModelRouter else None
             for r in rows:
                 d = dict(r)
-                d["model"] = get_resolved_model(d["model"], mapping, d.get("timestamp"))
+                raw_model = d.get("model")
+                d["model"] = get_resolved_model(raw_model, mapping, d.get("timestamp"))
+                if not d.get("route_name") and router and raw_model:
+                    res = router.resolve(raw_model)
+                    if res:
+                        d["route_name"] = res.route_name
+                        d["upstream_url"] = res.upstream_url
                 if not d.get("error") and d.get("status_code") and (d["status_code"] < 200 or d["status_code"] >= 300):
                     d["error"] = http_err_map.get(d["status_code"], f"HTTP {d['status_code']}")
                 calls.append(d)
@@ -558,11 +565,10 @@ async def handle_query(request: web.Request) -> web.Response:
                    COALESCE(SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_rtt,
                    COALESCE(SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN output_tokens ELSE 0 END) / NULLIF(SUM(CASE WHEN output_tokens > 0 AND total_ms > 0 THEN total_ms * COALESCE(calls_count, 1) ELSE 0 END) / 1000.0, 0), 0) as avg_tps,
                    SUM(CASE WHEN (error IS NOT NULL AND error != '') OR (status_code IS NOT NULL AND (status_code < 200 OR status_code >= 300)) THEN COALESCE(calls_count, 1) ELSE 0 END) as errors,
-                   MIN(timestamp) as first_call,
-                   MAX(timestamp) as last_call
+                   COALESCE(SUM(calls_count), 0) as total_calls_tracked
             FROM api_calls WHERE {where_clause}
         """, params).fetchone()
-        result["summary"] = dict(summary)
+        result["summary"] = dict(summary) if summary else {}
 
         # Available models and types (cached in-memory for 30 seconds)
         now_ts = datetime.now().timestamp()
@@ -718,14 +724,27 @@ async def handle_query_bulk(request: web.Request) -> web.Response:
         where_clause = " AND ".join(where_parts) if where_parts else "1=1"
         limit = int(request.query.get("limit", 500000))
 
+        # Check table columns
+        col_info = conn.execute("PRAGMA table_info(api_calls)").fetchall()
+        avail_cols = {c[1] for c in col_info}
+        has_route = "route_name" in avail_cols
+
         cols = [
             "id", "timestamp", "model", "endpoint",
             "input_tokens", "output_tokens", "ttfb_ms", "total_ms",
             "tokens_per_s", "server_running", "status_code",
-            "error", "call_type", "calls_count"
+            "error", "call_type", "calls_count",
+            "route_name", "upstream_url"
         ]
+
+        if has_route:
+            select_cols_sql = ", ".join(cols)
+        else:
+            base_cols_sql = ", ".join(cols[:-2])
+            select_cols_sql = f"{base_cols_sql}, NULL as route_name, NULL as upstream_url"
+
         sql = f"""
-            SELECT {", ".join(cols)}
+            SELECT {select_cols_sql}
             FROM api_calls
             WHERE {where_clause}
             ORDER BY timestamp ASC, id ASC
@@ -746,6 +765,7 @@ async def handle_query_bulk(request: web.Request) -> web.Response:
             504: "HTTP 504 Gateway Timeout"
         }
 
+        router = ModelRouter(config_path=get_routes_config_path()) if ModelRouter else None
         matrix = []
         for r in rows:
             r_list = list(r)
@@ -757,7 +777,15 @@ async def handle_query_bulk(request: web.Request) -> web.Response:
             err = r_list[11]
             if not err and status_code and (status_code < 200 or status_code >= 300):
                 r_list[11] = http_err_map.get(status_code, f"HTTP {status_code}")
-                
+
+            if (not r_list[14] or not r_list[15]) and router and raw_model:
+                res = router.resolve(raw_model)
+                if res:
+                    if not r_list[14]:
+                        r_list[14] = res.route_name
+                    if not r_list[15]:
+                        r_list[15] = res.upstream_url
+
             matrix.append(r_list)
 
         now_ts = datetime.now().timestamp()
@@ -973,7 +1001,21 @@ async def handle_proxy_start(request: web.Request) -> web.Response:
         data = {}
     port = int(data.get("port", 9090))
     host = data.get("host", "0.0.0.0")
-    upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
+    upstream = data.get("upstream")
+    if not upstream or upstream == "https://llm.ai.e-infra.cz/v1":
+        cfg_path = get_routes_config_path()
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    r_cfg = json.load(f)
+                    def_url = r_cfg.get("default_route", {}).get("upstream_url")
+                    if def_url:
+                        upstream = def_url
+            except Exception:
+                pass
+    if not upstream:
+        upstream = "https://llm.ai.e-infra.cz/v1"
+
     token_limit = parse_token_limit(data.get("token_limit", 480_000_000))
     max_concurrent = int(data.get("max_concurrent")) if data.get("max_concurrent") is not None else None
     slot_cooldown_ms = int(data.get("slot_cooldown_ms")) if data.get("slot_cooldown_ms") is not None else None
@@ -1012,7 +1054,21 @@ async def handle_proxy_restart(request: web.Request) -> web.Response:
         data = {}
     port = int(data.get("port", 9090))
     host = data.get("host", "0.0.0.0")
-    upstream = data.get("upstream", "https://llm.ai.e-infra.cz/v1")
+    upstream = data.get("upstream")
+    if not upstream or upstream == "https://llm.ai.e-infra.cz/v1":
+        cfg_path = get_routes_config_path()
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    r_cfg = json.load(f)
+                    def_url = r_cfg.get("default_route", {}).get("upstream_url")
+                    if def_url:
+                        upstream = def_url
+            except Exception:
+                pass
+    if not upstream:
+        upstream = "https://llm.ai.e-infra.cz/v1"
+
     token_limit = parse_token_limit(data.get("token_limit", 480_000_000))
     max_concurrent = int(data.get("max_concurrent")) if data.get("max_concurrent") is not None else None
     slot_cooldown_ms = int(data.get("slot_cooldown_ms")) if data.get("slot_cooldown_ms") is not None else None
@@ -1123,6 +1179,111 @@ async def handle_proxy_routes_test(request: web.Request) -> web.Response:
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
+
+
+async def handle_control_panel_bundle(request: web.Request) -> web.Response:
+    """GET /api/control-panel/bundle — returns unified proxy status, health, routes, logs, and raw-log status in ONE request."""
+    port_str = request.query.get("port")
+    port = int(port_str) if port_str and port_str.isdigit() else None
+    lines_str = request.query.get("lines", "150")
+    lines = int(lines_str) if lines_str.isdigit() else 150
+    include_logs = request.query.get("include_logs", "1") != "0"
+
+    # 1. Proxy status
+    proxy_status = await ProxyManager.get_status(port=port)
+
+    # 2. Database Health
+    db_path = get_db_path()
+    db_exists = db_path.exists()
+    dashboard_html = get_dashboard_html_path()
+    try:
+        db_size = db_path.stat().st_size if db_exists else 0
+    except Exception:
+        db_size = 0
+    health_data = {
+        "status": "ok",
+        "db_path": str(db_path),
+        "db_exists": db_exists,
+        "db_size_mb": round(db_size / 1024 / 1024, 1) if db_exists else 0,
+        "db_fingerprint": get_db_fingerprint(),
+        "dashboard_html": dashboard_html.exists(),
+    }
+
+    # 3. Routes config
+    config_path = get_routes_config_path()
+    router = ModelRouter(config_path=config_path) if ModelRouter else None
+    routes_data = router.to_dict() if router else {}
+
+    # 4. Raw log status
+    logger_file = get_logger_file_path()
+    size = logger_file.stat().st_size if logger_file.exists() else 0
+    def fmt_sz(b):
+        if b < 1024:
+            return f"{b} B"
+        elif b < 1024 * 1024:
+            return f"{b / 1024:.1f} KB"
+        return f"{b / (1024 * 1024):.2f} MB"
+
+    raw_log_enabled = proxy_status.get("health", {}).get("raw_logging", False) if proxy_status.get("health") else False
+    raw_log_data = {
+        "enabled": raw_log_enabled,
+        "proxy_alive": proxy_status.get("running", False),
+        "file_path": str(logger_file),
+        "rel_path": str(logger_file.relative_to(REPO_ROOT)) if logger_file.is_relative_to(REPO_ROOT) else str(logger_file),
+        "file_size_bytes": size,
+        "file_size_formatted": fmt_sz(size),
+    }
+
+    # 5. Proxy logs
+    proxy_logs_data = ProxyManager.get_logs(lines=lines) if include_logs else None
+
+    return web.json_response({
+        "proxy_status": proxy_status,
+        "health": health_data,
+        "routes": routes_data,
+        "raw_log_status": raw_log_data,
+        "proxy_logs": proxy_logs_data,
+    })
+
+
+async def handle_dashboard_bundle(request: web.Request) -> web.Response:
+    """GET /api/dashboard/bundle — returns model mapping, costs, health, proxy status, and routes in ONE request."""
+    mapping = load_model_mapping()
+    costs_path = get_model_costs_path()
+    costs_data = {}
+    if costs_path.exists():
+        try:
+            with open(costs_path, "r", encoding="utf-8") as f:
+                costs_data = json.load(f)
+        except Exception:
+            pass
+
+    proxy_status = await ProxyManager.get_status()
+    db_path = get_db_path()
+    db_exists = db_path.exists()
+    try:
+        db_size = db_path.stat().st_size if db_exists else 0
+    except Exception:
+        db_size = 0
+
+    config_path = get_routes_config_path()
+    router = ModelRouter(config_path=config_path) if ModelRouter else None
+    routes_data = router.to_dict() if router else {}
+
+    return web.json_response({
+        "model_mapping": mapping,
+        "model_costs": costs_data,
+        "health": {
+            "status": "ok",
+            "db_path": str(db_path),
+            "db_exists": db_exists,
+            "db_size_mb": round(db_size / 1024 / 1024, 1) if db_exists else 0,
+            "db_fingerprint": get_db_fingerprint(),
+            "dashboard_html": get_dashboard_html_path().exists(),
+        },
+        "proxy_status": proxy_status,
+        "routes": routes_data,
+    })
 
 
 def get_active_proxy_port() -> int:
@@ -1382,6 +1543,10 @@ def create_app():
     app.router.add_get("/health", handle_health)
     app.router.add_get("/api/health", handle_health)
     
+    # Consolidated Bundled Query Routes (reduces multi-endpoint polling down to 1 request)
+    app.router.add_get("/api/control-panel/bundle", handle_control_panel_bundle)
+    app.router.add_get("/api/dashboard/bundle", handle_dashboard_bundle)
+
     # Proxy lifecycle routes
     app.router.add_get("/api/proxy/status", handle_proxy_status)
     app.router.add_post("/api/proxy/start", handle_proxy_start)

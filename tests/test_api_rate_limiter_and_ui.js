@@ -24,6 +24,8 @@ console.log('PASS: UI.escapeHtml sanitizes correctly.\n');
 // --- Test 2: TelemetryAPI exports & mock 429 handling ---
 console.log('--- Test 2: TelemetryAPI API surface & rate limiter ---');
 assert.strictEqual(typeof TelemetryAPI.isRateLimited, 'function', 'isRateLimited should be a function');
+assert.strictEqual(typeof TelemetryAPI.getControlPanelBundle, 'function', 'getControlPanelBundle should be exported');
+assert.strictEqual(typeof TelemetryAPI.getDashboardBundle, 'function', 'getDashboardBundle should be exported');
 assert.strictEqual(TelemetryAPI.isRateLimited(), false, 'initial rate limit should be false');
 
 async function testRateLimiterCircuitBreaker() {

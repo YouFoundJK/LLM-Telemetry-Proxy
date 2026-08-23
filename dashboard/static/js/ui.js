@@ -387,6 +387,31 @@ const UI = (() => {
       const statusTagClass = isErr ? 'tag-error' : (c.status_code >= 200 && c.status_code < 300) ? 'tag-success' : 'tag-warning';
       const statusText = c.status_code || (isErr ? 'ERR' : '?');
 
+      const routeName = c.route_name || (c.model ? 'Default Upstream' : '');
+      const upstreamUrl = c.upstream_url || '';
+
+      let errorCellHtml = '';
+      if (isErr) {
+        let hoverDetails = `📍 Route / Provider: ${routeName || 'Default Upstream'}\n🌐 Target Upstream: ${upstreamUrl || 'Standard Base'}\n⚠️ HTTP Status: ${statusText}\n💬 Error Details: ${errorMsg}`;
+        if (c.status_code === 401 || (errorMsg && errorMsg.toLowerCase().includes('missing auth'))) {
+          hoverDetails += `\n\n💡 DIAGNOSIS: The target provider (${routeName || 'Default Upstream'}) rejected the call because no valid Authorization header was provided by the client application. Ensure your client app passes its API key (e.g. Bearer token).`;
+        }
+        
+        errorCellHtml = `
+          <div class="error-cell-wrapper" title="${escapeHtml(hoverDetails)}">
+            ${routeName ? `<span class="tag tag-provider tag-provider-err">${escapeHtml(routeName)}</span>` : ''}
+            <span class="error-text-detail">${escapeHtml(errorMsg)}</span>
+          </div>
+        `;
+      } else {
+        const hoverSuccess = `📍 Route / Provider: ${routeName || 'Default Upstream'}\n🌐 Target Upstream: ${upstreamUrl || 'Standard Base'}\n✔ Status: ${statusText} OK`;
+        errorCellHtml = `
+          <div class="error-cell-wrapper" title="${escapeHtml(hoverSuccess)}">
+            ${routeName ? `<span class="tag tag-provider tag-provider-success">${escapeHtml(routeName)}</span>` : '<span style="color:var(--text-dim); font-size:11px;">—</span>'}
+          </div>
+        `;
+      }
+
       return `
       <tr>
         <td>${formatShortDate(c.timestamp)}</td>
@@ -403,8 +428,8 @@ const UI = (() => {
             ${statusText}
           </span>
         </td>
-        <td style="color:var(--red); font-size:11px; font-family:var(--font-mono); max-width: 250px; overflow: hidden; text-overflow: ellipsis;" title="${errorMsg}">
-          ${errorMsg}
+        <td>
+          ${errorCellHtml}
         </td>
       </tr>
     `}).join('');

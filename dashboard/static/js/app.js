@@ -38,6 +38,7 @@ const App = (() => {
     routesConfig: null,
     
     // In-Flight Loading Locks & Concurrency Guards
+    isControlPanelBundleLoading: false,
     isProxyStatusLoading: false,
     isProxyLogsLoading: false,
     isRawLogStatusLoading: false,
@@ -625,9 +626,7 @@ const App = (() => {
 
     const savedSelectedModels = savedFilters ? (savedFilters.selectedModels || []) : null;
 
-    await loadModelMapping();
-    await loadAvailableModels(savedSelectedModels);
-    await performInitialLoad();
+    await performInitialLoad(savedSelectedModels);
     startIntervals();
   }
 
@@ -672,20 +671,7 @@ const App = (() => {
     }
 
     if (tabId === 'controlPanelTab') {
-      loadProxyStatus();
-      loadProxyRoutes();
-      setTimeout(() => {
-        if (State.activeTab === 'controlPanelTab') {
-          loadHealth();
-          loadProxyLogs();
-        }
-      }, 200);
-      setTimeout(() => {
-        if (State.activeTab === 'controlPanelTab') {
-          loadRawLogStatus();
-          loadCrossCheck();
-        }
-      }, 450);
+      loadControlPanelBundle(true);
     }
   }
 
@@ -937,21 +923,45 @@ const App = (() => {
     }
   }
 
-  async function performInitialLoad() {
+  async function performInitialLoad(savedSelectedModels = []) {
     try {
-      await loadCosts();
-      await refresh();
-      // Non-critical background status staggered cleanly to avoid reverse proxy micro-burst 429
-      setTimeout(() => {
-        loadProxyStatus();
-      }, 150);
-      setTimeout(() => {
-        loadHealth();
-        loadRawLogStatus();
-        if (State.eInfraEnabled) loadServerStatus();
-      }, 400);
+      const bundle = await TelemetryAPI.getDashboardBundle();
+      if (bundle) {
+        if (bundle.model_mapping) State.modelMapping = bundle.model_mapping;
+        if (bundle.model_costs) State.modelCosts = bundle.model_costs;
+        if (bundle.routes) State.routesConfig = bundle.routes;
+        if (bundle.health) {
+          State.healthData = bundle.health;
+          if (UI.renderHealth) UI.renderHealth(bundle.health);
+          await syncDbFingerprint(bundle.health.db_fingerprint);
+        }
+        if (bundle.proxy_status) {
+          State.proxyStatus = bundle.proxy_status;
+          const data = bundle.proxy_status;
+          const defUpstream = (bundle.routes && bundle.routes.default_route && bundle.routes.default_route.upstream_url) || data.upstream || 'https://llm.ai.e-infra.cz/v1';
+          State.runningProxyConfig = {
+            port: data.port || 9090,
+            host: data.host || '0.0.0.0',
+            token_limit: data.token_limit || 480000000,
+            upstream: defUpstream
+          };
+          const upstreamInput = document.getElementById('proxyConfigUpstream');
+          if (upstreamInput && document.activeElement !== upstreamInput && !isProxyConfigDirty()) {
+            upstreamInput.value = defUpstream;
+          }
+          UI.renderProxyStatus(data);
+          updateProxyConfigDirtyState();
+        }
+      }
     } catch (e) {
-      console.warn('Initial load sequence finished with warnings:', e);
+      console.warn('Dashboard bundle load deferred:', e);
+    }
+    await refresh();
+    if (State.allAvailableModels && State.allAvailableModels.length > 0 && !State.modelDropdownInstance) {
+      State.modelDropdownInstance = UI.setupCustomDropdown(State.allAvailableModels, () => {
+        saveFiltersToLocalStorage();
+        renderTelemetry(State.currentData);
+      }, savedSelectedModels);
     }
   }
 
@@ -1497,25 +1507,31 @@ const App = (() => {
         dbSizeEl.textContent = data.db_exists ? `${data.db_size_mb} MB` : 'Not Found';
       }
 
-      // Check DB fingerprint to detect server DB compressions or resets
-      if (data.db_fingerprint && typeof TelemetryStore !== 'undefined') {
-        const storedFp = await TelemetryStore.getMeta('db_fingerprint');
-        if (storedFp && storedFp !== data.db_fingerprint) {
-          console.log('[TelemetryStore] Server database fingerprint changed. Invalidating stale browser cache.');
-          await TelemetryStore.clearAll();
-          await TelemetryStore.setMeta('db_fingerprint', data.db_fingerprint);
-          await refresh(true);
-        } else if (!storedFp) {
-          await TelemetryStore.setMeta('db_fingerprint', data.db_fingerprint);
-        }
-      }
-      updateCacheStatsUI();
+      await syncDbFingerprint(data.db_fingerprint);
     } catch (e) {
       if (!e.isThrottled) {
         console.error('Database health check failed', e);
       }
     } finally {
       State.isHealthLoading = false;
+    }
+  }
+
+  async function syncDbFingerprint(serverFp) {
+    if (!serverFp || typeof TelemetryStore === 'undefined') return;
+    try {
+      const storedFp = await TelemetryStore.getMeta('db_fingerprint');
+      if (storedFp && storedFp !== serverFp) {
+        console.log('[TelemetryStore] Server database fingerprint changed. Invalidating stale browser cache.');
+        await TelemetryStore.clearAll();
+        await TelemetryStore.setMeta('db_fingerprint', serverFp);
+        await refresh(true);
+      } else if (!storedFp) {
+        await TelemetryStore.setMeta('db_fingerprint', serverFp);
+      }
+      updateCacheStatsUI();
+    } catch (e) {
+      console.warn('Failed to sync DB fingerprint:', e);
     }
   }
 
@@ -1630,12 +1646,19 @@ const App = (() => {
     const currHost = hostInput ? hostInput.value.trim() : '0.0.0.0';
     const currTokenLimit = tokenLimitInput ? parseTokenLimitFromInput(tokenLimitInput.value) : 480000000;
     const currUpstream = upstreamInput ? normalizeUpstreamUrl(upstreamInput.value) : '';
+    
+    const configuredUpstream = State.routesConfig?.default_route?.upstream_url ? normalizeUpstreamUrl(State.routesConfig.default_route.upstream_url) : '';
     const runningUpstream = normalizeUpstreamUrl(State.runningProxyConfig.upstream);
+    const baseUpstream = runningUpstream || configuredUpstream;
 
-    return currPort !== State.runningProxyConfig.port ||
-           currHost !== State.runningProxyConfig.host ||
-           currTokenLimit !== State.runningProxyConfig.token_limit ||
-           currUpstream !== runningUpstream;
+    const runningPort = parseInt(State.runningProxyConfig.port || 9090, 10);
+    const runningHost = String(State.runningProxyConfig.host || '0.0.0.0').trim();
+    const runningTokenLimit = parseTokenLimitFromInput(State.runningProxyConfig.token_limit ?? 480000000);
+
+    return currPort !== runningPort ||
+           currHost !== runningHost ||
+           currTokenLimit !== runningTokenLimit ||
+           (baseUpstream && currUpstream !== baseUpstream);
   }
 
   function updateProxyConfigDirtyState() {
@@ -1666,12 +1689,113 @@ const App = (() => {
     const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
     const upstreamInput = document.getElementById('proxyConfigUpstream');
 
+    const defUpstream = State.routesConfig?.default_route?.upstream_url || State.runningProxyConfig.upstream;
+
     if (portInput) portInput.value = State.runningProxyConfig.port;
     if (hostInput) hostInput.value = State.runningProxyConfig.host;
     if (tokenLimitInput) tokenLimitInput.value = formatTokenLimitToMillion(State.runningProxyConfig.token_limit ?? 480000000);
-    if (upstreamInput) upstreamInput.value = State.runningProxyConfig.upstream;
+    if (upstreamInput) upstreamInput.value = defUpstream;
 
     updateProxyConfigDirtyState();
+  }
+
+  /**
+   * Load unified Control Panel bundle (proxy status, health, routes, logs, raw log status in 1 request)
+   */
+  async function loadControlPanelBundle(forceLogs = false) {
+    if (document.hidden) return;
+    if (State.isControlPanelBundleLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+    State.isControlPanelBundleLoading = true;
+
+    try {
+      const port = State.runningProxyConfig ? State.runningProxyConfig.port : (parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10));
+      const linesSelect = document.getElementById('proxyLogLinesSelect');
+      const lines = linesSelect ? parseInt(linesSelect.value, 10) : 150;
+      const includeLogs = forceLogs || Boolean(State.proxyStatus?.running);
+
+      const bundle = await TelemetryAPI.getControlPanelBundle(port, lines, { includeLogs });
+
+      // 1. Process Routes first if present in bundle to establish configured default upstream
+      if (bundle && bundle.routes) {
+        State.routesConfig = bundle.routes;
+      }
+
+      // 2. Process Proxy Status
+      if (bundle && bundle.proxy_status) {
+        const data = bundle.proxy_status;
+        State.proxyStatus = data;
+        const activePort = data.port || 9090;
+        const activeHost = data.host || '0.0.0.0';
+        const activeTokenLimit = data.token_limit || (data.token_budget && data.token_budget.daily_limit) || 480000000;
+        
+        const routesDefUpstream = State.routesConfig?.default_route?.upstream_url;
+        const activeUpstream = routesDefUpstream || data.upstream || (data.health && data.health.upstream) || (State.runningProxyConfig ? State.runningProxyConfig.upstream : 'https://openrouter.ai/api/v1');
+
+        State.runningProxyConfig = {
+          port: activePort,
+          host: activeHost,
+          token_limit: activeTokenLimit,
+          upstream: activeUpstream
+        };
+
+        if (activeUpstream) {
+          saveUpstreamToHistory(activeUpstream);
+        }
+
+        if (!isProxyConfigDirty()) {
+          const portInput = document.getElementById('proxyConfigPort');
+          const hostInput = document.getElementById('proxyConfigHost');
+          const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
+          const upstreamInput = document.getElementById('proxyConfigUpstream');
+          if (portInput && document.activeElement !== portInput) portInput.value = activePort;
+          if (hostInput && document.activeElement !== hostInput) hostInput.value = activeHost;
+          if (tokenLimitInput && document.activeElement !== tokenLimitInput) {
+            tokenLimitInput.value = formatTokenLimitToMillion(activeTokenLimit);
+          }
+          if (upstreamInput && document.activeElement !== upstreamInput) upstreamInput.value = activeUpstream;
+        }
+
+        UI.renderProxyStatus(data);
+        updateProxyConfigDirtyState();
+      }
+
+      // 3. Process Health
+      if (bundle && bundle.health) {
+        State.healthData = bundle.health;
+        if (UI.renderHealth) UI.renderHealth(bundle.health);
+        const dbPathEl = document.getElementById('proxyDbPathVal');
+        const dbSizeEl = document.getElementById('proxyDbSizeVal');
+        if (dbPathEl && bundle.health.db_path) dbPathEl.textContent = bundle.health.db_path;
+        if (dbSizeEl && bundle.health.db_size_mb !== undefined) {
+          dbSizeEl.textContent = bundle.health.db_exists ? `${bundle.health.db_size_mb} MB` : 'Not Found';
+        }
+        await syncDbFingerprint(bundle.health.db_fingerprint);
+      }
+
+      // 4. Render Routes UI
+      if (bundle && bundle.routes) {
+        renderRoutesUI();
+      }
+
+      // 5. Process Raw Log Status
+      if (bundle && bundle.raw_log_status) {
+        UI.renderRawLogStatus(bundle.raw_log_status);
+      }
+
+      // 6. Process Logs
+      if (bundle && bundle.proxy_logs) {
+        const autoScrollChk = document.getElementById('proxyLogAutoScroll');
+        const autoScroll = autoScrollChk ? autoScrollChk.checked : true;
+        UI.renderProxyLogs(bundle.proxy_logs, autoScroll);
+      }
+    } catch (e) {
+      if (!e.isThrottled) {
+        console.warn('Failed to load control panel bundle', e);
+      }
+    } finally {
+      State.isControlPanelBundleLoading = false;
+    }
   }
 
   /**
@@ -1692,7 +1816,9 @@ const App = (() => {
       const activePort = data.port || 9090;
       const activeHost = data.host || '0.0.0.0';
       const activeTokenLimit = data.token_limit || (data.token_budget && data.token_budget.daily_limit) || (data.health && data.health.token_budget && data.health.token_budget.daily_limit) || 480000000;
-      const activeUpstream = data.upstream || (data.health && data.health.upstream) || (State.runningProxyConfig ? State.runningProxyConfig.upstream : 'https://llm.ai.e-infra.cz/v1');
+      
+      const routesDefUpstream = State.routesConfig?.default_route?.upstream_url;
+      const activeUpstream = routesDefUpstream || data.upstream || (data.health && data.health.upstream) || (State.runningProxyConfig ? State.runningProxyConfig.upstream : 'https://openrouter.ai/api/v1');
 
       State.runningProxyConfig = {
         port: activePort,
@@ -1782,9 +1908,16 @@ const App = (() => {
     const defRoute = State.routesConfig.default_route || {};
     const routes = State.routesConfig.routes || [];
     const defMaxConcInput = document.getElementById('defaultRouterMaxConcurrent');
+    const upstreamInput = document.getElementById('proxyConfigUpstream');
 
     if (defMaxConcInput && document.activeElement !== defMaxConcInput) {
       defMaxConcInput.value = defRoute.max_concurrent ?? 4;
+    }
+    if (defRoute.upstream_url && upstreamInput && document.activeElement !== upstreamInput && !isProxyConfigDirty()) {
+      upstreamInput.value = defRoute.upstream_url;
+      if (State.runningProxyConfig) {
+        State.runningProxyConfig.upstream = defRoute.upstream_url;
+      }
     }
 
     // Active routes count badge
@@ -1926,7 +2059,7 @@ const App = (() => {
       idInput.value = '';
       nameInput.value = '';
       patternInput.value = '';
-      upstreamInput.value = document.getElementById('proxyConfigUpstream')?.value || 'https://openrouter.ai/api/v1';
+      upstreamInput.value = document.getElementById('proxyConfigUpstream')?.value || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
       const existingCount = (State.routesConfig?.routes?.length) || 0;
       priorityInput.value = 100 - existingCount * 10;
       if (maxConcInput) maxConcInput.value = 4;
@@ -1947,14 +2080,15 @@ const App = (() => {
     if (!State.routesConfig) {
       State.routesConfig = { default_route: {}, routes: [] };
     }
-    const defUpstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || 'https://llm.ai.e-infra.cz/v1';
+    const defUpstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
     const defMaxConc = parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10);
 
+    const prevDef = State.routesConfig.default_route || {};
     State.routesConfig.default_route = {
-      name: 'Default Upstream (e-INFRA)',
+      name: prevDef.name || 'Default Upstream',
       upstream_url: defUpstream,
       max_concurrent: defMaxConc,
-      slot_cooldown_ms: 50
+      slot_cooldown_ms: prevDef.slot_cooldown_ms ?? 50
     };
 
     if (showAlert) {
@@ -1965,7 +2099,11 @@ const App = (() => {
       const res = await TelemetryAPI.saveProxyRoutes(State.routesConfig);
       if (res.success) {
         State.routesConfig = res.config || State.routesConfig;
+        if (State.runningProxyConfig) {
+          State.runningProxyConfig.upstream = defUpstream;
+        }
         renderRoutesUI();
+        updateProxyConfigDirtyState();
         if (showAlert) {
           const syncMsg = res.proxy_synced ? ' (Hot-synced with active gateway)' : '';
           UI.showProxyAlert(`Routing rules saved successfully!${syncMsg}`, 'success', 4000);
@@ -2201,7 +2339,18 @@ const App = (() => {
         const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
         const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
         const tokenLimit = parseTokenLimitFromInput(document.getElementById('proxyConfigTokenLimit')?.value);
-        const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
+        const upstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
+
+        // Pre-save routes config to disk
+        if (State.routesConfig) {
+          if (!State.routesConfig.default_route) State.routesConfig.default_route = {};
+          State.routesConfig.default_route.upstream_url = upstream;
+          try {
+            await TelemetryAPI.saveProxyRoutes(State.routesConfig);
+          } catch (e) {
+            console.warn('Pre-save routes error:', e);
+          }
+        }
 
         startBtn.disabled = true;
         saveUpstreamToHistory(upstream);
@@ -2210,14 +2359,29 @@ const App = (() => {
           const res = await TelemetryAPI.startProxy({ port, host, upstream, token_limit: tokenLimit });
           if (res.success) {
             UI.showProxyAlert(res.message || 'Proxy started successfully.', 'success', 5000);
+            if (res.status) {
+              State.proxyStatus = res.status;
+              State.runningProxyConfig = {
+                port: res.status.port || port,
+                host: res.status.host || host,
+                token_limit: res.status.token_limit || tokenLimit,
+                upstream: res.status.upstream || upstream
+              };
+              UI.renderProxyStatus(res.status);
+              updateProxyConfigDirtyState();
+            }
           } else {
             UI.showProxyAlert(res.error || 'Failed to start proxy.', 'error', 8000);
           }
         } catch (err) {
           UI.showProxyAlert(`Start error: ${err.message}`, 'error', 8000);
         } finally {
-          await loadProxyStatus();
-          await loadProxyLogs();
+          startBtn.disabled = false;
+          if (State.activeTab === 'controlPanelTab') {
+            await loadControlPanelBundle(true);
+          } else {
+            await loadProxyStatus();
+          }
         }
       });
     }
@@ -2233,14 +2397,22 @@ const App = (() => {
           const res = await TelemetryAPI.stopProxy({ force: true });
           if (res.success) {
             UI.showProxyAlert(res.message || 'Proxy stopped successfully.', 'success', 5000);
+            if (State.proxyStatus) State.proxyStatus.running = false;
+            if (State.runningProxyConfig) State.runningProxyConfig.running = false;
+            UI.renderProxyStatus(State.proxyStatus || { running: false });
+            updateProxyConfigDirtyState();
           } else {
             UI.showProxyAlert(res.error || 'Failed to stop proxy.', 'error', 8000);
           }
         } catch (err) {
           UI.showProxyAlert(`Stop error: ${err.message}`, 'error', 8000);
         } finally {
-          await loadProxyStatus();
-          await loadProxyLogs();
+          stopBtn.disabled = false;
+          if (State.activeTab === 'controlPanelTab') {
+            await loadControlPanelBundle(false);
+          } else {
+            await loadProxyStatus();
+          }
         }
       });
     }
@@ -2252,7 +2424,18 @@ const App = (() => {
         const port = parseInt(document.getElementById('proxyConfigPort')?.value || '9090', 10);
         const host = document.getElementById('proxyConfigHost')?.value || '0.0.0.0';
         const tokenLimit = parseTokenLimitFromInput(document.getElementById('proxyConfigTokenLimit')?.value);
-        const upstream = document.getElementById('proxyConfigUpstream')?.value || 'https://llm.ai.e-infra.cz/v1';
+        const upstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
+
+        // Pre-save routes config to disk
+        if (State.routesConfig) {
+          if (!State.routesConfig.default_route) State.routesConfig.default_route = {};
+          State.routesConfig.default_route.upstream_url = upstream;
+          try {
+            await TelemetryAPI.saveProxyRoutes(State.routesConfig);
+          } catch (e) {
+            console.warn('Pre-save routes error:', e);
+          }
+        }
 
         restartBtn.disabled = true;
         saveUpstreamToHistory(upstream);
@@ -2261,14 +2444,29 @@ const App = (() => {
           const res = await TelemetryAPI.restartProxy({ port, host, upstream, token_limit: tokenLimit });
           if (res.success) {
             UI.showProxyAlert(res.message || 'Proxy restarted successfully.', 'success', 5000);
+            if (res.status) {
+              State.proxyStatus = res.status;
+              State.runningProxyConfig = {
+                port: res.status.port || port,
+                host: res.status.host || host,
+                token_limit: res.status.token_limit || tokenLimit,
+                upstream: res.status.upstream || upstream
+              };
+              UI.renderProxyStatus(res.status);
+              updateProxyConfigDirtyState();
+            }
           } else {
             UI.showProxyAlert(res.error || 'Failed to restart proxy.', 'error', 8000);
           }
         } catch (err) {
           UI.showProxyAlert(`Restart error: ${err.message}`, 'error', 8000);
         } finally {
-          await loadProxyStatus();
-          await loadProxyLogs();
+          restartBtn.disabled = false;
+          if (State.activeTab === 'controlPanelTab') {
+            await loadControlPanelBundle(true);
+          } else {
+            await loadProxyStatus();
+          }
         }
       });
     }
@@ -2314,13 +2512,10 @@ const App = (() => {
 
       if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
 
-      loadProxyStatus();
       if (State.activeTab === 'controlPanelTab') {
-        setTimeout(() => {
-          if (State.activeTab === 'controlPanelTab' && State.proxyStatus?.running) {
-            loadProxyLogs();
-          }
-        }, 300);
+        loadControlPanelBundle(false);
+      } else {
+        loadProxyStatus();
       }
     };
     document.addEventListener('visibilitychange', onTabActivated);
@@ -2485,31 +2680,18 @@ const App = (() => {
   /**
    * Start Live Proxy Gateway Status Heartbeat (Runs continuously when tab is visible)
    */
-  let _heartbeatTickCount = 0;
   function startProxyHeartbeat() {
     if (State.intervals.proxyStatus) return;
     State.intervals.proxyStatus = setInterval(() => {
       if (document.visibilityState !== 'visible' || document.hidden) return;
       if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
 
-      loadProxyStatus();
-
       if (State.activeTab === 'controlPanelTab') {
-        _heartbeatTickCount++;
-        // Stagger logs loading only when proxy is running
-        if (State.proxyStatus && State.proxyStatus.running) {
-          setTimeout(() => {
-            if (State.activeTab === 'controlPanelTab') loadProxyLogs();
-          }, 350);
-        }
-        // Poll raw logging status every other tick (~13s)
-        if (_heartbeatTickCount % 2 === 0) {
-          setTimeout(() => {
-            if (State.activeTab === 'controlPanelTab') loadRawLogStatus();
-          }, 700);
-        }
+        loadControlPanelBundle(false);
+      } else {
+        loadProxyStatus();
       }
-    }, 6500);
+    }, 7000);
   }
 
   function stopProxyHeartbeat() {

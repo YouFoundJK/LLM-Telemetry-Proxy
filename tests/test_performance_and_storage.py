@@ -163,6 +163,32 @@ class TestBulkApiEndpoint(AioHTTPTestCase):
         self.assertIn("db_fingerprint", data)
 
     @unittest_run_loop
+    async def test_control_panel_bundle_endpoint(self):
+        """Test that /api/control-panel/bundle returns proxy status, health, routes, raw_log_status and proxy_logs."""
+        resp = await self.client.request("GET", "/api/control-panel/bundle?lines=50")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertIn("proxy_status", data)
+        self.assertIn("health", data)
+        self.assertIn("routes", data)
+        self.assertIn("raw_log_status", data)
+        self.assertIn("proxy_logs", data)
+        self.assertIn("db_fingerprint", data["health"])
+
+    @unittest_run_loop
+    async def test_dashboard_bundle_endpoint(self):
+        """Test that /api/dashboard/bundle returns model mapping, costs, health, proxy status, and routes."""
+        resp = await self.client.request("GET", "/api/dashboard/bundle")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertIn("model_mapping", data)
+        self.assertIn("model_costs", data)
+        self.assertIn("health", data)
+        self.assertIn("proxy_status", data)
+        self.assertIn("routes", data)
+        self.assertIn("db_fingerprint", data["health"])
+
+    @unittest_run_loop
     async def test_favicon_endpoint(self):
         """Test that /favicon.ico returns 200 SVG to prevent 404s in browser."""
         resp = await self.client.request("GET", "/favicon.ico")

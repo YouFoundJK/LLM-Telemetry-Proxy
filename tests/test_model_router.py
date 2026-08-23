@@ -83,29 +83,6 @@ class TestModelRouterUnit(unittest.TestCase):
         self.assertTrue(res3.is_default)
         self.assertEqual(res3.upstream_url, "https://llm.ai.e-infra.cz/v1")
 
-    def test_apply_auth_and_headers_passthrough(self):
-        """Client headers and Authorization must flow through completely untouched."""
-        self.router.update_from_dict({
-            "default_route": {
-                "upstream_url": "https://llm.ai.e-infra.cz/v1"
-            },
-            "routes": [
-                {
-                    "id": "r1",
-                    "name": "Custom",
-                    "pattern": "custom-.*",
-                    "upstream_url": "https://custom.ai/v1"
-                }
-            ]
-        })
-
-        res = self.router.resolve("custom-gpt")
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer client-app-secret-token-123"}
-        updated = self.router.apply_auth_and_headers(headers, res)
-
-        self.assertEqual(updated["Authorization"], "Bearer client-app-secret-token-123")
-        self.assertEqual(updated["Content-Type"], "application/json")
-
     def test_persistence_save_and_load(self):
         """Verify configuration round-trip from JSON file."""
         self.router.update_from_dict({
@@ -396,6 +373,57 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
         self.assertEqual(summary["default"]["stats"]["max_concurrent"], 4)
         self.assertEqual(len(summary["routes"]), 1)
         self.assertEqual(summary["routes"][0]["stats"]["max_concurrent"], 10)
+
+    def test_default_route_and_custom_routes_persistence(self):
+        """Verify that default_route and custom routes both save and reload identically from disk."""
+        config_data = {
+            "default_route": {
+                "name": "OpenRouter Default",
+                "upstream_url": "https://openrouter.ai/api/v1",
+                "max_concurrent": 3,
+                "slot_cooldown_ms": 50
+            },
+            "routes": [
+                {
+                    "id": "route_w2floc6",
+                    "name": "OpenRouter Stealth",
+                    "pattern": "stealth/ox-alpha",
+                    "upstream_url": "https://openrouter.ai/api/v1",
+                    "enabled": True,
+                    "priority": 100,
+                    "max_concurrent": 6,
+                    "slot_cooldown_ms": 50
+                }
+            ]
+        }
+        with TemporaryDirectory() as tmp_d:
+            cfg_file = Path(tmp_d) / "model_routes.json"
+            router1 = ModelRouter(config_path=cfg_file)
+            router1.update_from_dict(config_data)
+            saved = router1.save()
+            self.assertTrue(saved)
+
+            # Reload into a completely new router instance
+            router2 = ModelRouter(config_path=cfg_file)
+            self.assertEqual(router2.default_upstream_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(router2.default_name, "OpenRouter Default")
+            self.assertEqual(router2.default_max_concurrent, 3)
+            self.assertEqual(len(router2.rules), 1)
+            self.assertEqual(router2.rules[0].name, "OpenRouter Stealth")
+            self.assertEqual(router2.rules[0].upstream_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(router2.rules[0].max_concurrent, 6)
+
+            # Resolve unknown model -> must go to OpenRouter Default
+            res_def = router2.resolve("some-general-model")
+            self.assertTrue(res_def.is_default)
+            self.assertEqual(res_def.upstream_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(res_def.max_concurrent, 3)
+
+            # Resolve stealth model -> must go to OpenRouter Stealth
+            res_stealth = router2.resolve("stealth/ox-alpha")
+            self.assertFalse(res_stealth.is_default)
+            self.assertEqual(res_stealth.upstream_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(res_stealth.max_concurrent, 6)
 
 
 if __name__ == "__main__":

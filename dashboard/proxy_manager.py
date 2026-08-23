@@ -269,11 +269,26 @@ def get_persisted_token_budget() -> Dict[str, Any]:
     }
 
 
+def get_persisted_default_upstream() -> str:
+    routes_file = get_data_dir() / "model_routes.json"
+    if routes_file.exists():
+        try:
+            with open(routes_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                def_route = data.get("default_route", {})
+                url = def_route.get("upstream_url")
+                if url and isinstance(url, str) and url.strip():
+                    return url.strip()
+        except Exception:
+            pass
+    return DEFAULT_UPSTREAM
+
+
 class ProxyManager:
     """Manages the lifecycle and health of the LLM Telemetry Proxy."""
 
     _last_known_port = DEFAULT_PROXY_PORT
-    _last_known_upstream = DEFAULT_UPSTREAM
+    _last_known_upstream = None
     _last_known_token_limit = DEFAULT_TOKEN_LIMIT
 
     @classmethod
@@ -340,12 +355,16 @@ class ProxyManager:
         token_budget = (health_data.get("token_budget") if health_data and "token_budget" in health_data else fallback_tb)
         token_limit = token_budget.get("daily_limit", cls._last_known_token_limit)
 
+        persisted_upstream = get_persisted_default_upstream()
+        active_upstream = (health_data.get("upstream") if health_data and health_data.get("upstream") else (cls._last_known_upstream or persisted_upstream))
+        cls._last_known_upstream = active_upstream
+
         return {
             "running": running,
             "pid": pid,
             "port": active_port,
             "host": DEFAULT_HOST,
-            "upstream": (health_data.get("upstream") if health_data else cls._last_known_upstream),
+            "upstream": active_upstream,
             "token_limit": token_limit,
             "health_ok": health_ok,
             "health": health_data,
@@ -359,14 +378,20 @@ class ProxyManager:
         cls,
         port: int = DEFAULT_PROXY_PORT,
         host: str = DEFAULT_HOST,
-        upstream: str = DEFAULT_UPSTREAM,
+        upstream: Optional[str] = None,
         token_limit: int = DEFAULT_TOKEN_LIMIT,
         db_path: Optional[Path] = None,
         max_concurrent: Optional[int] = None,
         slot_cooldown_ms: Optional[int] = None,
         retry_429_max: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Start the proxy server as a background process."""
+        if not upstream or upstream == DEFAULT_UPSTREAM:
+            persisted = get_persisted_default_upstream()
+            if persisted:
+                upstream = persisted
+        if not upstream:
+            upstream = DEFAULT_UPSTREAM
+
         # 1. Check if already running
         current_pid = cls.read_pid_file()
         if current_pid:
@@ -510,7 +535,7 @@ class ProxyManager:
         cls,
         port: int = DEFAULT_PROXY_PORT,
         host: str = DEFAULT_HOST,
-        upstream: str = DEFAULT_UPSTREAM,
+        upstream: Optional[str] = None,
         token_limit: int = DEFAULT_TOKEN_LIMIT,
         db_path: Optional[Path] = None,
         max_concurrent: Optional[int] = None,
