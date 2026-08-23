@@ -5,6 +5,17 @@
 
 const UI = (() => {
   
+  // HTML sanitization helper
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
   // Formatters
   function formatNum(n) {
     if (n === null || n === undefined) return '—';
@@ -2012,8 +2023,11 @@ const UI = (() => {
     showProxyAlert,
     renderRawLogStatus,
     showRawLogAlert,
-    getModelClass
+    getModelClass,
+    escapeHtml
   };
 })();
 
-
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = UI;
+}

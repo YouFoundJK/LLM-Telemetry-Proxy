@@ -34,9 +34,18 @@ const App = (() => {
     // Proxy Gateway State
     proxyStatus: null,
     runningProxyConfig: null,
-    isProxyStatusLoading: false,
     healthData: null,
     routesConfig: null,
+    
+    // In-Flight Loading Locks & Concurrency Guards
+    isProxyStatusLoading: false,
+    isProxyLogsLoading: false,
+    isRawLogStatusLoading: false,
+    isHealthLoading: false,
+    isCrossCheckLoading: false,
+    isLiveTailLoading: false,
+    isServerStatusLoading: false,
+    isRoutesLoading: false,
     
     // Dropdown Instance
     modelDropdownInstance: null,
@@ -663,12 +672,20 @@ const App = (() => {
     }
 
     if (tabId === 'controlPanelTab') {
-      loadHealth();
       loadProxyStatus();
       loadProxyRoutes();
-      loadProxyLogs();
-      loadRawLogStatus();
-      loadCrossCheck();
+      setTimeout(() => {
+        if (State.activeTab === 'controlPanelTab') {
+          loadHealth();
+          loadProxyLogs();
+        }
+      }, 200);
+      setTimeout(() => {
+        if (State.activeTab === 'controlPanelTab') {
+          loadRawLogStatus();
+          loadCrossCheck();
+        }
+      }, 450);
     }
   }
 
@@ -922,16 +939,17 @@ const App = (() => {
 
   async function performInitialLoad() {
     try {
-      await loadModelMapping();
       await loadCosts();
       await refresh();
-      await loadProxyStatus();
       // Non-critical background status staggered cleanly to avoid reverse proxy micro-burst 429
+      setTimeout(() => {
+        loadProxyStatus();
+      }, 150);
       setTimeout(() => {
         loadHealth();
         loadRawLogStatus();
         if (State.eInfraEnabled) loadServerStatus();
-      }, 200);
+      }, 400);
     } catch (e) {
       console.warn('Initial load sequence finished with warnings:', e);
     }
@@ -1324,15 +1342,20 @@ const App = (() => {
    * Live tail sync poller (runs periodically when live updates are enabled)
    */
   async function syncLiveTail() {
+    if (document.hidden) return;
     if (!State.liveUpdatesEnabled) return;
-    if (State.eInfraEnabled) {
-      loadServerStatus();
-    }
-    if (typeof TelemetryStore === 'undefined') {
-      await refresh(false);
-      return;
-    }
+    if (State.isLiveTailLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+    State.isLiveTailLoading = true;
+
     try {
+      if (State.eInfraEnabled) {
+        loadServerStatus();
+      }
+      if (typeof TelemetryStore === 'undefined') {
+        await refresh(false);
+        return;
+      }
       const watermarks = await TelemetryStore.getWatermarks();
       if (watermarks.count === 0) {
         // If cache is empty, trigger standard refresh
@@ -1341,7 +1364,7 @@ const App = (() => {
       }
 
       if (watermarks.maxId > 0) {
-        const tailData = await TelemetryAPI.queryBulk({ since_id: watermarks.maxId, limit: 50000 });
+        const tailData = await TelemetryAPI.queryBulk({ since_id: watermarks.maxId, limit: 50000 }, { isBackground: true });
         if (tailData.db_fingerprint) {
           await TelemetryStore.setMeta('db_fingerprint', tailData.db_fingerprint);
         }
@@ -1371,7 +1394,11 @@ const App = (() => {
         }
       }
     } catch (e) {
-      console.warn('[TelemetryStore] Live tail sync deferred:', e);
+      if (!e.isThrottled) {
+        console.warn('[TelemetryStore] Live tail sync deferred:', e);
+      }
+    } finally {
+      State.isLiveTailLoading = false;
     }
   }
 
@@ -1379,6 +1406,10 @@ const App = (() => {
    * Live Server Status Node fetcher
    */
   async function loadServerStatus() {
+    if (document.hidden) return;
+    if (State.isServerStatusLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
     if (!State.eInfraEnabled) {
       const el = document.getElementById('serverStatus');
       if (el) {
@@ -1391,6 +1422,7 @@ const App = (() => {
       return;
     }
     
+    State.isServerStatusLoading = true;
     try {
       const data = await TelemetryAPI.getServerStatus();
       State.allLiveModelsData = data.models || [];
@@ -1400,9 +1432,13 @@ const App = (() => {
       
       UI.renderServerStatus(data, State.liveNodesConfig);
     } catch (e) {
-      console.error('Failed to load server status node data', e);
-      const el = document.getElementById('serverStatus');
-      if (el) el.innerHTML = `<div class="tag tag-error" style="padding:10px;">Failed to query server status node: ${e.message}</div>`;
+      if (!e.isThrottled) {
+        console.error('Failed to load server status node data', e);
+        const el = document.getElementById('serverStatus');
+        if (el) el.innerHTML = `<div class="tag tag-error" style="padding:10px;">Failed to query server status node: ${e.message}</div>`;
+      }
+    } finally {
+      State.isServerStatusLoading = false;
     }
   }
 
@@ -1410,6 +1446,11 @@ const App = (() => {
    * Proxy cross-check database comparisons fetcher
    */
   async function loadCrossCheck() {
+    if (document.hidden) return;
+    if (State.isCrossCheckLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+    State.isCrossCheckLoading = true;
     try {
       const dateRange = getSelectedDateRange();
       const fromVal = dateRange.from ? new Date(dateRange.from).toISOString() : '';
@@ -1424,10 +1465,14 @@ const App = (() => {
         limit: 1
       };
       
-      const data = await TelemetryAPI.query(filters);
+      const data = await TelemetryAPI.query(filters, { isBackground: true });
       UI.renderCrossCheck(data);
     } catch (e) {
-      console.error('Failed to load cross check statistics', e);
+      if (!e.isThrottled) {
+        console.error('Failed to load cross check statistics', e);
+      }
+    } finally {
+      State.isCrossCheckLoading = false;
     }
   }
 
@@ -1435,6 +1480,11 @@ const App = (() => {
    * Database details and status
    */
   async function loadHealth() {
+    if (document.hidden) return;
+    if (State.isHealthLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+    State.isHealthLoading = true;
     try {
       const data = await TelemetryAPI.getHealth();
       State.healthData = data;
@@ -1461,7 +1511,11 @@ const App = (() => {
       }
       updateCacheStatsUI();
     } catch (e) {
-      console.error('Database health check failed', e);
+      if (!e.isThrottled) {
+        console.error('Database health check failed', e);
+      }
+    } finally {
+      State.isHealthLoading = false;
     }
   }
 
@@ -1627,6 +1681,7 @@ const App = (() => {
     // If the browser tab or window is hidden / not visible, completely skip network requests
     if (document.hidden) return;
     if (State.isProxyStatusLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
     State.isProxyStatusLoading = true;
 
     try {
@@ -1667,7 +1722,9 @@ const App = (() => {
       UI.renderProxyStatus(data);
       updateProxyConfigDirtyState();
     } catch (e) {
-      console.warn('Failed to load proxy status', e);
+      if (!e.isThrottled) {
+        console.warn('Failed to load proxy status', e);
+      }
     } finally {
       State.isProxyStatusLoading = false;
     }
@@ -1678,6 +1735,10 @@ const App = (() => {
    */
   async function loadProxyLogs() {
     if (document.hidden) return;
+    if (State.isProxyLogsLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+    State.isProxyLogsLoading = true;
     try {
       const linesSelect = document.getElementById('proxyLogLinesSelect');
       const lines = linesSelect ? parseInt(linesSelect.value, 10) : 200;
@@ -1686,12 +1747,21 @@ const App = (() => {
       const data = await TelemetryAPI.getProxyLogs(lines);
       UI.renderProxyLogs(data, autoScroll);
     } catch (e) {
-      console.warn('Failed to load proxy logs', e);
+      if (!e.isThrottled) {
+        console.warn('Failed to load proxy logs', e);
+      }
+    } finally {
+      State.isProxyLogsLoading = false;
     }
   }
 
   // ── Dynamic Model Router & Upstream Key Manager ─────────────────────────
   async function loadProxyRoutes() {
+    if (document.hidden) return;
+    if (State.isRoutesLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+    State.isRoutesLoading = true;
     try {
       const config = await TelemetryAPI.getProxyRoutes();
       if (config && typeof config === 'object') {
@@ -1699,7 +1769,11 @@ const App = (() => {
         renderRoutesUI();
       }
     } catch (e) {
-      console.warn('Failed to load proxy routes:', e);
+      if (!e.isThrottled) {
+        console.warn('Failed to load proxy routes:', e);
+      }
+    } finally {
+      State.isRoutesLoading = false;
     }
   }
 
@@ -2230,14 +2304,23 @@ const App = (() => {
       });
     }
 
-    // Tab/window activation listeners: immediately refresh proxy status without waiting for the 3s cycle
+    // Tab/window activation listeners: throttled refresh on focus with 10s cooldown
+    let _lastTabActivation = 0;
     const onTabActivated = () => {
-      if (!document.hidden && document.visibilityState === 'visible') {
-        loadProxyStatus();
-        if (State.activeTab === 'controlPanelTab') {
-          loadProxyLogs();
-          loadRawLogStatus();
-        }
+      if (document.hidden || document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - _lastTabActivation < 10000) return; // 10s minimum throttle
+      _lastTabActivation = now;
+
+      if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+      loadProxyStatus();
+      if (State.activeTab === 'controlPanelTab') {
+        setTimeout(() => {
+          if (State.activeTab === 'controlPanelTab' && State.proxyStatus?.running) {
+            loadProxyLogs();
+          }
+        }, 300);
       }
     };
     document.addEventListener('visibilitychange', onTabActivated);
@@ -2383,28 +2466,50 @@ const App = (() => {
    */
   async function loadRawLogStatus() {
     if (document.hidden) return;
+    if (State.isRawLogStatusLoading) return;
+    if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+    State.isRawLogStatusLoading = true;
     try {
       const data = await TelemetryAPI.getRawLogStatus();
       UI.renderRawLogStatus(data);
     } catch (e) {
-      console.warn('Failed to load raw log status', e);
+      if (!e.isThrottled) {
+        console.warn('Failed to load raw log status', e);
+      }
+    } finally {
+      State.isRawLogStatusLoading = false;
     }
   }
 
   /**
    * Start Live Proxy Gateway Status Heartbeat (Runs continuously when tab is visible)
    */
+  let _heartbeatTickCount = 0;
   function startProxyHeartbeat() {
     if (State.intervals.proxyStatus) return;
     State.intervals.proxyStatus = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        loadProxyStatus();
-        if (State.activeTab === 'controlPanelTab') {
-          loadProxyLogs();
-          loadRawLogStatus();
+      if (document.visibilityState !== 'visible' || document.hidden) return;
+      if (TelemetryAPI.isRateLimited && TelemetryAPI.isRateLimited()) return;
+
+      loadProxyStatus();
+
+      if (State.activeTab === 'controlPanelTab') {
+        _heartbeatTickCount++;
+        // Stagger logs loading only when proxy is running
+        if (State.proxyStatus && State.proxyStatus.running) {
+          setTimeout(() => {
+            if (State.activeTab === 'controlPanelTab') loadProxyLogs();
+          }, 350);
+        }
+        // Poll raw logging status every other tick (~13s)
+        if (_heartbeatTickCount % 2 === 0) {
+          setTimeout(() => {
+            if (State.activeTab === 'controlPanelTab') loadRawLogStatus();
+          }, 700);
         }
       }
-    }, 4000);
+    }, 6500);
   }
 
   function stopProxyHeartbeat() {
