@@ -26,12 +26,16 @@ DEFAULT_RETRY_POLICY: Dict[str, Any] = {
     "enabled": True,
     "max_retries": 3,
     "mode": "immediate",  # "immediate" (zero-delay) or "exponential" (backoff)
-    "retry_on_status": [429, 503, 529],
+    "retry_on_status": [429, 502, 503, 504, 529],
     "retry_on_body_patterns": [
         "rate limit", "rate_limit", "rate_limit_exceeded",
         "try again", "overloaded", "capacity", "too many requests",
-        "resource exhausted", "quota exceeded", "temporarily unavailable"
+        "resource exhausted", "quota exceeded", "temporarily unavailable",
+        "no response was returned", "no response returned", "sorry, no response",
+        "server disconnected", "connection closed", "empty response"
     ],
+    "retry_on_empty": True,
+    "retry_on_disconnect": True,
     "max_retry_after_seconds": 5.0,
 }
 
@@ -51,14 +55,16 @@ def normalize_retry_policy(policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     merged["enabled"] = bool(merged.get("enabled", True)) and (merged["max_retries"] > 0)
     merged["mode"] = "exponential" if str(merged.get("mode", "")).lower() == "exponential" else "immediate"
+    merged["retry_on_empty"] = bool(merged.get("retry_on_empty", True))
+    merged["retry_on_disconnect"] = bool(merged.get("retry_on_disconnect", True))
 
     if not isinstance(merged.get("retry_on_status"), (list, set, tuple)):
-        merged["retry_on_status"] = [429, 503, 529]
+        merged["retry_on_status"] = [429, 502, 503, 504, 529]
     else:
         try:
             merged["retry_on_status"] = [int(s) for s in merged["retry_on_status"]]
         except (ValueError, TypeError):
-            merged["retry_on_status"] = [429, 503, 529]
+            merged["retry_on_status"] = [429, 502, 503, 504, 529]
 
     if not isinstance(merged.get("retry_on_body_patterns"), list):
         merged["retry_on_body_patterns"] = DEFAULT_RETRY_POLICY["retry_on_body_patterns"]

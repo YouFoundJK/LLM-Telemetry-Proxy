@@ -268,6 +268,34 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
         self.assertEqual(data["choices"][0]["message"]["content"], "Body limit absorbed!")
         self.assertEqual(self.body_rate_limit_calls, 2)
 
+    async def test_upstream_empty_body_absorbed_and_replayed(self):
+        """When upstream returns an empty body or empty choices, proxy immediately replays and returns valid response."""
+        payload = {
+            "model": "body-limit/empty-first-attempt",
+            "messages": [{"role": "user", "content": "Hello empty body test"}]
+        }
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.headers.get("X-Proxy-Retries-Attempted"), "1")
+        self.assertEqual(resp.headers.get("X-Proxy-Rate-Limit-Absorbed"), "1")
+        data = await resp.json()
+        self.assertIn("Body limit absorbed!", data["choices"][0]["message"]["content"])
+
+    async def test_upstream_empty_streaming_sse_absorbed_and_replayed(self):
+        """When upstream sends an empty SSE stream (0 tokens before [DONE]), proxy intercepts before client handshake and replays."""
+        payload = {
+            "model": "open-free/empty-stream-test",
+            "messages": [{"role": "user", "content": "Test stream"}],
+            "stream": True
+        }
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.headers.get("X-Proxy-Retries-Attempted"), "1")
+        self.assertEqual(resp.headers.get("X-Proxy-Rate-Limit-Absorbed"), "1")
+        content = await resp.text()
+        self.assertIn("Streamed", content)
+        self.assertIn("successfully!", content)
+
     async def test_institutional_provider_strictly_zero_retries(self):
         """For institutional providers with max_retries=0 / enabled=False, exactly 1 attempt must be made."""
         payload = {

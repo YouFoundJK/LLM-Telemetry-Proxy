@@ -238,8 +238,9 @@ def evaluate_retry_condition(
     if attempt >= max_retries or max_retries <= 0:
         return False, 0.0, None
 
-    retry_on_status = set(retry_policy.get("retry_on_status", [429, 503, 529]))
+    retry_on_status = set(retry_policy.get("retry_on_status", [429, 502, 503, 504, 529]))
     retry_patterns = [p.lower() for p in retry_policy.get("retry_on_body_patterns", [])]
+    retry_on_empty = bool(retry_policy.get("retry_on_empty", True))
     max_retry_after = float(retry_policy.get("max_retry_after_seconds", 5.0))
     mode = str(retry_policy.get("mode", "immediate")).lower()
 
@@ -250,13 +251,52 @@ def evaluate_retry_condition(
         is_retryable = True
         reason = f"HTTP {status_code}"
 
+    # Check for empty response body (0 bytes / whitespace)
+    if not is_retryable and retry_on_empty:
+        if body_text_or_json is None:
+            if status_code and status_code >= 400:
+                is_retryable = True
+                reason = f"HTTP {status_code} with no body"
+        elif isinstance(body_text_or_json, (bytes, str)) and not body_text_or_json.strip():
+            is_retryable = True
+            reason = "Empty response returned from upstream (0 bytes)"
+
+    # Check body content, error objects, and choices
     if not is_retryable and body_text_or_json:
         body_str = ""
         if isinstance(body_text_or_json, dict):
             err_val = body_text_or_json.get("error", "")
             detail_val = body_text_or_json.get("detail", "")
             msg_val = body_text_or_json.get("message", "")
-            body_str = f"{err_val} {detail_val} {msg_val}".lower()
+            choices_val = ""
+            choices = body_text_or_json.get("choices")
+            if isinstance(choices, list):
+                if len(choices) == 0 and retry_on_empty:
+                    is_retryable = True
+                    reason = "Empty choices list returned from upstream"
+                elif len(choices) > 0 and isinstance(choices[0], dict):
+                    msg = choices[0].get("message")
+                    delta = choices[0].get("delta")
+                    txt = choices[0].get("text")
+                    c_text = None
+                    tc_val = None
+                    if isinstance(msg, dict):
+                        c_text = msg.get("content")
+                        tc_val = msg.get("tool_calls")
+                    elif isinstance(delta, dict):
+                        c_text = delta.get("content")
+                        tc_val = delta.get("tool_calls")
+                    elif isinstance(txt, str):
+                        c_text = txt
+                    
+                    if c_text is not None:
+                        choices_val = str(c_text)
+                    
+                    if retry_on_empty and (c_text is None or (isinstance(c_text, str) and not c_text.strip())) and not tc_val:
+                        is_retryable = True
+                        reason = "Empty content/no response returned in upstream choice"
+
+            body_str = f"{err_val} {detail_val} {msg_val} {choices_val}".lower()
         elif isinstance(body_text_or_json, str):
             body_str = body_text_or_json.lower()
         elif isinstance(body_text_or_json, bytes):
@@ -265,11 +305,12 @@ def evaluate_retry_condition(
             except Exception:
                 pass
 
-        for pat in retry_patterns:
-            if pat in body_str:
-                is_retryable = True
-                reason = f"Body pattern match: '{pat}'"
-                break
+        if not is_retryable:
+            for pat in retry_patterns:
+                if pat in body_str:
+                    is_retryable = True
+                    reason = f"Body pattern match: '{pat}'"
+                    break
 
     if not is_retryable:
         return False, 0.0, None
@@ -1441,7 +1482,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     for line in text.split("\n"):
                                         if line.startswith("data: ") and line.strip() != "data: [DONE]":
                                             chunk_data = json.loads(line[6:])
-                                            if isinstance(chunk_data, dict) and chunk_data.get("error"):
+                                            if isinstance(chunk_data, dict):
                                                 s_needed, s_delay, s_reason = evaluate_retry_condition(
                                                     status_code=None,
                                                     headers=upstream_resp.headers,
@@ -1458,6 +1499,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     pass
                                 if stream_retry_needed or buffered_chunks:
                                     break
+
+                            # If upstream immediately closed stream with 0 chunks or only [DONE] without content
+                            if not stream_retry_needed and retry_policy.get("retry_on_empty", True):
+                                if not buffered_chunks:
+                                    stream_retry_needed = True
+                                    stream_delay = 0.0
+                                    stream_reason = "Upstream closed SSE stream with 0 chunks"
+                                else:
+                                    all_done = True
+                                    for b_chk in buffered_chunks:
+                                        t_chk = b_chk.decode("utf-8", errors="ignore").strip()
+                                        if t_chk and t_chk != "data: [DONE]":
+                                            all_done = False
+                                            break
+                                    if all_done:
+                                        stream_retry_needed = True
+                                        stream_delay = 0.0
+                                        stream_reason = "Upstream sent empty stream (0 tokens before [DONE])"
 
                             if stream_retry_needed and attempt < max_retries:
                                 target_limiter.record_retry_attempt()
@@ -1797,6 +1856,20 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         status=upstream_resp.status,
                                         body=resp_body,
                                     )
+                except (aiohttp.ClientError, ConnectionResetError, ConnectionRefusedError, BrokenPipeError,
+                        asyncio.IncompleteReadError, asyncio.TimeoutError) as net_err:
+                    if attempt < max_retries and retry_policy.get("retry_on_disconnect", True):
+                        target_limiter.record_retry_attempt()
+                        retry_needed = True
+                        retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (0.5 * (2 ** attempt) + random.uniform(0.05, 0.2))
+                        retry_reason = f"Upstream disconnect/no response: {type(net_err).__name__} ({net_err})"
+                        print(
+                            f"[telemetry] Upstream connection dropped on {path} ({retry_reason}, attempt {attempt+1}/{max_retries+1}). "
+                            f"Re-dispatching with delay={retry_delay:.2f}s...",
+                            file=sys.stderr,
+                        )
+                    else:
+                        raise
                 finally:
                     if owns_session and not req_session.closed:
                         await req_session.close()
@@ -2057,6 +2130,20 @@ async def _simple_forward(request, path, method):
                                     status=upstream_resp.status,
                                     body=body,
                                 )
+                except (aiohttp.ClientError, ConnectionResetError, ConnectionRefusedError, BrokenPipeError,
+                        asyncio.IncompleteReadError, asyncio.TimeoutError) as net_err:
+                    if attempt < max_retries and retry_policy.get("retry_on_disconnect", True):
+                        target_limiter.record_retry_attempt()
+                        retry_needed = True
+                        retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (0.5 * (2 ** attempt) + random.uniform(0.05, 0.2))
+                        retry_reason = f"Upstream connection failure: {type(net_err).__name__}"
+                        print(
+                            f"[telemetry] Upstream connection dropped in _simple_forward on {path} ({retry_reason}, attempt {attempt+1}/{max_retries+1}). "
+                            f"Re-dispatching with delay={retry_delay:.2f}s...",
+                            file=sys.stderr,
+                        )
+                    else:
+                        raise
                 finally:
                     if owns_session and not req_session.closed:
                         await req_session.close()
