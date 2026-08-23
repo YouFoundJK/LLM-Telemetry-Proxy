@@ -152,10 +152,24 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
                 "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
             })
 
-        # 2. Open Free Provider (Streaming SSE rate-limit chunk then 200 stream)
+        # 2. Open Free Provider (Streaming SSE)
         if model.startswith("open-free/") and stream:
             self.open_stream_calls += 1
-            if self.open_stream_calls == 1:
+            if model == "open-free/empty-stream-test" and self.open_stream_calls == 1:
+                # Upstream sends HTTP 200 SSE with empty role/null chunks and immediate [DONE]
+                response = web.StreamResponse(
+                    status=200,
+                    headers={"Content-Type": "text/event-stream"}
+                )
+                await response.prepare(request)
+                c_role = json.dumps({"choices": [{"delta": {"role": "assistant"}}]})
+                c_null = json.dumps({"choices": [{"delta": {"content": None}}]})
+                await response.write(f"data: {c_role}\n\n".encode("utf-8"))
+                await response.write(f"data: {c_null}\n\n".encode("utf-8"))
+                await response.write(b"data: [DONE]\n\n")
+                await response.write_eof()
+                return response
+            elif self.open_stream_calls == 1 and model != "open-free/empty-stream-test":
                 # Upstream sends HTTP 200 SSE, but first data chunk is an error!
                 response = web.StreamResponse(
                     status=200,

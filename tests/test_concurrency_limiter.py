@@ -97,8 +97,8 @@ class TestUpstreamConcurrencyLimiterUnit(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(t_job1, t_job2)
 
         gap_ms = (slot2_acquired_at - slot1_released_at) * 1000
-        # The cooldown is 60ms; allow slight scheduler tolerance (e.g. >= 48ms)
-        self.assertGreaterEqual(gap_ms, 48.0, f"Cooldown gap was {gap_ms:.2f}ms, expected >= 50ms")
+        # The cooldown is 60ms; allow Windows timer scheduler tolerance (e.g. >= 40ms)
+        self.assertGreaterEqual(gap_ms, 40.0, f"Cooldown gap was {gap_ms:.2f}ms, expected >= 40ms")
 
     async def test_cancellation_safety(self):
         """Verify that cancelling waiting or active requests does not leak slots or stall the limiter."""

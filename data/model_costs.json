@@ -5,6 +5,12 @@
       "input_cost_per_million": 0.14,
       "output_cost_per_million": 0.28,
       "provider_source": "DeepSeek API (Official)"
+    },
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 0.44,
+      "output_cost_per_million": 1.32,
+      "provider_source": "Deepseek (LiteLLM)"
     }
   ],
   "deepseek-v4-flash-thinking": [
@@ -27,6 +33,12 @@
       "input_cost_per_million": 0.435,
       "output_cost_per_million": 0.87,
       "provider_source": "DeepSeek API (Official)"
+    },
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 1.32,
+      "output_cost_per_million": 3.9600000000000004,
+      "provider_source": "Openrouter (LiteLLM)"
     }
   ],
   "deepseek-v4-pro-thinking": [
@@ -35,6 +47,12 @@
       "input_cost_per_million": 0.435,
       "output_cost_per_million": 0.87,
       "provider_source": "DeepSeek API (Official)"
+    },
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 1.32,
+      "output_cost_per_million": 3.9600000000000004,
+      "provider_source": "Openrouter (LiteLLM)"
     }
   ],
   "glm-5.2": [
@@ -57,6 +75,12 @@
       "input_cost_per_million": 0.95,
       "output_cost_per_million": 4.0,
       "provider_source": "Moonshot AI"
+    },
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 3.0,
+      "output_cost_per_million": 15.0,
+      "provider_source": "Moonshot (LiteLLM)"
     }
   ],
   "gpt-oss-120b": [
@@ -141,6 +165,84 @@
       "input_cost_per_million": 0.14,
       "output_cost_per_million": 0.56,
       "provider_source": "Tensormesh (LiteLLM)"
+    }
+  ],
+  "command-a": [
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 2.5,
+      "output_cost_per_million": 10.0,
+      "provider_source": "Vercel_ai_gateway (LiteLLM)"
+    }
+  ],
+  "kimi-k2.6": [
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 0.95,
+      "output_cost_per_million": 4.0,
+      "provider_source": "Azure_ai (LiteLLM)"
+    }
+  ],
+  "glm-5.3": [
+    {
+      "effective_date": "2026-09-01",
+      "input_cost_per_million": 1.4,
+      "output_cost_per_million": 4.4,
+      "provider_source": "Z.ai (LiteLLM)"
+    }
+  ],
+  "glm-5.3-flash": [
+    {
+      "effective_date": "2026-08-26",
+      "input_cost_per_million": 0.15,
+      "output_cost_per_million": 0.5,
+      "provider_source": "Z.ai GLM-5.3-Flash reveal (LiteLLM)"
+    }
+  ],
+  "stealth/ox-alpha": [
+    {
+      "effective_date": "2026-08-23",
+      "input_cost_per_million": 0.15,
+      "output_cost_per_million": 0.5,
+      "provider_source": "GLM-5.3-Flash stealth window (LiteLLM zai/glm-5.3-flash)"
+    }
+  ],
+  "qwen3.8-flash-next": [
+    {
+      "effective_date": "2026-08-28",
+      "input_cost_per_million": 0.15,
+      "output_cost_per_million": 0.47,
+      "provider_source": "Qwen (LiteLLM openrouter/qwen/qwen3.8-flash)"
+    }
+  ],
+  "qwen3.8-27b": [
+    {
+      "effective_date": "2026-08-22",
+      "input_cost_per_million": 0.42,
+      "output_cost_per_million": 3.0,
+      "provider_source": "Qwen (LiteLLM openrouter/qwen/qwen3.8-27b)"
+    }
+  ],
+  "mistral-medium-3.5": [
+    {
+      "effective_date": "2026-08-11",
+      "input_cost_per_million": 1.5,
+      "output_cost_per_million": 7.5,
+      "provider_source": "Mistral AI (LiteLLM)"
+    }
+  ],
+  "deepseek-thinking": [
+    {
+      "effective_date": "2026-07-01",
+      "input_cost_per_million": 0.14,
+      "output_cost_per_million": 0.28,
+      "provider_source": "DeepSeek API (Official)"
+    },
+    {
+      "effective_date": "2026-08-13",
+      "input_cost_per_million": 0.25,
+      "output_cost_per_million": 1.75,
+      "provider_source": "Libertai (LiteLLM)"
     }
   ]
 }

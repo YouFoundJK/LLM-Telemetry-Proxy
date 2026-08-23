@@ -86,6 +86,12 @@ RETRY_429_MAX = int(os.environ.get("RETRY_429_MAX", 3))
 UPSTREAM_SESSION_KEY = web.AppKey("upstream_session", aiohttp.ClientSession) if hasattr(web, "AppKey") else "upstream_session"
 
 
+def _tlog(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, file=sys.stderr, flush=True)
+
+
 class UpstreamConcurrencyLimiter:
     """
     Asynchronous concurrency limiter with strict FIFO queuing, slot cooldown gaps,
@@ -280,19 +286,23 @@ def evaluate_retry_condition(
                     txt = choices[0].get("text")
                     c_text = None
                     tc_val = None
+                    r_text = None
                     if isinstance(msg, dict):
                         c_text = msg.get("content")
                         tc_val = msg.get("tool_calls")
+                        r_text = msg.get("reasoning_content")
                     elif isinstance(delta, dict):
                         c_text = delta.get("content")
                         tc_val = delta.get("tool_calls")
+                        r_text = delta.get("reasoning_content")
                     elif isinstance(txt, str):
                         c_text = txt
                     
                     if c_text is not None:
                         choices_val = str(c_text)
                     
-                    if retry_on_empty and (c_text is None or (isinstance(c_text, str) and not c_text.strip())) and not tc_val:
+                    has_content = bool(c_text and str(c_text).strip()) or bool(r_text and str(r_text).strip()) or bool(tc_val)
+                    if retry_on_empty and not has_content:
                         is_retryable = True
                         reason = "Empty content/no response returned in upstream choice"
 
@@ -1423,6 +1433,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
         max_retries = int(retry_policy.get("max_retries", 0)) if retry_policy.get("enabled", True) else 0
 
+        _tlog(f"[telemetry] [REQ START] req_id={req_id} model={model} path={path} is_stream={is_stream_req} max_retries={max_retries} route='{route_name}' upstream='{upstream_url}'")
+
         attempt = 0
         while attempt <= max_retries:
             retry_needed = False
@@ -1459,10 +1471,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
                         if sniff_needed and attempt < max_retries:
                             target_limiter.record_retry_attempt()
-                            print(
-                                f"[telemetry] Upstream rate limit on {path} ({sniff_reason}, attempt {attempt+1}/{max_retries+1}). "
-                                f"Re-dispatching with delay={sniff_delay:.2f}s...",
-                                file=sys.stderr,
+                            _tlog(
+                                f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} "
+                                f"reason='{sniff_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={sniff_delay:.2f}s..."
                             )
                             retry_needed = True
                             retry_delay = sniff_delay
@@ -1474,56 +1485,63 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             stream_retry_needed = False
                             stream_delay = 0.0
                             stream_reason = None
+                            has_real_content = False
 
                             async for chunk in upstream_resp.content:
                                 buffered_chunks.append(chunk)
                                 try:
                                     text = chunk.decode("utf-8", errors="replace")
                                     for line in text.split("\n"):
-                                        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                                        line = line.strip()
+                                        if line.startswith("data: ") and line != "data: [DONE]":
                                             chunk_data = json.loads(line[6:])
                                             if isinstance(chunk_data, dict):
-                                                s_needed, s_delay, s_reason = evaluate_retry_condition(
-                                                    status_code=None,
-                                                    headers=upstream_resp.headers,
-                                                    body_text_or_json=chunk_data,
-                                                    attempt=attempt,
-                                                    retry_policy=retry_policy,
-                                                )
-                                                if s_needed:
-                                                    stream_retry_needed = True
-                                                    stream_delay = s_delay
-                                                    stream_reason = s_reason
-                                                    break
+                                                if chunk_data.get("error"):
+                                                    s_needed, s_delay, s_reason = evaluate_retry_condition(
+                                                        status_code=None,
+                                                        headers=upstream_resp.headers,
+                                                        body_text_or_json=chunk_data,
+                                                        attempt=attempt,
+                                                        retry_policy=retry_policy,
+                                                    )
+                                                    if s_needed:
+                                                        stream_retry_needed = True
+                                                        stream_delay = s_delay
+                                                        stream_reason = s_reason
+                                                        break
+                                                
+                                                choices = chunk_data.get("choices")
+                                                if isinstance(choices, list) and len(choices) > 0 and isinstance(choices[0], dict):
+                                                    delta = choices[0].get("delta")
+                                                    txt = choices[0].get("text")
+                                                    if isinstance(delta, dict):
+                                                        c_str = delta.get("content")
+                                                        r_str = delta.get("reasoning_content")
+                                                        t_calls = delta.get("tool_calls")
+                                                        f_call = delta.get("function_call")
+                                                        if (c_str and str(c_str).strip()) or (r_str and str(r_str).strip()) or t_calls or f_call:
+                                                            has_real_content = True
+                                                            break
+                                                    elif txt and str(txt).strip():
+                                                        has_real_content = True
+                                                        break
                                 except Exception:
                                     pass
-                                if stream_retry_needed or buffered_chunks:
+
+                                if stream_retry_needed or has_real_content:
                                     break
 
-                            # If upstream immediately closed stream with 0 chunks or only [DONE] without content
-                            if not stream_retry_needed and retry_policy.get("retry_on_empty", True):
-                                if not buffered_chunks:
-                                    stream_retry_needed = True
-                                    stream_delay = 0.0
-                                    stream_reason = "Upstream closed SSE stream with 0 chunks"
-                                else:
-                                    all_done = True
-                                    for b_chk in buffered_chunks:
-                                        t_chk = b_chk.decode("utf-8", errors="ignore").strip()
-                                        if t_chk and t_chk != "data: [DONE]":
-                                            all_done = False
-                                            break
-                                    if all_done:
-                                        stream_retry_needed = True
-                                        stream_delay = 0.0
-                                        stream_reason = "Upstream sent empty stream (0 tokens before [DONE])"
+                            # If upstream stream ended with 0 content / 0 tool calls
+                            if not stream_retry_needed and not has_real_content and retry_policy.get("retry_on_empty", True):
+                                stream_retry_needed = True
+                                stream_delay = 0.0
+                                stream_reason = "Upstream model returned empty content (0 tokens in stream)"
 
                             if stream_retry_needed and attempt < max_retries:
                                 target_limiter.record_retry_attempt()
-                                print(
-                                    f"[telemetry] Upstream SSE rate-limit chunk intercepted on {path} ({stream_reason}, attempt {attempt+1}/{max_retries+1}). "
-                                    f"Re-dispatching stream with delay={stream_delay:.2f}s...",
-                                    file=sys.stderr,
+                                _tlog(
+                                    f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} "
+                                    f"reason='{stream_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching stream with delay={stream_delay:.2f}s..."
                                 )
                                 retry_needed = True
                                 retry_delay = stream_delay
@@ -1531,6 +1549,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             else:
                                 if attempt > 0:
                                     target_limiter.record_retry_absorbed()
+                                    _tlog(
+                                        f"[telemetry] [RETRY ABSORBED] req_id={req_id} model={model} path={path} "
+                                        f"recovered valid stream output on attempt {attempt+1}/{max_retries+1}!"
+                                    )
 
                                 stream_headers = {
                                     "Content-Type": content_type,
@@ -1698,10 +1720,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
                             if b_needed and attempt < max_retries:
                                 target_limiter.record_retry_attempt()
-                                print(
-                                    f"[telemetry] Upstream body rate-limit intercepted on {path} ({b_reason}, attempt {attempt+1}/{max_retries+1}). "
-                                    f"Re-dispatching with delay={b_delay:.2f}s...",
-                                    file=sys.stderr,
+                                _tlog(
+                                    f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} "
+                                    f"reason='{b_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={b_delay:.2f}s..."
                                 )
                                 retry_needed = True
                                 retry_delay = b_delay
@@ -1710,8 +1731,16 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 if attempt > 0:
                                     if status_code and 200 <= status_code < 300:
                                         target_limiter.record_retry_absorbed()
+                                        _tlog(
+                                            f"[telemetry] [RETRY ABSORBED] req_id={req_id} model={model} path={path} "
+                                            f"recovered valid response on attempt {attempt+1}/{max_retries+1}!"
+                                        )
                                     else:
                                         target_limiter.record_retry_failed()
+                                        _tlog(
+                                            f"[telemetry] [RETRY FAILED] req_id={req_id} model={model} path={path} "
+                                            f"failed on attempt {attempt+1}/{max_retries+1} (status={status_code})"
+                                        )
 
                                 resp_headers = {}
                                 for k, v in upstream_resp.headers.items():
@@ -1863,10 +1892,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         retry_needed = True
                         retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (0.5 * (2 ** attempt) + random.uniform(0.05, 0.2))
                         retry_reason = f"Upstream disconnect/no response: {type(net_err).__name__} ({net_err})"
-                        print(
-                            f"[telemetry] Upstream connection dropped on {path} ({retry_reason}, attempt {attempt+1}/{max_retries+1}). "
-                            f"Re-dispatching with delay={retry_delay:.2f}s...",
-                            file=sys.stderr,
+                        _tlog(
+                            f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} "
+                            f"reason='{retry_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={retry_delay:.2f}s..."
                         )
                     else:
                         raise
