@@ -651,13 +651,14 @@
                       <th>Model Regex Pattern</th>
                       <th>Upstream URL</th>
                       <th style="width: 70px;">Max Conc.</th>
+                      <th style="width: 85px;">Retries</th>
                       <th style="width: 60px;">Status</th>
                       <th style="width: 100px; text-align: right;">Actions</th>
                     </tr>
                   </thead>
                   <tbody id="modelRoutesTableBody">
                     <tr>
-                      <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 16px;">
+                      <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 16px;">
                         No custom routing rules configured. All models route to the default upstream.
                       </td>
                     </tr>
@@ -923,6 +924,28 @@
                 <span class="slider"></span>
               </label>
               <label for="modalRouteEnabled" style="cursor: pointer; user-select: none; font-size: 13px; margin-bottom: 0;">Rule Enabled & Active</label>
+            </div>
+
+            <!-- Retry & Upstream Rate-Limit Shielding Configuration -->
+            <div style="margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px;">
+              <div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                <span>🔄 Rate-Limit Absorption & Retries</span>
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="proxy-form-group">
+                  <label for="modalRouteMaxRetries">Max Silent Retries</label>
+                  <input type="number" id="modalRouteMaxRetries" class="proxy-input" value="3" min="0" max="10" step="1" title="Set to 0 to disable retries completely for strict institutional providers">
+                  <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">Set 0 for institutional providers</div>
+                </div>
+                <div class="proxy-form-group">
+                  <label for="modalRouteRetryMode">Retry Mode</label>
+                  <select id="modalRouteRetryMode" class="proxy-input" style="height: 32px; font-size: 12px;">
+                    <option value="immediate">Fast-Track Immediate (0s delay)</option>
+                    <option value="exponential">Exponential Backoff</option>
+                  </select>
+                  <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">Immediate for free open providers</div>
+                </div>
+              </div>
             </div>
 
             <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 12px;">

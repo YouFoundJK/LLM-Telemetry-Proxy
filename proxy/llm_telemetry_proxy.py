@@ -22,6 +22,7 @@ Usage:
 """
 
 from collections import deque
+from typing import Optional, Dict, Any, Tuple, List, Union
 import asyncio
 import json
 import random
@@ -81,7 +82,7 @@ if not ROUTES_CONFIG_FILE.exists():
 # incoming requests are admitted immediately without delay.
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", 3))
 SLOT_COOLDOWN_MS = int(os.environ.get("CONCURRENCY_SLOT_COOLDOWN_MS", 50))
-RETRY_429_MAX = int(os.environ.get("RETRY_429_MAX", 0))
+RETRY_429_MAX = int(os.environ.get("RETRY_429_MAX", 3))
 UPSTREAM_SESSION_KEY = web.AppKey("upstream_session", aiohttp.ClientSession) if hasattr(web, "AppKey") else "upstream_session"
 
 
@@ -89,15 +90,6 @@ class UpstreamConcurrencyLimiter:
     """
     Asynchronous concurrency limiter with strict FIFO queuing, slot cooldown gaps,
     and cancellation safety.
-    
-    When active concurrency is below `max_concurrent` and no requests are queued,
-    new requests are admitted immediately (zero delay).
-    
-    When concurrency is maxed out and queued requests are waiting, a slot cooldown
-    delay (`slot_cooldown_seconds`, default 50ms) is strictly enforced upon slot release
-    before dispatching the slot to the next queued request. This ensures upstream TCP
-    sockets, backend connection tracking, and vLLM/engine sequence teardown complete
-    cleanly before the next request arrives.
     """
 
     def __init__(self, max_concurrent: int = 4, slot_cooldown_seconds: float = 0.05):
@@ -111,6 +103,9 @@ class UpstreamConcurrencyLimiter:
         self._total_queued = 0
         self._peak_active = 0
         self._total_retries_429 = 0
+        self._total_retries_attempted = 0
+        self._total_retries_absorbed = 0
+        self._total_retries_failed = 0
 
     @property
     def active(self) -> int:
@@ -122,6 +117,17 @@ class UpstreamConcurrencyLimiter:
 
     def record_429_retry(self):
         self._total_retries_429 += 1
+        self._total_retries_attempted += 1
+
+    def record_retry_attempt(self):
+        self._total_retries_429 += 1
+        self._total_retries_attempted += 1
+
+    def record_retry_absorbed(self):
+        self._total_retries_absorbed += 1
+
+    def record_retry_failed(self):
+        self._total_retries_failed += 1
 
     def get_stats(self) -> dict:
         return {
@@ -132,6 +138,9 @@ class UpstreamConcurrencyLimiter:
             "total_admitted": self._total_admitted,
             "total_queued": self._total_queued,
             "total_retries_429": self._total_retries_429,
+            "total_retries_attempted": self._total_retries_attempted,
+            "total_retries_absorbed": self._total_retries_absorbed,
+            "total_retries_failed": self._total_retries_failed,
             "peak_active": self._peak_active,
         }
 
@@ -206,6 +215,91 @@ class _SlotContextManager:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.limiter.release()
+
+
+def evaluate_retry_condition(
+    status_code: Optional[int],
+    headers: Optional[Any],
+    body_text_or_json: Optional[Any],
+    attempt: int,
+    retry_policy: Optional[dict],
+) -> tuple:
+    """
+    Evaluates whether an upstream response qualifies as a transient rate-limit / capacity hiccup
+    and calculates the retry delay (or 0.0s for immediate zero-delay retry).
+
+    Returns:
+        (should_retry: bool, retry_delay_seconds: float, reason: Optional[str])
+    """
+    if not retry_policy or not retry_policy.get("enabled", True):
+        return False, 0.0, None
+
+    max_retries = int(retry_policy.get("max_retries", 0))
+    if attempt >= max_retries or max_retries <= 0:
+        return False, 0.0, None
+
+    retry_on_status = set(retry_policy.get("retry_on_status", [429, 503, 529]))
+    retry_patterns = [p.lower() for p in retry_policy.get("retry_on_body_patterns", [])]
+    max_retry_after = float(retry_policy.get("max_retry_after_seconds", 5.0))
+    mode = str(retry_policy.get("mode", "immediate")).lower()
+
+    is_retryable = False
+    reason = None
+
+    if status_code in retry_on_status:
+        is_retryable = True
+        reason = f"HTTP {status_code}"
+
+    if not is_retryable and body_text_or_json:
+        body_str = ""
+        if isinstance(body_text_or_json, dict):
+            err_val = body_text_or_json.get("error", "")
+            detail_val = body_text_or_json.get("detail", "")
+            msg_val = body_text_or_json.get("message", "")
+            body_str = f"{err_val} {detail_val} {msg_val}".lower()
+        elif isinstance(body_text_or_json, str):
+            body_str = body_text_or_json.lower()
+        elif isinstance(body_text_or_json, bytes):
+            try:
+                body_str = body_text_or_json.decode("utf-8", errors="ignore").lower()
+            except Exception:
+                pass
+
+        for pat in retry_patterns:
+            if pat in body_str:
+                is_retryable = True
+                reason = f"Body pattern match: '{pat}'"
+                break
+
+    if not is_retryable:
+        return False, 0.0, None
+
+    # Evaluate delay
+    delay = 0.0
+    retry_after_hdr = None
+    if headers:
+        for k, v in (headers.items() if hasattr(headers, "items") else []):
+            if str(k).lower() in ("retry-after", "x-ratelimit-reset-requests", "ratelimit-reset-requests"):
+                retry_after_hdr = v
+                break
+
+    if retry_after_hdr:
+        try:
+            parsed_after = float(retry_after_hdr)
+            if parsed_after > max_retry_after:
+                # Explicit cooldown exceeds acceptable threshold; fail fast
+                return False, 0.0, None
+            delay = max(0.0, parsed_after)
+        except (ValueError, TypeError):
+            pass
+
+    if delay == 0.0:
+        if mode == "immediate":
+            delay = 0.0  # Instantaneous re-dispatch
+        else:
+            delay = 0.5 * (2 ** attempt) + random.uniform(0.05, 0.2)
+
+    return True, delay, reason
 
 
 _concurrency_limiter = _model_router.default_limiter
@@ -492,6 +586,14 @@ def init_db():
         conn.execute("ALTER TABLE api_calls ADD COLUMN upstream_url TEXT")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN retries_attempted INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN absorbed_429 INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
     # Call counter table — tracks EVERY request through the proxy,
     # even ones that fail before logging to api_calls
@@ -510,7 +612,9 @@ def init_db():
             total_ms      REAL,
             calls_count   INTEGER DEFAULT 1,
             route_name    TEXT,
-            upstream_url  TEXT
+            upstream_url  TEXT,
+            retries_attempted INTEGER DEFAULT 0,
+            absorbed_429  INTEGER DEFAULT 0
         )
     """)
     try:
@@ -523,6 +627,14 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE proxy_calls ADD COLUMN upstream_url TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE proxy_calls ADD COLUMN retries_attempted INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE proxy_calls ADD COLUMN absorbed_429 INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
 
@@ -623,7 +735,8 @@ def log_call(model, endpoint, input_tokens, output_tokens,
              ttfb_ms, total_ms, tokens_per_s,
              server_running, server_tok_s, server_model,
              status_code, error, call_type='chat',
-             route_name=None, upstream_url=None):
+             route_name=None, upstream_url=None,
+             retries_attempted=0, absorbed_429=0):
     try:
         model = resolve_canonical_model(model)
         conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
@@ -634,36 +747,53 @@ def log_call(model, endpoint, input_tokens, output_tokens,
                      ttfb_ms, total_ms, tokens_per_s,
                      server_running, server_tok_s, server_model,
                      status_code, error, call_type, calls_count,
-                     route_name, upstream_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                     route_name, upstream_url, retries_attempted, absorbed_429)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 model, endpoint, input_tokens, output_tokens,
                 ttfb_ms, total_ms, tokens_per_s,
                 server_running, server_tok_s, server_model,
                 status_code, error, call_type,
-                route_name, upstream_url
+                route_name, upstream_url,
+                int(retries_attempted or 0), int(absorbed_429 or 0)
             ))
         except sqlite3.OperationalError as op_err:
-            if "route_name" in str(op_err):
+            err_msg = str(op_err)
+            if "retries_attempted" in err_msg or "absorbed_429" in err_msg or "route_name" in err_msg:
                 try:
                     conn.execute("ALTER TABLE api_calls ADD COLUMN route_name TEXT")
+                except Exception:
+                    pass
+                try:
                     conn.execute("ALTER TABLE api_calls ADD COLUMN upstream_url TEXT")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE api_calls ADD COLUMN retries_attempted INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE api_calls ADD COLUMN absorbed_429 INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+                try:
                     conn.execute("""
                         INSERT INTO api_calls
                             (timestamp, model, endpoint, input_tokens, output_tokens,
                              ttfb_ms, total_ms, tokens_per_s,
                              server_running, server_tok_s, server_model,
                              status_code, error, call_type, calls_count,
-                             route_name, upstream_url)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                             route_name, upstream_url, retries_attempted, absorbed_429)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                     """, (
                         datetime.now(timezone.utc).isoformat(),
                         model, endpoint, input_tokens, output_tokens,
                         ttfb_ms, total_ms, tokens_per_s,
                         server_running, server_tok_s, server_model,
                         status_code, error, call_type,
-                        route_name, upstream_url
+                        route_name, upstream_url,
+                        int(retries_attempted or 0), int(absorbed_429 or 0)
                     ))
                 except Exception:
                     conn.execute("""
@@ -689,7 +819,8 @@ def log_call(model, endpoint, input_tokens, output_tokens,
 
 
 def log_proxy_call(endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
-                   route_name=None, upstream_url=None):
+                   route_name=None, upstream_url=None,
+                   retries_attempted=0, absorbed_429=0):
     """Log EVERY request through the proxy — even ones that fail before logging to api_calls."""
     try:
         model = resolve_canonical_model(model)
@@ -698,27 +829,44 @@ def log_proxy_call(endpoint, method, call_type, model, status_code, error, logge
             conn.execute("""
                 INSERT INTO proxy_calls
                     (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count,
-                     route_name, upstream_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                     route_name, upstream_url, retries_attempted, absorbed_429)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
-                route_name, upstream_url
+                route_name, upstream_url,
+                int(retries_attempted or 0), int(absorbed_429 or 0)
             ))
         except sqlite3.OperationalError as op_err:
-            if "route_name" in str(op_err):
+            err_msg = str(op_err)
+            if "retries_attempted" in err_msg or "absorbed_429" in err_msg or "route_name" in err_msg:
                 try:
                     conn.execute("ALTER TABLE proxy_calls ADD COLUMN route_name TEXT")
+                except Exception:
+                    pass
+                try:
                     conn.execute("ALTER TABLE proxy_calls ADD COLUMN upstream_url TEXT")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE proxy_calls ADD COLUMN retries_attempted INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE proxy_calls ADD COLUMN absorbed_429 INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+                try:
                     conn.execute("""
                         INSERT INTO proxy_calls
                             (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count,
-                             route_name, upstream_url)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                             route_name, upstream_url, retries_attempted, absorbed_429)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                     """, (
                         datetime.now(timezone.utc).isoformat(),
                         endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms,
-                        route_name, upstream_url
+                        route_name, upstream_url,
+                        int(retries_attempted or 0), int(absorbed_429 or 0)
                     ))
                 except Exception:
                     conn.execute("""
@@ -1223,13 +1371,22 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     try:
         timeout = aiohttp.ClientTimeout(total=300)
-        max_retries = RETRY_429_MAX
-
         target_limiter = _model_router.get_limiter(route_res.route_id)
+        retry_policy = dict(route_res.retry_policy or _model_router.default_retry_policy)
+        if route_res.is_default:
+            if RETRY_429_MAX == 0:
+                retry_policy["enabled"] = False
+                retry_policy["max_retries"] = 0
+            else:
+                retry_policy["max_retries"] = RETRY_429_MAX
 
-        for attempt in range(max_retries + 1):
+        max_retries = int(retry_policy.get("max_retries", 0)) if retry_policy.get("enabled", True) else 0
+
+        attempt = 0
+        while attempt <= max_retries:
             retry_needed = False
             retry_delay = 0.0
+            retry_reason = None
 
             # Gate: never exceed route-specific max_concurrent parallel upstream requests
             async with target_limiter.slot():
@@ -1248,175 +1405,269 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     ) as upstream_resp:
                         status_code = upstream_resp.status
                         content_type = upstream_resp.headers.get("Content-Type", "")
-                        is_stream = "text/event-stream" in content_type and status_code == 200
+                        is_stream_candidate = "text/event-stream" in content_type and status_code == 200
 
-                        if status_code == 429 and attempt < max_retries:
-                            retry_after_hdr = upstream_resp.headers.get("Retry-After")
-                            backoff = 0.5 * (2 ** attempt) + random.uniform(0.05, 0.2)
-                            if retry_after_hdr:
-                                try:
-                                    backoff = min(10.0, max(0.1, float(retry_after_hdr)))
-                                except (ValueError, TypeError):
-                                    pass
-                            target_limiter.record_429_retry()
+                        # Evaluate if HTTP status triggers a retry
+                        sniff_needed, sniff_delay, sniff_reason = evaluate_retry_condition(
+                            status_code=status_code,
+                            headers=upstream_resp.headers,
+                            body_text_or_json=None,
+                            attempt=attempt,
+                            retry_policy=retry_policy,
+                        )
+
+                        if sniff_needed and attempt < max_retries:
+                            target_limiter.record_retry_attempt()
                             print(
-                                f"[telemetry] Upstream 429 Rate Limit on {path} (attempt {attempt+1}/{max_retries}). "
-                                f"Backing off for {backoff:.2f}s...",
+                                f"[telemetry] Upstream rate limit on {path} ({sniff_reason}, attempt {attempt+1}/{max_retries+1}). "
+                                f"Re-dispatching with delay={sniff_delay:.2f}s...",
                                 file=sys.stderr,
                             )
                             retry_needed = True
-                            retry_delay = backoff
-                        elif is_stream:
-                            response = web.StreamResponse(
-                                status=upstream_resp.status,
-                                headers={
-                                    "Content-Type": content_type,
-                                    "Cache-Control": "no-cache",
-                                    "Connection": "keep-alive",
-                                },
-                            )
-                            await response.prepare(request)
+                            retry_delay = sniff_delay
+                            retry_reason = sniff_reason
 
-                            t_first_byte = None
-                            collected_usage = None
-                            content_chars = 0
-                            collected_content = ""
-                            collected_reasoning = ""
-                            collected_tool_calls = []
+                        elif is_stream_candidate:
+                            # ── Streaming Handler with Deferred Client Handshake ───────────
+                            buffered_chunks = []
+                            stream_retry_needed = False
+                            stream_delay = 0.0
+                            stream_reason = None
 
                             async for chunk in upstream_resp.content:
-                                if t_first_byte is None:
-                                    t_first_byte = time.monotonic()
-                                    ttfb_ms = (t_first_byte - t_start) * 1000
-                                await response.write(chunk)
+                                buffered_chunks.append(chunk)
                                 try:
                                     text = chunk.decode("utf-8", errors="replace")
                                     for line in text.split("\n"):
                                         if line.startswith("data: ") and line.strip() != "data: [DONE]":
-                                            try:
-                                                chunk_data = json.loads(line[6:])
-                                                if isinstance(chunk_data, dict):
-                                                    if chunk_data.get("usage") and isinstance(chunk_data["usage"], dict):
-                                                        collected_usage = chunk_data["usage"]
-                                                    choices = chunk_data.get("choices")
-                                                    if isinstance(choices, list):
-                                                        for choice in choices:
-                                                            if isinstance(choice, dict):
-                                                                delta = choice.get("delta")
-                                                                if isinstance(delta, dict):
-                                                                    if delta.get("content"):
-                                                                        content_chars += len(delta["content"])
-                                                                        collected_content += delta["content"]
-                                                                    if delta.get("reasoning_content"):
-                                                                        content_chars += len(delta["reasoning_content"])
-                                                                        collected_reasoning += delta["reasoning_content"]
-                                                    if chunk_data.get("error"):
-                                                        err_obj = chunk_data["error"]
-                                                        if isinstance(err_obj, dict):
-                                                            error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
-                                                        else:
-                                                            error = str(err_obj)
-                                            except json.JSONDecodeError:
-                                                pass
+                                            chunk_data = json.loads(line[6:])
+                                            if isinstance(chunk_data, dict) and chunk_data.get("error"):
+                                                s_needed, s_delay, s_reason = evaluate_retry_condition(
+                                                    status_code=None,
+                                                    headers=upstream_resp.headers,
+                                                    body_text_or_json=chunk_data,
+                                                    attempt=attempt,
+                                                    retry_policy=retry_policy,
+                                                )
+                                                if s_needed:
+                                                    stream_retry_needed = True
+                                                    stream_delay = s_delay
+                                                    stream_reason = s_reason
+                                                    break
                                 except Exception:
                                     pass
+                                if stream_retry_needed or buffered_chunks:
+                                    break
 
-                            await response.write_eof()
+                            if stream_retry_needed and attempt < max_retries:
+                                target_limiter.record_retry_attempt()
+                                print(
+                                    f"[telemetry] Upstream SSE rate-limit chunk intercepted on {path} ({stream_reason}, attempt {attempt+1}/{max_retries+1}). "
+                                    f"Re-dispatching stream with delay={stream_delay:.2f}s...",
+                                    file=sys.stderr,
+                                )
+                                retry_needed = True
+                                retry_delay = stream_delay
+                                retry_reason = stream_reason
+                            else:
+                                if attempt > 0:
+                                    target_limiter.record_retry_absorbed()
 
-                            # Telemetry post-processing (isolated: errors here will never affect the client)
-                            try:
-                                if status_code and (status_code < 200 or status_code >= 300) and not error:
-                                    error = f"HTTP {status_code}"
+                                stream_headers = {
+                                    "Content-Type": content_type,
+                                    "Cache-Control": "no-cache",
+                                    "Connection": "keep-alive",
+                                    "X-Proxy-Retries-Attempted": str(attempt),
+                                    "X-Proxy-Rate-Limit-Absorbed": "1" if attempt > 0 else "0",
+                                }
+                                response = web.StreamResponse(
+                                    status=upstream_resp.status,
+                                    headers=stream_headers,
+                                )
+                                await response.prepare(request)
 
-                                if collected_usage and isinstance(collected_usage, dict):
-                                    input_tokens = collected_usage.get("prompt_tokens", input_tokens)
-                                    output_tokens = collected_usage.get("completion_tokens")
-                                    details = collected_usage.get("completion_tokens_details")
-                                    if isinstance(details, dict):
-                                        reasoning_tokens = details.get("reasoning_tokens")
-                                    else:
-                                        reasoning_tokens = collected_usage.get("reasoning_tokens")
-                                    if not output_tokens or output_tokens == 0:
-                                        output_tokens = max(1, content_chars // 4)
-                                elif content_chars > 0 and not output_tokens:
-                                    output_tokens = max(1, content_chars // 4)
+                                t_first_byte = None
+                                collected_usage = None
+                                content_chars = 0
+                                collected_content = ""
+                                collected_reasoning = ""
+                                collected_tool_calls = []
 
-                                # Record token budget
+                                def _parse_sse_chunk(raw_bytes: bytes):
+                                    nonlocal t_first_byte, collected_usage, content_chars, collected_content, collected_reasoning, error
+                                    if t_first_byte is None:
+                                        t_first_byte = time.monotonic()
+                                    try:
+                                        text = raw_bytes.decode("utf-8", errors="replace")
+                                        for line in text.split("\n"):
+                                            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                                                try:
+                                                    chunk_data = json.loads(line[6:])
+                                                    if isinstance(chunk_data, dict):
+                                                        if chunk_data.get("usage") and isinstance(chunk_data["usage"], dict):
+                                                            collected_usage = chunk_data["usage"]
+                                                        choices = chunk_data.get("choices")
+                                                        if isinstance(choices, list):
+                                                            for choice in choices:
+                                                                if isinstance(choice, dict):
+                                                                    delta = choice.get("delta")
+                                                                    if isinstance(delta, dict):
+                                                                        if delta.get("content"):
+                                                                            content_chars += len(delta["content"])
+                                                                            collected_content += delta["content"]
+                                                                        if delta.get("reasoning_content"):
+                                                                            content_chars += len(delta["reasoning_content"])
+                                                                            collected_reasoning += delta["reasoning_content"]
+                                                        if chunk_data.get("error"):
+                                                            err_obj = chunk_data["error"]
+                                                            if isinstance(err_obj, dict):
+                                                                error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
+                                                            else:
+                                                                error = str(err_obj)
+                                                except json.JSONDecodeError:
+                                                    pass
+                                    except Exception:
+                                        pass
+
+                                for b_chunk in buffered_chunks:
+                                    await response.write(b_chunk)
+                                    _parse_sse_chunk(b_chunk)
+
+                                async for chunk in upstream_resp.content:
+                                    await response.write(chunk)
+                                    _parse_sse_chunk(chunk)
+
+                                await response.write_eof()
+
+                                # Telemetry post-processing
                                 try:
-                                    _token_budget.record_and_check(input_tokens or 0, output_tokens or 0)
-                                except Exception as b_err:
-                                    print(f"[telemetry] token budget record error: {b_err}", file=sys.stderr)
+                                    if status_code and (status_code < 200 or status_code >= 300) and not error:
+                                        error = f"HTTP {status_code}"
 
-                                t_total = (time.monotonic() - t_start) * 1000
-                                if ttfb_ms is None:
-                                    ttfb_ms = t_total
-                                if output_tokens and t_total > 0:
-                                    tokens_per_s = output_tokens / (t_total / 1000)
+                                    if collected_usage and isinstance(collected_usage, dict):
+                                        input_tokens = collected_usage.get("prompt_tokens", input_tokens)
+                                        output_tokens = collected_usage.get("completion_tokens")
+                                        details = collected_usage.get("completion_tokens_details")
+                                        if isinstance(details, dict):
+                                            reasoning_tokens = details.get("reasoning_tokens")
+                                        else:
+                                            reasoning_tokens = collected_usage.get("reasoning_tokens")
+                                        if not output_tokens or output_tokens == 0:
+                                            output_tokens = max(1, content_chars // 4)
+                                    elif content_chars > 0 and not output_tokens:
+                                        output_tokens = max(1, content_chars // 4)
 
-                                log_call(model, path, input_tokens, output_tokens,
-                                         ttfb_ms, t_total, tokens_per_s,
-                                         server_running, server_tok_s, server_model,
-                                         status_code, error, call_type,
-                                         route_name=route_name, upstream_url=upstream_url)
-                                logged = True
-                                log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total,
-                                               route_name=route_name, upstream_url=upstream_url)
+                                    # Record token budget
+                                    try:
+                                        _token_budget.record_and_check(input_tokens or 0, output_tokens or 0)
+                                    except Exception as b_err:
+                                        print(f"[telemetry] token budget record error: {b_err}", file=sys.stderr)
 
-                                if _raw_logging_enabled:
-                                    raw_record = make_raw_payload_record(
-                                        req_id=req_id,
-                                        path=path,
-                                        method=method,
-                                        call_type=call_type,
-                                        model=model,
-                                        client_ip=request.remote,
-                                        req_headers=dict(request.headers),
-                                        payload_obj=payload,
-                                        status_code=status_code,
-                                        resp_headers=dict(upstream_resp.headers),
-                                        is_stream=True,
-                                        ttfb_ms=ttfb_ms,
-                                        total_ms=t_total,
-                                        tokens_per_s=tokens_per_s,
-                                        input_tokens=input_tokens,
-                                        output_tokens=output_tokens,
-                                        reasoning_tokens=reasoning_tokens,
-                                        content_text=collected_content,
-                                        reasoning_text=collected_reasoning,
-                                        tool_calls=collected_tool_calls if collected_tool_calls else None,
-                                        raw_resp_json=None,
-                                        error=error,
-                                        seq=req_seq,
-                                    )
-                                    append_raw_payload(raw_record)
-                                    if _raw_subscribers:
-                                        asyncio.create_task(broadcast_raw_payload(raw_record))
-                            except Exception as tel_err:
-                                print(f"[telemetry] streaming telemetry error: {tel_err}", file=sys.stderr)
+                                    t_total = (time.monotonic() - t_start) * 1000
+                                    if t_first_byte is None:
+                                        t_first_byte = time.monotonic()
+                                    ttfb_ms = (t_first_byte - t_start) * 1000
+                                    if output_tokens and t_total > 0:
+                                        tokens_per_s = output_tokens / (t_total / 1000)
 
-                            return response
+                                    log_call(model, path, input_tokens, output_tokens,
+                                             ttfb_ms, t_total, tokens_per_s,
+                                             server_running, server_tok_s, server_model,
+                                             status_code, error, call_type,
+                                             route_name=route_name, upstream_url=upstream_url,
+                                             retries_attempted=attempt, absorbed_429=1 if attempt > 0 else 0)
+                                    logged = True
+                                    log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total,
+                                                   route_name=route_name, upstream_url=upstream_url,
+                                                   retries_attempted=attempt, absorbed_429=1 if attempt > 0 else 0)
+
+                                    if _raw_logging_enabled:
+                                        raw_record = make_raw_payload_record(
+                                            req_id=req_id,
+                                            path=path,
+                                            method=method,
+                                            call_type=call_type,
+                                            model=model,
+                                            client_ip=request.remote,
+                                            req_headers=dict(request.headers),
+                                            payload_obj=payload,
+                                            status_code=status_code,
+                                            resp_headers=dict(upstream_resp.headers),
+                                            is_stream=True,
+                                            ttfb_ms=ttfb_ms,
+                                            total_ms=t_total,
+                                            tokens_per_s=tokens_per_s,
+                                            input_tokens=input_tokens,
+                                            output_tokens=output_tokens,
+                                            reasoning_tokens=reasoning_tokens,
+                                            content_text=collected_content,
+                                            reasoning_text=collected_reasoning,
+                                            tool_calls=collected_tool_calls if collected_tool_calls else None,
+                                            raw_resp_json=None,
+                                            error=error,
+                                            seq=req_seq,
+                                        )
+                                        append_raw_payload(raw_record)
+                                        if _raw_subscribers:
+                                            asyncio.create_task(broadcast_raw_payload(raw_record))
+                                except Exception as tel_err:
+                                    print(f"[telemetry] streaming telemetry error: {tel_err}", file=sys.stderr)
+
+                                return response
 
                         else:
+                            # ── Non-Streaming Handler ──────────────────────────────────────
                             resp_body = await upstream_resp.read()
                             t_first_byte = time.monotonic()
                             ttfb_ms = (t_first_byte - t_start) * 1000
                             t_total = (time.monotonic() - t_start) * 1000
 
-                            resp_headers = {}
-                            for k, v in upstream_resp.headers.items():
-                                if k.lower() not in ("content-length", "content-encoding", "transfer-encoding"):
-                                    resp_headers[k] = v
-
-                            # Telemetry post-processing (isolated: errors here will never affect the client response)
-                            budget_headers = {}
-                            allowed = True
+                            resp_data = None
                             try:
-                                resp_data = None
-                                resp_text = None
-                                resp_reasoning = None
-                                resp_tool_calls = None
+                                resp_data = json.loads(resp_body)
+                            except Exception:
+                                pass
+
+                            # Evaluate body content for rate limits
+                            b_needed, b_delay, b_reason = evaluate_retry_condition(
+                                status_code=status_code,
+                                headers=upstream_resp.headers,
+                                body_text_or_json=resp_data if resp_data else resp_body,
+                                attempt=attempt,
+                                retry_policy=retry_policy,
+                            )
+
+                            if b_needed and attempt < max_retries:
+                                target_limiter.record_retry_attempt()
+                                print(
+                                    f"[telemetry] Upstream body rate-limit intercepted on {path} ({b_reason}, attempt {attempt+1}/{max_retries+1}). "
+                                    f"Re-dispatching with delay={b_delay:.2f}s...",
+                                    file=sys.stderr,
+                                )
+                                retry_needed = True
+                                retry_delay = b_delay
+                                retry_reason = b_reason
+                            else:
+                                if attempt > 0:
+                                    if status_code and 200 <= status_code < 300:
+                                        target_limiter.record_retry_absorbed()
+                                    else:
+                                        target_limiter.record_retry_failed()
+
+                                resp_headers = {}
+                                for k, v in upstream_resp.headers.items():
+                                    if k.lower() not in ("content-length", "content-encoding", "transfer-encoding"):
+                                        resp_headers[k] = v
+                                resp_headers["X-Proxy-Retries-Attempted"] = str(attempt)
+                                resp_headers["X-Proxy-Rate-Limit-Absorbed"] = "1" if (attempt > 0 and status_code and 200 <= status_code < 300) else "0"
+
+                                # Telemetry post-processing (isolated)
+                                budget_headers = {}
+                                allowed = True
                                 try:
-                                    resp_data = json.loads(resp_body)
+                                    resp_text = None
+                                    resp_reasoning = None
+                                    resp_tool_calls = None
                                     if isinstance(resp_data, dict):
                                         u = resp_data.get("usage")
                                         if isinstance(u, dict):
@@ -1448,108 +1699,115 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                             error = str(resp_data["message"])
                                         elif resp_data.get("detail") and status_code and (status_code < 200 or status_code >= 300):
                                             error = str(resp_data["detail"])
-                                except Exception:
-                                    if status_code and (status_code < 200 or status_code >= 300):
+                                    elif status_code and (status_code < 200 or status_code >= 300):
                                         error = resp_body.decode("utf-8", errors="replace")[:200].strip()
 
-                                if not error and status_code and (status_code < 200 or status_code >= 300):
-                                    error = f"HTTP {status_code}"
+                                    if not error and status_code and (status_code < 200 or status_code >= 300):
+                                        error = f"HTTP {status_code}"
 
-                                # Check token budget
-                                try:
-                                    allowed, budget_status = _token_budget.record_and_check(
-                                        input_tokens or 0, output_tokens or 0
-                                    )
-                                    budget_headers = {
-                                        "X-Token-Budget-Used": str(budget_status["total_used"]),
-                                        "X-Token-Budget-Remaining": str(budget_status["remaining"]),
-                                        "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
-                                        "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
-                                    }
-                                    resp_headers.update(budget_headers)
-                                except Exception as b_err:
-                                    print(f"[telemetry] token budget check error: {b_err}", file=sys.stderr)
+                                    # Check token budget
+                                    try:
+                                        allowed, budget_status = _token_budget.record_and_check(
+                                            input_tokens or 0, output_tokens or 0
+                                        )
+                                        budget_headers = {
+                                            "X-Token-Budget-Used": str(budget_status["total_used"]),
+                                            "X-Token-Budget-Remaining": str(budget_status["remaining"]),
+                                            "X-Token-Budget-Percentage": str(budget_status["percentage_used"]),
+                                            "X-Token-Budget-Limit": str(budget_status["daily_limit"]),
+                                        }
+                                        resp_headers.update(budget_headers)
+                                    except Exception as b_err:
+                                        print(f"[telemetry] token budget check error: {b_err}", file=sys.stderr)
 
-                                if output_tokens and t_total > 0:
-                                    tokens_per_s = output_tokens / (t_total / 1000)
+                                    if output_tokens and t_total > 0:
+                                        tokens_per_s = output_tokens / (t_total / 1000)
+
+                                    if not allowed:
+                                        error = "token_budget_exceeded"
+
+                                    log_call(model, path, input_tokens, output_tokens,
+                                             ttfb_ms, t_total, tokens_per_s,
+                                             server_running, server_tok_s, server_model,
+                                             status_code, error, call_type,
+                                             route_name=route_name, upstream_url=upstream_url,
+                                             retries_attempted=attempt,
+                                             absorbed_429=1 if (attempt > 0 and status_code and 200 <= status_code < 300) else 0)
+                                    logged = True
+                                    log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total,
+                                                   route_name=route_name, upstream_url=upstream_url,
+                                                   retries_attempted=attempt,
+                                                   absorbed_429=1 if (attempt > 0 and status_code and 200 <= status_code < 300) else 0)
+
+                                    if _raw_logging_enabled:
+                                        raw_record = make_raw_payload_record(
+                                            req_id=req_id,
+                                            path=path,
+                                            method=method,
+                                            call_type=call_type,
+                                            model=model,
+                                            client_ip=request.remote,
+                                            req_headers=dict(request.headers),
+                                            payload_obj=payload,
+                                            status_code=status_code,
+                                            resp_headers=dict(upstream_resp.headers),
+                                            is_stream=False,
+                                            ttfb_ms=ttfb_ms,
+                                            total_ms=t_total,
+                                            tokens_per_s=tokens_per_s,
+                                            input_tokens=input_tokens,
+                                            output_tokens=output_tokens,
+                                            reasoning_tokens=reasoning_tokens,
+                                            content_text=resp_text,
+                                            reasoning_text=resp_reasoning,
+                                            tool_calls=resp_tool_calls,
+                                            raw_resp_json=resp_data,
+                                            error=error,
+                                            seq=req_seq,
+                                        )
+                                        append_raw_payload(raw_record)
+                                        if _raw_subscribers:
+                                            asyncio.create_task(broadcast_raw_payload(raw_record))
+                                except Exception as tel_err:
+                                    print(f"[telemetry] batch telemetry error: {tel_err}", file=sys.stderr)
 
                                 if not allowed:
-                                    error = "token_budget_exceeded"
-
-                                log_call(model, path, input_tokens, output_tokens,
-                                         ttfb_ms, t_total, tokens_per_s,
-                                         server_running, server_tok_s, server_model,
-                                         status_code, error, call_type,
-                                         route_name=route_name, upstream_url=upstream_url)
-                                logged = True
-                                log_proxy_call(path, method, call_type, model, status_code, error, 1, ttfb_ms, t_total,
-                                               route_name=route_name, upstream_url=upstream_url)
-
-                                if _raw_logging_enabled:
-                                    raw_record = make_raw_payload_record(
-                                        req_id=req_id,
-                                        path=path,
-                                        method=method,
-                                        call_type=call_type,
-                                        model=model,
-                                        client_ip=request.remote,
-                                        req_headers=dict(request.headers),
-                                        payload_obj=payload,
-                                        status_code=status_code,
-                                        resp_headers=dict(upstream_resp.headers),
-                                        is_stream=False,
-                                        ttfb_ms=ttfb_ms,
-                                        total_ms=t_total,
-                                        tokens_per_s=tokens_per_s,
-                                        input_tokens=input_tokens,
-                                        output_tokens=output_tokens,
-                                        reasoning_tokens=reasoning_tokens,
-                                        content_text=resp_text,
-                                        reasoning_text=resp_reasoning,
-                                        tool_calls=resp_tool_calls,
-                                        raw_resp_json=resp_data,
-                                        error=error,
-                                        seq=req_seq,
+                                    error_msg = (
+                                        f"🚫 DAILY TOKEN BUDGET EXCEEDED\n\n"
+                                        f"Used: {budget_status['total_used']:,} tokens "
+                                        f"({budget_status['percentage_used']:.1f}% of daily limit)\n"
+                                        f"Limit: {budget_status['daily_limit']:,} tokens/day\n"
+                                        f"Remaining: {budget_status['remaining']:,} tokens\n\n"
+                                        f"Token cap enforced by proxy. Requests blocked until 24h window rolls."
                                     )
-                                    append_raw_payload(raw_record)
-                                    if _raw_subscribers:
-                                        asyncio.create_task(broadcast_raw_payload(raw_record))
-                            except Exception as tel_err:
-                                print(f"[telemetry] batch telemetry error: {tel_err}", file=sys.stderr)
+                                    return web.json_response(
+                                        {"error": {"message": error_msg, "type": "token_budget_exceeded"}},
+                                        status=429,
+                                        headers=budget_headers
+                                    )
 
-                            if not allowed:
-                                error_msg = (
-                                    f"🚫 DAILY TOKEN BUDGET EXCEEDED\n\n"
-                                    f"Used: {budget_status['total_used']:,} tokens "
-                                    f"({budget_status['percentage_used']:.1f}% of daily limit)\n"
-                                    f"Limit: {budget_status['daily_limit']:,} tokens/day\n"
-                                    f"Remaining: {budget_status['remaining']:,} tokens\n\n"
-                                    f"Token cap enforced by proxy. Requests blocked until 24h window rolls."
-                                )
-                                return web.json_response(
-                                    {"error": {"message": error_msg, "type": "token_budget_exceeded"}},
-                                    status=429,
-                                    headers=budget_headers
-                                )
-
-                            try:
-                                return web.Response(
-                                    status=upstream_resp.status,
-                                    body=resp_body,
-                                    headers=resp_headers,
-                                )
-                            except Exception:
-                                return web.Response(
-                                    status=upstream_resp.status,
-                                    body=resp_body,
-                                )
+                                try:
+                                    return web.Response(
+                                        status=upstream_resp.status,
+                                        body=resp_body,
+                                        headers=resp_headers,
+                                    )
+                                except Exception:
+                                    return web.Response(
+                                        status=upstream_resp.status,
+                                        body=resp_body,
+                                    )
                 finally:
                     if owns_session and not req_session.closed:
                         await req_session.close()
 
             if retry_needed:
-                await asyncio.sleep(retry_delay)
+                attempt += 1
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
                 continue
+            else:
+                break
 
     except asyncio.TimeoutError:
         error = "timeout"
@@ -1698,56 +1956,83 @@ async def _simple_forward(request, path, method):
     headers.pop("Host", None)
     headers.pop("host", None)
 
+    req_body = await request.read() if request.can_read_body else None
+    if req_body and "Content-Length" in headers:
+        headers["Content-Length"] = str(len(req_body))
+
     t_start = time.monotonic()
     status_code = None
     error = None
 
     try:
-        max_retries = RETRY_429_MAX
+        timeout = aiohttp.ClientTimeout(total=300)
         target_limiter = _model_router.get_limiter(route_res.route_id)
-        for attempt in range(max_retries + 1):
+        retry_policy = dict(route_res.retry_policy or _model_router.default_retry_policy)
+        if route_res.is_default:
+            if RETRY_429_MAX == 0:
+                retry_policy["enabled"] = False
+                retry_policy["max_retries"] = 0
+            else:
+                retry_policy["max_retries"] = RETRY_429_MAX
+        max_retries = int(retry_policy.get("max_retries", 0)) if retry_policy.get("enabled", True) else 0
+
+        attempt = 0
+        while attempt <= max_retries:
             retry_needed = False
             retry_delay = 0.0
+            retry_reason = None
 
             async with target_limiter.slot():
                 req_session = request.app.get(UPSTREAM_SESSION_KEY) if hasattr(request, "app") and UPSTREAM_SESSION_KEY in request.app else None
                 owns_session = False
                 if req_session is None or req_session.closed:
-                    req_session = aiohttp.ClientSession()
+                    req_session = aiohttp.ClientSession(timeout=timeout)
                     owns_session = True
 
                 try:
                     async with req_session.request(
                         method, upstream_url,
                         headers=headers,
+                        data=req_body if req_body else None,
                         params=request.query,
                     ) as upstream_resp:
                         status_code = upstream_resp.status
-                        if status_code == 429 and attempt < max_retries:
-                            retry_after_hdr = upstream_resp.headers.get("Retry-After")
-                            backoff = 0.5 * (2 ** attempt) + random.uniform(0.05, 0.2)
-                            if retry_after_hdr:
-                                try:
-                                    backoff = min(10.0, max(0.1, float(retry_after_hdr)))
-                                except (ValueError, TypeError):
-                                    pass
-                            target_limiter.record_429_retry()
+                        body = await upstream_resp.read()
+
+                        sniff_needed, sniff_delay, sniff_reason = evaluate_retry_condition(
+                            status_code=status_code,
+                            headers=upstream_resp.headers,
+                            body_text_or_json=body,
+                            attempt=attempt,
+                            retry_policy=retry_policy,
+                        )
+
+                        if sniff_needed and attempt < max_retries:
+                            target_limiter.record_retry_attempt()
                             print(
-                                f"[telemetry] Upstream 429 in _simple_forward on {path} (attempt {attempt+1}/{max_retries}). "
-                                f"Backing off for {backoff:.2f}s...",
+                                f"[telemetry] Upstream rate limit in _simple_forward on {path} ({sniff_reason}, attempt {attempt+1}/{max_retries+1}). "
+                                f"Re-dispatching with delay={sniff_delay:.2f}s...",
                                 file=sys.stderr,
                             )
                             retry_needed = True
-                            retry_delay = backoff
+                            retry_delay = sniff_delay
+                            retry_reason = sniff_reason
                         else:
-                            body = await upstream_resp.read()
+                            if attempt > 0:
+                                if status_code and 200 <= status_code < 300:
+                                    target_limiter.record_retry_absorbed()
+                                else:
+                                    target_limiter.record_retry_failed()
+
                             t_total = (time.monotonic() - t_start) * 1000
                             if status_code and (status_code < 200 or status_code >= 300):
                                 error = f"HTTP {status_code}"
-                            
+
                             try:
                                 log_proxy_call(path, method, classify_endpoint(path), None, status_code, error, 0, None, t_total,
-                                               route_name=_model_router.default_name, upstream_url=upstream_url)
+                                               route_name=_model_router.default_name, upstream_url=upstream_url,
+                                               retries_attempted=attempt,
+                                               absorbed_429=1 if (attempt > 0 and status_code and 200 <= status_code < 300) else 0)
                             except Exception as tel_err:
                                 print(f"[telemetry] _simple_forward log error: {tel_err}", file=sys.stderr)
 
@@ -1758,6 +2043,8 @@ async def _simple_forward(request, path, method):
                                     "connection", "keep-alive", "upgrade"
                                 ):
                                     simple_headers[k] = v
+                            simple_headers["X-Proxy-Retries-Attempted"] = str(attempt)
+                            simple_headers["X-Proxy-Rate-Limit-Absorbed"] = "1" if (attempt > 0 and status_code and 200 <= status_code < 300) else "0"
 
                             try:
                                 return web.Response(
@@ -1775,8 +2062,12 @@ async def _simple_forward(request, path, method):
                         await req_session.close()
 
             if retry_needed:
-                await asyncio.sleep(retry_delay)
+                attempt += 1
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
                 continue
+            else:
+                break
 
     except asyncio.TimeoutError:
         try:
@@ -2066,7 +2357,7 @@ def main():
     parser.add_argument("--token-limit", type=int, default=DAILY_TOKEN_LIMIT, help="Daily token budget cap (default 480000000)")
     parser.add_argument("--max-concurrent", type=int, default=MAX_CONCURRENT, help="Maximum concurrent upstream requests (default 4)")
     parser.add_argument("--slot-cooldown-ms", type=int, default=SLOT_COOLDOWN_MS, help="Cooldown gap in ms before dispatching next queued request when max concurrency is hit (default 50)")
-    parser.add_argument("--retry-429-max", type=int, default=RETRY_429_MAX, help="Max retry attempts with exponential backoff on upstream 429 errors (default 0, disabled)")
+    parser.add_argument("--retry-429-max", type=int, default=RETRY_429_MAX, help="Max retry attempts on upstream rate limits and transient hiccups (default 3, 0 disables)")
     parser.add_argument("--db", type=str, default=str(DB_PATH), help="SQLite database file path")
     parser.add_argument("--pid-file", type=str, default=str(PID_FILE), help="PID file path")
     args = parser.parse_args()

@@ -1961,7 +1961,11 @@ const App = (() => {
       const maxConcVal = r.max_concurrent ?? 4;
       const stats = r.limiter_stats || {};
       const activeRunning = stats.active || 0;
-      const waitingQueued = stats.queued || 0;
+      const rp = r.retry_policy;
+      const retriesDisabled = (rp && (rp.enabled === false || rp.max_retries === 0));
+      const retryBadge = retriesDisabled
+        ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
+        : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${rp?.max_retries ?? 3} retries (${rp?.mode || 'immediate'})">🔄 ${rp?.max_retries ?? 3} (${rp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
 
       return `
         <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
@@ -1973,6 +1977,7 @@ const App = (() => {
             <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
             ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
           </td>
+          <td>${retryBadge}</td>
           <td>${statusBadge}</td>
           <td style="text-align: right; white-space: nowrap;">
             <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
@@ -2053,6 +2058,8 @@ const App = (() => {
     const priorityInput = document.getElementById('modalRoutePriority');
     const maxConcInput = document.getElementById('modalRouteMaxConcurrent');
     const slotCdInput = document.getElementById('modalRouteSlotCooldown');
+    const maxRetriesInput = document.getElementById('modalRouteMaxRetries');
+    const retryModeInput = document.getElementById('modalRouteRetryMode');
     const enabledInput = document.getElementById('modalRouteEnabled');
 
     if (rule) {
@@ -2064,6 +2071,8 @@ const App = (() => {
       priorityInput.value = rule.priority ?? 10;
       if (maxConcInput) maxConcInput.value = rule.max_concurrent ?? 4;
       if (slotCdInput) slotCdInput.value = rule.slot_cooldown_ms ?? 50;
+      if (maxRetriesInput) maxRetriesInput.value = (rule.retry_policy?.enabled === false) ? 0 : (rule.retry_policy?.max_retries ?? 3);
+      if (retryModeInput) retryModeInput.value = rule.retry_policy?.mode || 'immediate';
       enabledInput.checked = rule.enabled !== false;
     } else {
       titleEl.textContent = '➕ Add Model Route Rule';
@@ -2075,6 +2084,8 @@ const App = (() => {
       priorityInput.value = 100 - existingCount * 10;
       if (maxConcInput) maxConcInput.value = 4;
       if (slotCdInput) slotCdInput.value = 50;
+      if (maxRetriesInput) maxRetriesInput.value = 3;
+      if (retryModeInput) retryModeInput.value = 'immediate';
       enabledInput.checked = true;
     }
 
@@ -2099,7 +2110,19 @@ const App = (() => {
       name: prevDef.name || 'Default Upstream',
       upstream_url: defUpstream,
       max_concurrent: defMaxConc,
-      slot_cooldown_ms: prevDef.slot_cooldown_ms ?? 50
+      slot_cooldown_ms: prevDef.slot_cooldown_ms ?? 50,
+      retry_policy: prevDef.retry_policy || {
+        enabled: true,
+        max_retries: 3,
+        mode: 'immediate',
+        retry_on_status: [429, 503, 529],
+        retry_on_body_patterns: [
+          "rate limit", "rate_limit", "rate_limit_exceeded",
+          "try again", "overloaded", "capacity", "too many requests",
+          "resource exhausted", "quota exceeded", "temporarily unavailable"
+        ],
+        max_retry_after_seconds: 5.0
+      }
     };
 
     if (showAlert) {
@@ -2158,6 +2181,8 @@ const App = (() => {
         const priority = parseInt(document.getElementById('modalRoutePriority')?.value || '10', 10);
         const maxConcurrent = Math.max(1, parseInt(document.getElementById('modalRouteMaxConcurrent')?.value || '4', 10));
         const slotCooldown = Math.max(0, parseInt(document.getElementById('modalRouteSlotCooldown')?.value || '50', 10));
+        const maxRetries = Math.max(0, parseInt(document.getElementById('modalRouteMaxRetries')?.value || '3', 10));
+        const retryMode = document.getElementById('modalRouteRetryMode')?.value || 'immediate';
         const enabled = document.getElementById('modalRouteEnabled')?.checked;
 
         if (!name) {
@@ -2179,6 +2204,19 @@ const App = (() => {
           return;
         }
 
+        const retryPolicy = {
+          enabled: maxRetries > 0,
+          max_retries: maxRetries,
+          mode: retryMode,
+          retry_on_status: [429, 503, 529],
+          retry_on_body_patterns: [
+            "rate limit", "rate_limit", "rate_limit_exceeded",
+            "try again", "overloaded", "capacity", "too many requests",
+            "resource exhausted", "quota exceeded", "temporarily unavailable"
+          ],
+          max_retry_after_seconds: 5.0
+        };
+
         if (!State.routesConfig) {
           State.routesConfig = { default_route: {}, routes: [] };
         }
@@ -2192,7 +2230,8 @@ const App = (() => {
             State.routesConfig.routes[idx] = {
               ...State.routesConfig.routes[idx],
               name, pattern, upstream_url: upstream,
-              priority, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown, enabled
+              priority, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown,
+              retry_policy: retryPolicy, enabled
             };
           }
         } else {
@@ -2204,6 +2243,7 @@ const App = (() => {
             priority,
             max_concurrent: maxConcurrent,
             slot_cooldown_ms: slotCooldown,
+            retry_policy: retryPolicy,
             enabled
           };
           State.routesConfig.routes.push(newRule);

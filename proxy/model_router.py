@@ -22,6 +22,56 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_UPSTREAM_URL = "https://llm.ai.e-infra.cz/v1"
 
+DEFAULT_RETRY_POLICY: Dict[str, Any] = {
+    "enabled": True,
+    "max_retries": 3,
+    "mode": "immediate",  # "immediate" (zero-delay) or "exponential" (backoff)
+    "retry_on_status": [429, 503, 529],
+    "retry_on_body_patterns": [
+        "rate limit", "rate_limit", "rate_limit_exceeded",
+        "try again", "overloaded", "capacity", "too many requests",
+        "resource exhausted", "quota exceeded", "temporarily unavailable"
+    ],
+    "max_retry_after_seconds": 5.0,
+}
+
+
+def normalize_retry_policy(policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ensure retry policy dict has valid schema, proper types, and sensible defaults."""
+    merged = dict(DEFAULT_RETRY_POLICY)
+    if not isinstance(policy, dict):
+        return merged
+    for k, v in policy.items():
+        merged[k] = v
+
+    try:
+        merged["max_retries"] = max(0, int(merged.get("max_retries", 3)))
+    except (ValueError, TypeError):
+        merged["max_retries"] = 3
+
+    merged["enabled"] = bool(merged.get("enabled", True)) and (merged["max_retries"] > 0)
+    merged["mode"] = "exponential" if str(merged.get("mode", "")).lower() == "exponential" else "immediate"
+
+    if not isinstance(merged.get("retry_on_status"), (list, set, tuple)):
+        merged["retry_on_status"] = [429, 503, 529]
+    else:
+        try:
+            merged["retry_on_status"] = [int(s) for s in merged["retry_on_status"]]
+        except (ValueError, TypeError):
+            merged["retry_on_status"] = [429, 503, 529]
+
+    if not isinstance(merged.get("retry_on_body_patterns"), list):
+        merged["retry_on_body_patterns"] = DEFAULT_RETRY_POLICY["retry_on_body_patterns"]
+    else:
+        merged["retry_on_body_patterns"] = [str(p) for p in merged["retry_on_body_patterns"] if str(p).strip()]
+
+    try:
+        merged["max_retry_after_seconds"] = max(0.0, float(merged.get("max_retry_after_seconds", 5.0)))
+    except (ValueError, TypeError):
+        merged["max_retry_after_seconds"] = 5.0
+
+    return merged
+
 
 def build_upstream_url(upstream_base: str, path: str) -> str:
     """
@@ -68,6 +118,9 @@ class UpstreamConcurrencyLimiter:
         self._total_queued = 0
         self._peak_active = 0
         self._total_retries_429 = 0
+        self._total_retries_attempted = 0
+        self._total_retries_absorbed = 0
+        self._total_retries_failed = 0
 
     @property
     def active(self) -> int:
@@ -79,6 +132,17 @@ class UpstreamConcurrencyLimiter:
 
     def record_429_retry(self):
         self._total_retries_429 += 1
+        self._total_retries_attempted += 1
+
+    def record_retry_attempt(self):
+        self._total_retries_429 += 1
+        self._total_retries_attempted += 1
+
+    def record_retry_absorbed(self):
+        self._total_retries_absorbed += 1
+
+    def record_retry_failed(self):
+        self._total_retries_failed += 1
 
     def get_stats(self) -> dict:
         return {
@@ -89,6 +153,9 @@ class UpstreamConcurrencyLimiter:
             "total_admitted": self._total_admitted,
             "total_queued": self._total_queued,
             "total_retries_429": self._total_retries_429,
+            "total_retries_attempted": self._total_retries_attempted,
+            "total_retries_absorbed": self._total_retries_absorbed,
+            "total_retries_failed": self._total_retries_failed,
             "peak_active": self._peak_active,
         }
 
@@ -157,6 +224,7 @@ class RouteResolutionResult:
     pattern_matched: Optional[str] = None
     max_concurrent: int = 4
     slot_cooldown_ms: int = 50
+    retry_policy: Optional[Dict[str, Any]] = None
 
 
 class ModelRouteRule:
@@ -170,6 +238,7 @@ class ModelRouteRule:
         priority: int = 10,
         max_concurrent: int = 4,
         slot_cooldown_ms: int = 50,
+        retry_policy: Optional[Dict[str, Any]] = None,
         limiter: Optional[UpstreamConcurrencyLimiter] = None,
     ):
         self.id = str(id) if id else f"route_{uuid.uuid4().hex[:8]}"
@@ -180,6 +249,7 @@ class ModelRouteRule:
         self.priority = int(priority)
         self.max_concurrent = max(1, int(max_concurrent))
         self.slot_cooldown_ms = max(0, int(slot_cooldown_ms))
+        self.retry_policy = normalize_retry_policy(retry_policy)
         
         self.limiter = limiter or UpstreamConcurrencyLimiter(
             max_concurrent=self.max_concurrent,
@@ -217,6 +287,7 @@ class ModelRouteRule:
             "priority": self.priority,
             "max_concurrent": self.max_concurrent,
             "slot_cooldown_ms": self.slot_cooldown_ms,
+            "retry_policy": self.retry_policy,
         }
 
     def to_dict(self, mask_keys: bool = False) -> Dict[str, Any]:
@@ -230,6 +301,7 @@ class ModelRouteRule:
             "priority": self.priority,
             "max_concurrent": self.max_concurrent,
             "slot_cooldown_ms": self.slot_cooldown_ms,
+            "retry_policy": self.retry_policy,
             "limiter_stats": self.limiter.get_stats(),
         }
 
@@ -245,6 +317,7 @@ class ModelRouter:
         self.default_name = "Default Upstream (e-INFRA)"
         self.default_max_concurrent = 4
         self.default_slot_cooldown_ms = 50
+        self.default_retry_policy = normalize_retry_policy(None)
         self.default_limiter = UpstreamConcurrencyLimiter(
             max_concurrent=self.default_max_concurrent,
             slot_cooldown_seconds=self.default_slot_cooldown_ms / 1000.0,
@@ -268,6 +341,7 @@ class ModelRouter:
             self.default_name = def_route.get("name", "Default Upstream")
             self.default_max_concurrent = max(1, int(def_route.get("max_concurrent", 4)))
             self.default_slot_cooldown_ms = max(0, int(def_route.get("slot_cooldown_ms", 50)))
+            self.default_retry_policy = normalize_retry_policy(def_route.get("retry_policy"))
             self.default_limiter.max_concurrent = self.default_max_concurrent
             self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
 
@@ -285,6 +359,7 @@ class ModelRouter:
                     priority=r.get("priority", 10),
                     max_concurrent=r.get("max_concurrent", 4),
                     slot_cooldown_ms=r.get("slot_cooldown_ms", 50),
+                    retry_policy=r.get("retry_policy"),
                     limiter=existing.limiter if existing else None,
                 )
                 loaded_rules.append(rule)
@@ -307,6 +382,7 @@ class ModelRouter:
                 "upstream_url": self.default_upstream_url,
                 "max_concurrent": self.default_max_concurrent,
                 "slot_cooldown_ms": self.default_slot_cooldown_ms,
+                "retry_policy": self.default_retry_policy,
             },
             "routes": [r.to_config_dict() for r in self.rules],
         }
@@ -362,6 +438,7 @@ class ModelRouter:
                         pattern_matched=rule.pattern,
                         max_concurrent=rule.max_concurrent,
                         slot_cooldown_ms=rule.slot_cooldown_ms,
+                        retry_policy=rule.retry_policy,
                     )
 
         # Fallback to default route
@@ -373,6 +450,7 @@ class ModelRouter:
             pattern_matched=None,
             max_concurrent=self.default_max_concurrent,
             slot_cooldown_ms=self.default_slot_cooldown_ms,
+            retry_policy=self.default_retry_policy,
         )
 
     def get_limiter(self, route_id: Optional[str] = None) -> UpstreamConcurrencyLimiter:
@@ -397,6 +475,7 @@ class ModelRouter:
                 "pattern": r.pattern,
                 "upstream_url": r.upstream_url,
                 "enabled": r.enabled,
+                "retry_policy": r.retry_policy,
                 "stats": r.limiter.get_stats(),
             })
 
@@ -404,6 +483,7 @@ class ModelRouter:
             "default": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
+                "retry_policy": self.default_retry_policy,
                 "stats": self.default_limiter.get_stats(),
             },
             "routes": routes_stats,
@@ -416,6 +496,7 @@ class ModelRouter:
                 "upstream_url": self.default_upstream_url,
                 "max_concurrent": self.default_max_concurrent,
                 "slot_cooldown_ms": self.default_slot_cooldown_ms,
+                "retry_policy": self.default_retry_policy,
                 "limiter_stats": self.default_limiter.get_stats(),
             },
             "routes": [r.to_dict() for r in self.rules],
@@ -437,6 +518,8 @@ class ModelRouter:
         if "slot_cooldown_ms" in def_route:
             self.default_slot_cooldown_ms = max(0, int(def_route["slot_cooldown_ms"]))
             self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
+        if "retry_policy" in def_route:
+            self.default_retry_policy = normalize_retry_policy(def_route["retry_policy"])
 
         existing_rules_map = {r.id: r for r in self.rules}
 
@@ -448,6 +531,7 @@ class ModelRouter:
             priority_val = r.get("priority", 100 - i * 10)
             max_c = max(1, int(r.get("max_concurrent", 4)))
             slot_cd = max(0, int(r.get("slot_cooldown_ms", 50)))
+            r_policy = r.get("retry_policy")
 
             rule = ModelRouteRule(
                 id=r_id,
@@ -458,6 +542,7 @@ class ModelRouter:
                 priority=priority_val,
                 max_concurrent=max_c,
                 slot_cooldown_ms=slot_cd,
+                retry_policy=r_policy,
                 limiter=existing.limiter if existing else None,
             )
             new_rules.append(rule)
