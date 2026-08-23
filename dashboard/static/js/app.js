@@ -36,6 +36,7 @@ const App = (() => {
     runningProxyConfig: null,
     healthData: null,
     routesConfig: null,
+    userEditingConfig: false,
     
     // In-Flight Loading Locks & Concurrency Guards
     isControlPanelBundleLoading: false,
@@ -938,17 +939,22 @@ const App = (() => {
         if (bundle.proxy_status) {
           State.proxyStatus = bundle.proxy_status;
           const data = bundle.proxy_status;
-          const defUpstream = (bundle.routes && bundle.routes.default_route && bundle.routes.default_route.upstream_url) || data.upstream || 'https://llm.ai.e-infra.cz/v1';
+          const defUpstream = (bundle.routes && bundle.routes.default_route && bundle.routes.default_route.upstream_url) || data.upstream || 'https://openrouter.ai/api/v1';
           State.runningProxyConfig = {
             port: data.port || 9090,
             host: data.host || '0.0.0.0',
             token_limit: data.token_limit || 480000000,
             upstream: defUpstream
           };
+          const portInput = document.getElementById('proxyConfigPort');
+          const hostInput = document.getElementById('proxyConfigHost');
+          const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
           const upstreamInput = document.getElementById('proxyConfigUpstream');
-          if (upstreamInput && document.activeElement !== upstreamInput && !isProxyConfigDirty()) {
-            upstreamInput.value = defUpstream;
-          }
+          if (portInput) portInput.value = data.port || 9090;
+          if (hostInput) hostInput.value = data.host || '0.0.0.0';
+          if (tokenLimitInput) tokenLimitInput.value = formatTokenLimitToMillion(data.token_limit || 480000000);
+          if (upstreamInput) upstreamInput.value = defUpstream;
+
           UI.renderProxyStatus(data);
           updateProxyConfigDirtyState();
         }
@@ -1636,20 +1642,24 @@ const App = (() => {
   }
 
   function isProxyConfigDirty() {
+    if (!State.userEditingConfig) return false;
     if (!State.runningProxyConfig) return false;
     const portInput = document.getElementById('proxyConfigPort');
     const hostInput = document.getElementById('proxyConfigHost');
     const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
     const upstreamInput = document.getElementById('proxyConfigUpstream');
     
-    const currPort = portInput ? parseInt(portInput.value, 10) : 9090;
-    const currHost = hostInput ? hostInput.value.trim() : '0.0.0.0';
-    const currTokenLimit = tokenLimitInput ? parseTokenLimitFromInput(tokenLimitInput.value) : 480000000;
-    const currUpstream = upstreamInput ? normalizeUpstreamUrl(upstreamInput.value) : '';
+    if (!portInput || !hostInput || !tokenLimitInput || !upstreamInput) return false;
+    if (!upstreamInput.value) return false;
+
+    const currPort = parseInt(portInput.value, 10);
+    const currHost = hostInput.value.trim();
+    const currTokenLimit = parseTokenLimitFromInput(tokenLimitInput.value);
+    const currUpstream = normalizeUpstreamUrl(upstreamInput.value);
     
     const configuredUpstream = State.routesConfig?.default_route?.upstream_url ? normalizeUpstreamUrl(State.routesConfig.default_route.upstream_url) : '';
     const runningUpstream = normalizeUpstreamUrl(State.runningProxyConfig.upstream);
-    const baseUpstream = runningUpstream || configuredUpstream;
+    const baseUpstream = configuredUpstream || runningUpstream;
 
     const runningPort = parseInt(State.runningProxyConfig.port || 9090, 10);
     const runningHost = String(State.runningProxyConfig.host || '0.0.0.0').trim();
@@ -1683,16 +1693,17 @@ const App = (() => {
   }
 
   function resetProxyConfigInputs() {
+    State.userEditingConfig = false;
     if (!State.runningProxyConfig) return;
     const portInput = document.getElementById('proxyConfigPort');
     const hostInput = document.getElementById('proxyConfigHost');
     const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
     const upstreamInput = document.getElementById('proxyConfigUpstream');
 
-    const defUpstream = State.routesConfig?.default_route?.upstream_url || State.runningProxyConfig.upstream;
+    const defUpstream = State.routesConfig?.default_route?.upstream_url || State.runningProxyConfig.upstream || 'https://openrouter.ai/api/v1';
 
-    if (portInput) portInput.value = State.runningProxyConfig.port;
-    if (hostInput) hostInput.value = State.runningProxyConfig.host;
+    if (portInput) portInput.value = State.runningProxyConfig.port || 9090;
+    if (hostInput) hostInput.value = State.runningProxyConfig.host || '0.0.0.0';
     if (tokenLimitInput) tokenLimitInput.value = formatTokenLimitToMillion(State.runningProxyConfig.token_limit ?? 480000000);
     if (upstreamInput) upstreamInput.value = defUpstream;
 
@@ -1743,7 +1754,7 @@ const App = (() => {
           saveUpstreamToHistory(activeUpstream);
         }
 
-        if (!isProxyConfigDirty()) {
+        if (!State.userEditingConfig) {
           const portInput = document.getElementById('proxyConfigPort');
           const hostInput = document.getElementById('proxyConfigHost');
           const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
@@ -1832,7 +1843,7 @@ const App = (() => {
       }
 
       // Only synchronize input values if user is NOT currently editing/dirty
-      if (!isProxyConfigDirty()) {
+      if (!State.userEditingConfig) {
         const portInput = document.getElementById('proxyConfigPort');
         const hostInput = document.getElementById('proxyConfigHost');
         const tokenLimitInput = document.getElementById('proxyConfigTokenLimit');
@@ -1913,7 +1924,7 @@ const App = (() => {
     if (defMaxConcInput && document.activeElement !== defMaxConcInput) {
       defMaxConcInput.value = defRoute.max_concurrent ?? 4;
     }
-    if (defRoute.upstream_url && upstreamInput && document.activeElement !== upstreamInput && !isProxyConfigDirty()) {
+    if (defRoute.upstream_url && upstreamInput && document.activeElement !== upstreamInput && !State.userEditingConfig) {
       upstreamInput.value = defRoute.upstream_url;
       if (State.runningProxyConfig) {
         State.runningProxyConfig.upstream = defRoute.upstream_url;
@@ -2099,6 +2110,7 @@ const App = (() => {
       const res = await TelemetryAPI.saveProxyRoutes(State.routesConfig);
       if (res.success) {
         State.routesConfig = res.config || State.routesConfig;
+        State.userEditingConfig = false;
         if (State.runningProxyConfig) {
           State.runningProxyConfig.upstream = defUpstream;
         }
@@ -2295,20 +2307,20 @@ const App = (() => {
     const upstreamInput = document.getElementById('proxyConfigUpstream');
 
     if (portInput) {
-      portInput.addEventListener('input', updateProxyConfigDirtyState);
-      portInput.addEventListener('change', updateProxyConfigDirtyState);
+      portInput.addEventListener('input', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
+      portInput.addEventListener('change', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
     }
     if (hostInput) {
-      hostInput.addEventListener('input', updateProxyConfigDirtyState);
-      hostInput.addEventListener('change', updateProxyConfigDirtyState);
+      hostInput.addEventListener('input', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
+      hostInput.addEventListener('change', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
     }
     if (tokenLimitInput) {
-      tokenLimitInput.addEventListener('input', updateProxyConfigDirtyState);
-      tokenLimitInput.addEventListener('change', updateProxyConfigDirtyState);
+      tokenLimitInput.addEventListener('input', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
+      tokenLimitInput.addEventListener('change', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
     }
     if (upstreamInput) {
-      upstreamInput.addEventListener('input', updateProxyConfigDirtyState);
-      upstreamInput.addEventListener('change', updateProxyConfigDirtyState);
+      upstreamInput.addEventListener('input', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
+      upstreamInput.addEventListener('change', () => { State.userEditingConfig = true; updateProxyConfigDirtyState(); });
     }
 
     // Quick select history dropdown
@@ -2318,6 +2330,7 @@ const App = (() => {
         if (upstreamInput && upstreamQuickSelect.value) {
           upstreamInput.value = upstreamQuickSelect.value;
           upstreamQuickSelect.selectedIndex = 0;
+          State.userEditingConfig = true;
           updateProxyConfigDirtyState();
         }
       });
@@ -2352,6 +2365,7 @@ const App = (() => {
           }
         }
 
+        State.userEditingConfig = false;
         startBtn.disabled = true;
         saveUpstreamToHistory(upstream);
         UI.showProxyAlert(`Starting proxy gateway on port ${port}...`, 'info', 0);
@@ -2437,6 +2451,7 @@ const App = (() => {
           }
         }
 
+        State.userEditingConfig = false;
         restartBtn.disabled = true;
         saveUpstreamToHistory(upstream);
         UI.showProxyAlert(`Restarting proxy gateway on port ${port}...`, 'info', 0);

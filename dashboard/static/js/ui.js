@@ -387,7 +387,7 @@ const UI = (() => {
       const statusTagClass = isErr ? 'tag-error' : (c.status_code >= 200 && c.status_code < 300) ? 'tag-success' : 'tag-warning';
       const statusText = c.status_code || (isErr ? 'ERR' : '?');
 
-      const routeName = c.route_name || (c.model ? 'Default Upstream' : '');
+      const routeName = c.route_name || '';
       const upstreamUrl = c.upstream_url || '';
 
       let errorCellHtml = '';
@@ -404,12 +404,7 @@ const UI = (() => {
           </div>
         `;
       } else {
-        const hoverSuccess = `📍 Route / Provider: ${routeName || 'Default Upstream'}\n🌐 Target Upstream: ${upstreamUrl || 'Standard Base'}\n✔ Status: ${statusText} OK`;
-        errorCellHtml = `
-          <div class="error-cell-wrapper" title="${escapeHtml(hoverSuccess)}">
-            ${routeName ? `<span class="tag tag-provider tag-provider-success">${escapeHtml(routeName)}</span>` : '<span style="color:var(--text-dim); font-size:11px;">—</span>'}
-          </div>
-        `;
+        errorCellHtml = '<span style="color:var(--text-dim); font-size:11px;">—</span>';
       }
 
       return `

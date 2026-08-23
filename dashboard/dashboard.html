@@ -590,7 +590,7 @@
                   <span id="proxyUpstreamHistoryCount" style="font-size: 11px; color: var(--text-muted);">Cached targets available</span>
                 </div>
                 <div class="proxy-input-with-dropdown">
-                  <input type="text" id="proxyConfigUpstream" class="proxy-input" list="proxyUpstreamDatalist" value="https://llm.ai.e-infra.cz/v1" placeholder="https://llm.ai.e-infra.cz/v1">
+                  <input type="text" id="proxyConfigUpstream" class="proxy-input" list="proxyUpstreamDatalist" value="" placeholder="https://openrouter.ai/api/v1">
                   <datalist id="proxyUpstreamDatalist">
                     <!-- Populated dynamically with localStorage history -->
                   </datalist>
@@ -604,7 +604,7 @@
                   <label for="defaultRouterMaxConcurrent">Default Max Concurrency</label>
                   <span style="font-size: 11px; color: var(--text-muted);">Parallel slots</span>
                 </div>
-                <input type="number" id="defaultRouterMaxConcurrent" class="proxy-input" value="4" min="1" max="128" step="1">
+                <input type="number" id="defaultRouterMaxConcurrent" class="proxy-input" value="3" min="1" max="128" step="1">
               </div>
             </div>
 
