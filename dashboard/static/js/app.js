@@ -454,7 +454,7 @@ const App = (() => {
         avg_rtt: g.rttCount ? (g.rttSum / g.rttCount) : 0,
         max_rtt: g.rttMax,
         avg_tps: g.tpsTotalMs > 0 ? (g.tpsOutputTokens / (g.tpsTotalMs / 1000)) : 0,
-        avg_load: g.loadCount ? (g.loadSum / g.loadCount) : 0,
+        avg_load: g.loadCount ? (g.loadSum / g.loadCount) : null,
         errors: g.errors
       };
 

@@ -453,7 +453,7 @@ const UI = (() => {
           <td class="num">${formatMs(g.avg_rtt)}</td>
           <td class="num">${formatMs(g.max_rtt)}</td>
           <td class="num">${formatTps(g.avg_tps)}</td>
-          <td class="num">${g.avg_load !== null && g.avg_load !== undefined && g.avg_load > 0 ? Number(g.avg_load).toFixed(1) : '—'}</td>
+          <td class="num">${g.avg_load !== null && g.avg_load !== undefined ? Number(g.avg_load).toFixed(1) : '—'}</td>
           <td class="num">
             <span class="tag ${g.errors ? 'tag-error' : 'tag-success'}">
               ${g.errors || '0'}
@@ -590,7 +590,7 @@ const UI = (() => {
                   <td class="num">${formatMs(g.avg_ttfb)}</td>
                   <td class="num">${formatMs(g.avg_rtt)}</td>
                   <td class="num">${formatTps(g.avg_tps)}</td>
-                  <td class="num">${(g.avg_load || 0).toFixed(1)}</td>
+                  <td class="num">${g.avg_load !== null && g.avg_load !== undefined ? Number(g.avg_load).toFixed(1) : '—'}</td>
                   <td class="num">
                     <span class="tag ${g.errors ? 'tag-error' : 'tag-success'}">
                       ${g.errors || '0'}
@@ -658,7 +658,7 @@ const UI = (() => {
                 <td class="num">${formatMs(g.avg_rtt)}</td>
                 <td class="num">${formatMs(g.max_rtt)}</td>
                 <td class="num">${formatTps(g.avg_tps)}</td>
-                <td class="num">${(g.avg_load || 0).toFixed(1)}</td>
+                <td class="num">${g.avg_load !== null && g.avg_load !== undefined ? Number(g.avg_load).toFixed(1) : '—'}</td>
                 <td class="num">
                   <span class="tag ${g.errors ? 'tag-error' : 'tag-success'}">
                     ${g.errors || '0'}

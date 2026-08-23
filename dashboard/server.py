@@ -439,14 +439,14 @@ async def handle_query(request: web.Request) -> web.Response:
                 g["total_input"] += r["total_input"] if r["total_input"] else 0
                 g["total_output"] += r["total_output"] if r["total_output"] else 0
                 
-                if r["sum_ttfb"]:
-                    g["sum_ttfb"] += r["sum_ttfb"]
+                if r["ttfb_count"]:
+                    g["sum_ttfb"] += (r["sum_ttfb"] or 0.0)
                     g["ttfb_count"] += r["ttfb_count"]
                 if r["max_ttfb"] and r["max_ttfb"] > g["max_ttfb"]:
                     g["max_ttfb"] = r["max_ttfb"]
                     
-                if r["sum_rtt"]:
-                    g["sum_rtt"] += r["sum_rtt"]
+                if r["rtt_count"]:
+                    g["sum_rtt"] += (r["sum_rtt"] or 0.0)
                     g["rtt_count"] += r["rtt_count"]
                 if r["max_rtt"] and r["max_rtt"] > g["max_rtt"]:
                     g["max_rtt"] = r["max_rtt"]
@@ -456,8 +456,8 @@ async def handle_query(request: web.Request) -> web.Response:
                 if r["sum_total_ms_for_tps"]:
                     g["sum_total_ms_for_tps"] += r["sum_total_ms_for_tps"]
                     
-                if r["sum_load"]:
-                    g["sum_load"] += r["sum_load"]
+                if r["load_count"]:
+                    g["sum_load"] += (r["sum_load"] or 0.0)
                     g["load_count"] += r["load_count"]
                     
                 g["errors"] += r["errors"] if r["errors"] else 0

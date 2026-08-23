@@ -73,9 +73,6 @@ _model_router = ModelRouter(config_path=ROUTES_CONFIG_FILE)
 if not ROUTES_CONFIG_FILE.exists():
     _model_router.default_upstream_url = UPSTREAM
 
-# Models to track server load for
-WATCHED_MODELS = ["Deepseek-v4", "Glm-5.2", "Qwen3.5-int4", "Kimi-K2.7"]
-
 # ── Rate Limiting & Concurrency Control ──────────────────────────────────────
 # e-INFRA enforces max 4 parallel requests per API key.
 # When concurrency is maxed out and queued requests are waiting, a slot cooldown
@@ -763,7 +760,10 @@ _load_cache_lock = asyncio.Lock()
 
 
 async def fetch_server_load(model_hint=None):
-    """Fetch server load from status API. Returns (running, tok_s, model_name) or (None, None, None)."""
+    """Fetch server load from status API for e-INFRA models. Returns (running, tok_s, model_name) or (None, None, None)."""
+    if not model_hint:
+        return None, None, None
+
     now = time.time()
     if _load_cache["data"] and (now - _load_cache["ts"]) < 10:
         data = _load_cache["data"]
@@ -780,6 +780,9 @@ async def fetch_server_load(model_hint=None):
                     for m in raw:
                         if not isinstance(m, dict):
                             continue
+                        # Rigorous filtering: ONLY active online nodes are valid for live telemetry
+                        if m.get("status") not in ("online",):
+                            continue
                         name = m.get("model_name") or m.get("container", "?")
                         latest = m.get("latest")
                         if not isinstance(latest, dict):
@@ -790,7 +793,7 @@ async def fetch_server_load(model_hint=None):
                             running = latest.get("num_requests_running", 0) or 0
                             tok_s = latest.get("generation_tokens_rate", 0.0) or 0.0
                         data[name] = {
-                            "status": m.get("status", "unknown"),
+                            "status": m.get("status", "online"),
                             "running": running,
                             "tok_s": tok_s,
                             "kv_cache": latest.get("kv_cache_usage_perc", 0) or 0,
@@ -802,29 +805,47 @@ async def fetch_server_load(model_hint=None):
                     print(f"[telemetry] status API fetch failed: {e}", file=sys.stderr)
                     return None, None, None
 
-    if model_hint and data:
-        hint_lower = model_hint.lower()
-        name_map = {
-            "deepseek": "Deepseek-v4",
-            "glm": "Glm-5.2",
-            "qwen": "Qwen3.5-int4",
-            "kimi": "Kimi-K3",
-            "gpt-oss": "Gpt-oss-120b",
-            "gemma": "Gemma4",
-        }
-        matched_name = None
-        for key, api_name in name_map.items():
-            if key in hint_lower:
-                matched_name = api_name
-                break
-        if matched_name and matched_name in data:
-            d = data[matched_name]
-            return d["running"], d["tok_s"], matched_name
-        for name in WATCHED_MODELS:
-            if name in data:
-                d = data[name]
-                return d["running"], d["tok_s"], name
+    if not data:
+        return None, None, None
 
+    # Normalized lookup map: lowercase_name -> original_name in data
+    norm_data = {k.lower().strip(): k for k in data.keys()}
+
+    m_str = str(model_hint).strip().lower()
+    canon_str = str(resolve_canonical_model(model_hint)).strip().lower()
+
+    # 1. Exact direct match
+    if m_str in norm_data:
+        target_name = norm_data[m_str]
+        d = data[target_name]
+        return d["running"], d["tok_s"], target_name
+
+    # 2. Canonical alias match (e.g. 'deepseek' -> 'deepseek-v4-flash', 'kimi' -> 'kimi-k3')
+    if canon_str in norm_data:
+        target_name = norm_data[canon_str]
+        d = data[target_name]
+        return d["running"], d["tok_s"], target_name
+
+    # 3. Strip thinking suffix (e.g. 'deepseek-v4-flash-thinking' -> 'deepseek-v4-flash')
+    m_no_think = m_str.replace("-thinking", "").replace("_thinking", "")
+    if m_no_think in norm_data:
+        target_name = norm_data[m_no_think]
+        d = data[target_name]
+        return d["running"], d["tok_s"], target_name
+
+    canon_no_think = canon_str.replace("-thinking", "").replace("_thinking", "")
+    if canon_no_think in norm_data:
+        target_name = norm_data[canon_no_think]
+        d = data[target_name]
+        return d["running"], d["tok_s"], target_name
+
+    # 4. Check if any online model equals raw or canon model
+    for norm_name, original_name in norm_data.items():
+        if norm_name == m_str or norm_name == canon_str:
+            d = data[original_name]
+            return d["running"], d["tok_s"], original_name
+
+    # Model is unmonitored, external, or not hosted on e-INFRA -> return None cleanly
     return None, None, None
 
 
@@ -1123,16 +1144,49 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             if payload.get("stream") and not payload.get("stream_options"):
                 payload["stream_options"] = {"include_usage": True}
                 body = json.dumps(payload).encode("utf-8")
+            
+            # Approximate prompt input tokens from payload if possible
+            if isinstance(payload, dict):
+                prompt_text = ""
+                if "messages" in payload and isinstance(payload["messages"], list):
+                    for msg in payload["messages"]:
+                        if isinstance(msg, dict):
+                            content = msg.get("content", "")
+                            if isinstance(content, str):
+                                prompt_text += content + " "
+                            elif isinstance(content, list):
+                                for part in content:
+                                    if isinstance(part, dict) and part.get("text"):
+                                        prompt_text += str(part["text"]) + " "
+                elif "prompt" in payload:
+                    p = payload["prompt"]
+                    if isinstance(p, str):
+                        prompt_text = p
+                    elif isinstance(p, list):
+                        prompt_text = " ".join(str(x) for x in p)
+                elif "input" in payload:
+                    inp = payload["input"]
+                    if isinstance(inp, str):
+                        prompt_text = inp
+                    elif isinstance(inp, list):
+                        prompt_text = " ".join(str(x) for x in inp)
+                if prompt_text:
+                    input_tokens = max(1, len(prompt_text) // 4)
     except (json.JSONDecodeError, KeyError):
         pass
-
-    server_running, server_tok_s, server_model = await fetch_server_load(model)
 
     # Dynamic model route resolution
     route_res = _model_router.resolve(model)
     route_name = route_res.route_name
     resolved_base = UPSTREAM if (route_res.is_default and UPSTREAM != DEFAULT_UPSTREAM) else route_res.upstream_url
     upstream_url = build_upstream_url(resolved_base, path)
+
+    # Server load telemetry (strictly applicable for e-INFRA cluster upstreams)
+    is_einfra = ("e-infra.cz" in resolved_base.lower()) or (resolved_base.strip() == DEFAULT_UPSTREAM.strip())
+    if is_einfra:
+        server_running, server_tok_s, server_model = await fetch_server_load(model)
+    else:
+        server_running, server_tok_s, server_model = None, None, None
 
     headers = dict(request.headers)
     headers.pop("Host", None)
@@ -1284,6 +1338,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         reasoning_tokens = collected_usage.get("reasoning_tokens")
                                     if not output_tokens or output_tokens == 0:
                                         output_tokens = max(1, content_chars // 4)
+                                elif content_chars > 0 and not output_tokens:
+                                    output_tokens = max(1, content_chars // 4)
 
                                 # Record token budget
                                 try:
@@ -1380,6 +1436,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                                 resp_tool_calls = msg.get("tool_calls")
                                             if not resp_text and "text" in choices[0]:
                                                 resp_text = choices[0].get("text")
+                                        if not output_tokens and resp_text:
+                                            output_tokens = max(1, len(resp_text) // 4)
                                         if resp_data.get("error"):
                                             err_obj = resp_data["error"]
                                             if isinstance(err_obj, dict):

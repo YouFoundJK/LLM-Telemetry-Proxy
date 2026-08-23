@@ -52,14 +52,14 @@ def print_summary(args):
         SELECT
             model,
             SUM(COALESCE(calls_count, 1)) as calls,
-            ROUND(SUM(ttfb_ms) / SUM(COALESCE(calls_count, 1)), 0) as avg_ttfb,
+            ROUND(SUM(ttfb_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN ttfb_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_ttfb,
             ROUND(MAX(ttfb_ms), 0) as max_ttfb,
-            ROUND(SUM(total_ms) / SUM(COALESCE(calls_count, 1)), 0) as avg_total,
+            ROUND(SUM(total_ms * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN total_ms IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_total,
             ROUND(MAX(total_ms), 0) as max_total,
-            ROUND(SUM(tokens_per_s * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)), 1) as avg_tps,
-            ROUND(SUM(server_running * COALESCE(calls_count, 1)) / SUM(COALESCE(calls_count, 1)), 1) as avg_load,
-            ROUND(SUM(input_tokens) / SUM(COALESCE(calls_count, 1)), 0) as avg_input,
-            ROUND(SUM(output_tokens) / SUM(COALESCE(calls_count, 1)), 0) as avg_output,
+            ROUND(SUM(tokens_per_s * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN tokens_per_s IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 1) as avg_tps,
+            ROUND(SUM(server_running * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN server_running IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 1) as avg_load,
+            ROUND(SUM(input_tokens * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN input_tokens IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_input,
+            ROUND(SUM(output_tokens * COALESCE(calls_count, 1)) / NULLIF(SUM(CASE WHEN output_tokens IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END), 0), 0) as avg_output,
             SUM(CASE WHEN error IS NOT NULL THEN COALESCE(calls_count, 1) ELSE 0 END) as errors
         FROM api_calls
         WHERE 1=1 {where} {model_filter}
