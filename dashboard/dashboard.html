@@ -37,9 +37,20 @@
           <span class="proxy-dot offline" id="proxyHeaderDot"></span>
           <span id="proxyHeaderText">Proxy: Offline</span>
         </div>
-        <div class="header-concurrency-badge" id="headerConcurrencyBadge" title="Active Concurrency / Max (Queued) — Click to open Gateway Control" style="cursor: pointer;">
-          <span class="concurrency-icon">⚡</span>
-          <span id="headerConcurrencyVal">0 / 4 (0)</span>
+        <div class="header-concurrency-badge-wrapper" id="headerConcurrencyBadgeWrapper">
+          <div class="header-concurrency-badge" id="headerConcurrencyBadge" title="Click to open Gateway Control" style="cursor: pointer;">
+            <span class="concurrency-icon">⚡</span>
+            <span id="headerConcurrencyVal">0 / 4 (0)</span>
+          </div>
+          <!-- Hover Popover Preview for Per-Upstream / Per-Model Active Concurrency & Queues -->
+          <div class="header-concurrency-dropdown" id="headerConcurrencyDropdown">
+            <div class="concurrency-dropdown-header">
+              <span>⚡ Live Upstream Concurrency & Queues</span>
+            </div>
+            <div class="concurrency-dropdown-list" id="headerConcurrencyDropdownList">
+              <div class="concurrency-dropdown-empty">Loading upstream status...</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -575,7 +586,7 @@
               </div>
               <div class="proxy-form-group full-width">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                  <label for="proxyConfigUpstream">Upstream Target URL</label>
+                  <label for="proxyConfigUpstream">Default Upstream Target URL</label>
                   <span id="proxyUpstreamHistoryCount" style="font-size: 11px; color: var(--text-muted);">Cached targets available</span>
                 </div>
                 <div class="proxy-input-with-dropdown">
@@ -587,6 +598,71 @@
                     <option value="" disabled selected>▼ History Cache</option>
                   </select>
                 </div>
+              </div>
+              <div class="proxy-form-group">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <label for="defaultRouterMaxConcurrent">Default Max Concurrency</label>
+                  <span style="font-size: 11px; color: var(--text-muted);">Parallel slots</span>
+                </div>
+                <input type="number" id="defaultRouterMaxConcurrent" class="proxy-input" value="4" min="1" max="128" step="1">
+              </div>
+            </div>
+
+            <!-- Dynamic Model Routing Section -->
+            <div class="model-routes-container" style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                <div>
+                  <div style="font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px;">
+                    <span>🔀 Dynamic Model Routers</span>
+                    <span id="activeRoutesCountBadge" class="badge-tag" style="font-size: 11px;">0 active rules</span>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
+                    Matches requested model against regex and routes directly with dedicated concurrency limits.
+                  </div>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <button type="button" id="addNewRouteBtn" class="btn-action" style="padding: 4px 10px; font-size: 11px; font-weight: 500; height: 26px;">
+                    ➕ Add Model Route
+                  </button>
+                  <button type="button" id="saveRoutesConfigBtn" class="btn-action btn-accent" style="padding: 4px 12px; font-size: 11px; font-weight: 600; height: 26px;">
+                    💾 Save & Sync
+                  </button>
+                </div>
+              </div>
+
+              <!-- Live Route Tester / Simulator Bar -->
+              <div class="route-tester-box">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span style="font-size: 12px; font-weight: 500; color: var(--text-muted); white-space: nowrap;">⚡ Test Matcher:</span>
+                  <input type="text" id="liveRouteTestInput" class="proxy-input" style="height: 28px; font-size: 12px; padding: 3px 8px;" placeholder="Type model (e.g. stealth/ox-alpha, DeepSeek-V3, gpt-4o)...">
+                </div>
+                <div id="liveRouteTestResult" class="route-test-result-banner" style="display: none;">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+
+              <!-- Model Routes Table -->
+              <div class="table-responsive" style="margin-top: 10px; max-height: 260px; overflow-y: auto;">
+                <table class="routes-table" id="modelRoutesTable">
+                  <thead>
+                    <tr>
+                      <th style="width: 35px;">#</th>
+                      <th>Rule Name</th>
+                      <th>Model Regex Pattern</th>
+                      <th>Upstream URL</th>
+                      <th style="width: 70px;">Max Conc.</th>
+                      <th style="width: 60px;">Status</th>
+                      <th style="width: 100px; text-align: right;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="modelRoutesTableBody">
+                    <tr>
+                      <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 16px;">
+                        No custom routing rules configured. All models route to the default upstream.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -790,6 +866,70 @@
           <div id="liveNodesListContainer" class="nodes-edit-list">
             <!-- Dynamically populated -->
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add / Edit Model Route Modal -->
+    <div id="routeModal" class="modal">
+      <div class="modal-content" style="max-width: 550px;">
+        <div class="modal-header">
+          <h3 id="routeModalTitle">➕ Add Model Route Rule</h3>
+          <span class="close-btn" id="closeRouteModalBtn">&times;</span>
+        </div>
+        <div class="modal-body">
+          <form id="routeForm" onsubmit="return false;" style="display: flex; flex-direction: column; gap: 14px;">
+            <input type="hidden" id="modalRouteId" value="">
+            
+            <div class="proxy-form-group">
+              <label for="modalRouteName">Rule Name <span style="color:var(--accent);">*</span></label>
+              <input type="text" id="modalRouteName" class="proxy-input" placeholder="e.g. OpenRouter Stealth Models" required>
+            </div>
+
+            <div class="proxy-form-group">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <label for="modalRoutePattern">Model Regex Pattern <span style="color:var(--accent);">*</span></label>
+                <span id="modalPatternValidityBadge" style="font-size: 11px; color: var(--green);">Valid Regex</span>
+              </div>
+              <input type="text" id="modalRoutePattern" class="proxy-input monospace-input" placeholder="e.g. stealth/ox-alpha.* or ^(gpt-4o|claude-3-5)" required>
+              <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">
+                Standard Python regular expression matched case-insensitively against the requested model string.
+              </div>
+            </div>
+
+            <div class="proxy-form-group">
+              <label for="modalRouteUpstream">Upstream Target URL <span style="color:var(--accent);">*</span></label>
+              <input type="text" id="modalRouteUpstream" class="proxy-input monospace-input" placeholder="e.g. https://openrouter.ai/api/v1" required>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+              <div class="proxy-form-group">
+                <label for="modalRoutePriority">Priority</label>
+                <input type="number" id="modalRoutePriority" class="proxy-input" value="10" min="0" step="1" title="Higher priority rules match first">
+              </div>
+              <div class="proxy-form-group">
+                <label for="modalRouteMaxConcurrent">Max Concurrency</label>
+                <input type="number" id="modalRouteMaxConcurrent" class="proxy-input" value="4" min="1" max="128" step="1" title="Maximum concurrent parallel requests permitted for this upstream">
+              </div>
+              <div class="proxy-form-group">
+                <label for="modalRouteSlotCooldown">Cooldown (ms)</label>
+                <input type="number" id="modalRouteSlotCooldown" class="proxy-input" value="50" min="0" max="5000" step="10" title="Cooldown gap enforced before releasing next queued request">
+              </div>
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+              <label class="switch">
+                <input type="checkbox" id="modalRouteEnabled" checked>
+                <span class="slider"></span>
+              </label>
+              <label for="modalRouteEnabled" style="cursor: pointer; user-select: none; font-size: 13px; margin-bottom: 0;">Rule Enabled & Active</label>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 12px;">
+              <button type="button" id="cancelRouteBtn" class="btn-action" style="padding: 6px 14px;">Cancel</button>
+              <button type="button" id="saveRouteRuleBtn" class="btn-action btn-accent" style="padding: 6px 18px; font-weight: 600;">Save Rule</button>
+            </div>
+          </form>
         </div>
       </div>
     </div>

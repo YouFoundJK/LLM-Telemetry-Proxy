@@ -335,6 +335,41 @@ const TelemetryAPI = (() => {
   }
 
   /**
+   * GET /api/proxy/routes — retrieves model routing configuration with masked API keys.
+   */
+  async function getProxyRoutes() {
+    const url = `${BASE_URL}/api/proxy/routes`;
+    const response = await fetchWithRetry(url);
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/proxy/routes — updates model routing configuration persistently.
+   */
+  async function saveProxyRoutes(data) {
+    const url = `${BASE_URL}/api/proxy/routes`;
+    const response = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return handleResponse(response);
+  }
+
+  /**
+   * POST /api/proxy/routes/test — tests route resolution against a model string.
+   */
+  async function testProxyRoute(modelName) {
+    const url = `${BASE_URL}/api/proxy/routes/test`;
+    const response = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelName }),
+    });
+    return handleResponse(response);
+  }
+
+  /**
    * GET /api/raw-log/status — retrieves raw payload logging status & file metadata.
    */
   async function getRawLogStatus() {
@@ -396,6 +431,9 @@ const TelemetryAPI = (() => {
     restartProxy,
     getProxyLogs,
     clearProxyLogs,
+    getProxyRoutes,
+    saveProxyRoutes,
+    testProxyRoute,
     runDbCompress,
     getRawLogStatus,
     toggleRawLog,
@@ -405,5 +443,3 @@ const TelemetryAPI = (() => {
     BASE_URL
   };
 })();
-
-

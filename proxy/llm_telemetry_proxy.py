@@ -39,10 +39,16 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+try:
+    from proxy.model_router import ModelRouter, build_upstream_url
+except ImportError:
+    from model_router import ModelRouter, build_upstream_url
+
 # ── Config ──────────────────────────────────────────────────────────────────
 # UPSTREAM = "https://llm-dev.ai.e-infra.cz/v1"
 # STATUS_API = "https://llm-dev.ai.e-infra.cz/status/api/v1/models"
-UPSTREAM = "https://llm.ai.e-infra.cz/v1"
+DEFAULT_UPSTREAM = "https://llm.ai.e-infra.cz/v1"
+UPSTREAM = DEFAULT_UPSTREAM
 STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9090
@@ -60,6 +66,12 @@ _env_db_path = os.environ.get("TELEMETRY_DB_PATH")
 DB_PATH = Path(_env_db_path) if _env_db_path else (REPO_ROOT / "data" / "llm_telemetry.db")
 PID_FILE = REPO_ROOT / "data" / ".proxy.pid"
 TOKEN_BUDGET_FILE = REPO_ROOT / "data" / "token_budget.json"
+ROUTES_CONFIG_FILE = REPO_ROOT / "data" / "model_routes.json"
+
+# Dynamic Model Router instance
+_model_router = ModelRouter(config_path=ROUTES_CONFIG_FILE)
+if not ROUTES_CONFIG_FILE.exists():
+    _model_router.default_upstream_url = UPSTREAM
 
 # Models to track server load for
 WATCHED_MODELS = ["Deepseek-v4", "Glm-5.2", "Qwen3.5-int4", "Kimi-K2.7"]
@@ -70,7 +82,7 @@ WATCHED_MODELS = ["Deepseek-v4", "Glm-5.2", "Qwen3.5-int4", "Kimi-K2.7"]
 # delay (default 50ms) is strictly enforced upon slot release before dispatching the
 # slot to the next queued request. When active concurrency is below max_concurrent,
 # incoming requests are admitted immediately without delay.
-MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", 4))
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", 3))
 SLOT_COOLDOWN_MS = int(os.environ.get("CONCURRENCY_SLOT_COOLDOWN_MS", 50))
 RETRY_429_MAX = int(os.environ.get("RETRY_429_MAX", 0))
 UPSTREAM_SESSION_KEY = web.AppKey("upstream_session", aiohttp.ClientSession) if hasattr(web, "AppKey") else "upstream_session"
@@ -199,10 +211,9 @@ class _SlotContextManager:
         await self.limiter.release()
 
 
-_concurrency_limiter = UpstreamConcurrencyLimiter(
-    max_concurrent=MAX_CONCURRENT,
-    slot_cooldown_seconds=SLOT_COOLDOWN_MS / 1000.0,
-)
+_concurrency_limiter = _model_router.default_limiter
+_concurrency_limiter.max_concurrent = MAX_CONCURRENT
+_concurrency_limiter.slot_cooldown_seconds = SLOT_COOLDOWN_MS / 1000.0
 # Alias for backwards-compatibility if referenced elsewhere
 _upstream_semaphore = _concurrency_limiter
 
@@ -1024,11 +1035,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     server_running, server_tok_s, server_model = await fetch_server_load(model)
 
-    upstream_url = f"{UPSTREAM}{path.replace('/v1', '', 1)}" if path.startswith("/v1") else f"{UPSTREAM}{path}"
+    # Dynamic model route resolution
+    route_res = _model_router.resolve(model)
+    resolved_base = UPSTREAM if (route_res.is_default and UPSTREAM != DEFAULT_UPSTREAM) else route_res.upstream_url
+    upstream_url = build_upstream_url(resolved_base, path)
 
     headers = dict(request.headers)
     headers.pop("Host", None)
     headers.pop("host", None)
+    headers = _model_router.apply_auth_and_headers(headers, route_res)
     if body and "Content-Length" in headers:
         headers["Content-Length"] = str(len(body))
 
@@ -1063,12 +1078,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         timeout = aiohttp.ClientTimeout(total=300)
         max_retries = RETRY_429_MAX
 
+        target_limiter = _model_router.get_limiter(route_res.route_id)
+
         for attempt in range(max_retries + 1):
             retry_needed = False
             retry_delay = 0.0
 
-            # Gate: never exceed MAX_CONCURRENT parallel upstream requests
-            async with _concurrency_limiter.slot():
+            # Gate: never exceed route-specific max_concurrent parallel upstream requests
+            async with target_limiter.slot():
                 req_session = request.app.get(UPSTREAM_SESSION_KEY) if hasattr(request, "app") and UPSTREAM_SESSION_KEY in request.app else None
                 owns_session = False
                 if req_session is None or req_session.closed:
@@ -1094,7 +1111,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     backoff = min(10.0, max(0.1, float(retry_after_hdr)))
                                 except (ValueError, TypeError):
                                     pass
-                            _concurrency_limiter.record_429_retry()
+                            target_limiter.record_429_retry()
                             print(
                                 f"[telemetry] Upstream 429 Rate Limit on {path} (attempt {attempt+1}/{max_retries}). "
                                 f"Backing off for {backoff:.2f}s...",
@@ -1513,10 +1530,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
 async def _simple_forward(request, path, method):
     """Forward non-inference calls (model list, props, etc.) without logging to api_calls."""
-    upstream_url = f"{UPSTREAM}{path.replace('/v1', '', 1)}" if path.startswith("/v1") else f"{UPSTREAM}{path}"
+    route_res = _model_router.resolve(None)
+    resolved_base = UPSTREAM if (route_res.is_default and UPSTREAM != DEFAULT_UPSTREAM) else route_res.upstream_url
+    upstream_url = build_upstream_url(resolved_base, path)
     headers = dict(request.headers)
     headers.pop("Host", None)
     headers.pop("host", None)
+    headers = _model_router.apply_auth_and_headers(headers, route_res)
 
     t_start = time.monotonic()
     status_code = None
@@ -1524,11 +1544,12 @@ async def _simple_forward(request, path, method):
 
     try:
         max_retries = RETRY_429_MAX
+        target_limiter = _model_router.get_limiter(route_res.route_id)
         for attempt in range(max_retries + 1):
             retry_needed = False
             retry_delay = 0.0
 
-            async with _concurrency_limiter.slot():
+            async with target_limiter.slot():
                 req_session = request.app.get(UPSTREAM_SESSION_KEY) if hasattr(request, "app") and UPSTREAM_SESSION_KEY in request.app else None
                 owns_session = False
                 if req_session is None or req_session.closed:
@@ -1550,7 +1571,7 @@ async def _simple_forward(request, path, method):
                                     backoff = min(10.0, max(0.1, float(retry_after_hdr)))
                                 except (ValueError, TypeError):
                                     pass
-                            _concurrency_limiter.record_429_retry()
+                            target_limiter.record_429_retry()
                             print(
                                 f"[telemetry] Upstream 429 in _simple_forward on {path} (attempt {attempt+1}/{max_retries}). "
                                 f"Backing off for {backoff:.2f}s...",
@@ -1619,8 +1640,9 @@ async def _simple_forward(request, path, method):
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    """Health check endpoint with token budget and queue status."""
+    """Health check endpoint with token budget, router state, and queue status."""
     budget_status = _token_budget.get_status()
+    limiters_summary = _model_router.get_all_limiters_stats()
     
     # Fetch per-model queue stats from cached load data
     model_queue = {}
@@ -1637,9 +1659,15 @@ async def handle_health(request: web.Request) -> web.Response:
     file_size = LOGGER_FILE.stat().st_size if LOGGER_FILE.exists() else 0
     return web.json_response({
         "status": "ok",
-        "upstream": UPSTREAM,
+        "upstream": _model_router.default_upstream_url or UPSTREAM,
+        "router": {
+            "default_upstream": _model_router.default_upstream_url,
+            "active_rules_count": sum(1 for r in _model_router.rules if r.enabled),
+            "total_rules_count": len(_model_router.rules),
+        },
         "db": str(DB_PATH),
-        "rate_limiter": _concurrency_limiter.get_stats(),
+        "rate_limiter": _model_router.default_limiter.get_stats(),
+        "limiters_summary": limiters_summary,
         "token_budget": budget_status,
         "model_queue": model_queue,
         "raw_logging": {
@@ -1650,6 +1678,51 @@ async def handle_health(request: web.Request) -> web.Response:
             "subscribers_count": len(_raw_subscribers),
         }
     })
+
+
+# ── Model Router Management Endpoints ────────────────────────────────────────
+async def handle_routes_get(request: web.Request) -> web.Response:
+    """GET /v1/routes or /routes — retrieves active routing configuration."""
+    return web.json_response(_model_router.to_dict())
+
+
+async def handle_routes_save(request: web.Request) -> web.Response:
+    """POST /v1/routes or /routes — updates routing configuration and persists to disk."""
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            return web.json_response({"error": "Invalid payload format, expected JSON object"}, status=400)
+        _model_router.update_from_dict(data)
+        success = _model_router.save()
+        if not success:
+            return web.json_response({"error": "Failed to persist routes configuration to disk"}, status=500)
+        return web.json_response({
+            "success": True,
+            "message": "Routes updated and saved successfully",
+            "config": _model_router.to_dict(),
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
+async def handle_routes_test(request: web.Request) -> web.Response:
+    """POST /v1/routes/test or /routes/test — evaluates route resolution for a model name."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+        model_name = data.get("model", "")
+        res = _model_router.resolve(model_name)
+        return web.json_response({
+            "model": model_name,
+            "resolved_upstream": res.upstream_url,
+            "route_name": res.route_name,
+            "route_id": res.route_id,
+            "is_default": res.is_default,
+            "pattern_matched": res.pattern_matched,
+            "max_concurrent": res.max_concurrent,
+            "slot_cooldown_ms": res.slot_cooldown_ms,
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
 
 
 # ── Raw Payload Management Endpoints ─────────────────────────────────────────
@@ -1793,6 +1866,14 @@ def create_app():
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     
+    # Model router management routes
+    app.router.add_get("/v1/routes", handle_routes_get)
+    app.router.add_get("/routes", handle_routes_get)
+    app.router.add_post("/v1/routes", handle_routes_save)
+    app.router.add_post("/routes", handle_routes_save)
+    app.router.add_post("/v1/routes/test", handle_routes_test)
+    app.router.add_post("/routes/test", handle_routes_test)
+
     # Raw payload management routes (must be before wildcard /v1/{tail:.*})
     app.router.add_get("/v1/raw-log/status", handle_raw_log_status)
     app.router.add_get("/raw-log/status", handle_raw_log_status)
@@ -1801,7 +1882,6 @@ def create_app():
     app.router.add_get("/v1/raw-log/recent", handle_raw_log_recent)
     app.router.add_get("/raw-log/recent", handle_raw_log_recent)
     app.router.add_post("/v1/raw-log/clear", handle_raw_log_clear)
-    app.router.add_post("/raw-log/clear", handle_raw_log_clear)
     app.router.add_get("/v1/raw-log/stream", handle_raw_log_stream)
     app.router.add_get("/raw-log/stream", handle_raw_log_stream)
 
@@ -1836,6 +1916,9 @@ def main():
     RETRY_429_MAX = args.retry_429_max
     DB_PATH = Path(args.db)
     PID_FILE = Path(args.pid_file)
+
+    if args.upstream and (not ROUTES_CONFIG_FILE.exists() or not _model_router.default_upstream_url):
+        _model_router.default_upstream_url = args.upstream
 
     _concurrency_limiter.max_concurrent = MAX_CONCURRENT
     _concurrency_limiter.slot_cooldown_seconds = max(0.0, SLOT_COOLDOWN_MS / 1000.0)

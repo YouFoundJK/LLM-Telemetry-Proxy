@@ -26,6 +26,23 @@ import asyncio
 import aiohttp
 from aiohttp import web
 
+DASHBOARD_DIR = Path(__file__).resolve().parent
+REPO_ROOT = DASHBOARD_DIR.parent
+
+# Ensure proxy module can be imported
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "proxy") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "proxy"))
+
+try:
+    from proxy.model_router import ModelRouter
+except ImportError:
+    try:
+        from model_router import ModelRouter
+    except ImportError:
+        ModelRouter = None
+
 try:
     from proxy_manager import ProxyManager
 except ImportError:
@@ -34,9 +51,6 @@ except ImportError:
 # ── Config & Path Resolvers ──────────────────────────────────────────────────
 STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 DEFAULT_PORT = 9118
-
-DASHBOARD_DIR = Path(__file__).resolve().parent
-REPO_ROOT = DASHBOARD_DIR.parent
 
 # SVG Favicon icon handler
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0d1117"/><path d="M7 16h4l3-8 4 16 3-8h4" fill="none" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
@@ -103,6 +117,17 @@ def get_model_costs_path() -> Path:
         DASHBOARD_DIR / "data" / "model_costs.json",
         REPO_ROOT / "model_costs.json",
         DASHBOARD_DIR / "model_costs.json",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+def get_routes_config_path() -> Path:
+    candidates = [
+        REPO_ROOT / "data" / "model_routes.json",
+        DASHBOARD_DIR / "data" / "model_routes.json",
+        REPO_ROOT / "model_routes.json",
     ]
     for c in candidates:
         if c.exists():
@@ -1028,6 +1053,78 @@ async def handle_db_compress(request: web.Request) -> web.Response:
     return web.json_response(res, status=status_code)
 
 
+async def handle_proxy_routes_get(request: web.Request) -> web.Response:
+    """GET /api/proxy/routes — get model routing config."""
+    config_path = get_routes_config_path()
+    router = ModelRouter(config_path=config_path) if ModelRouter else None
+    if not router:
+        return web.json_response({"error": "ModelRouter not initialized"}, status=500)
+    return web.json_response(router.to_dict())
+
+
+async def handle_proxy_routes_save(request: web.Request) -> web.Response:
+    """POST /api/proxy/routes — update model routing config and sync with live proxy."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+        if not isinstance(data, dict):
+            return web.json_response({"error": "Invalid payload format, expected JSON object"}, status=400)
+        config_path = get_routes_config_path()
+        router = ModelRouter(config_path=config_path) if ModelRouter else None
+        if not router:
+            return web.json_response({"error": "ModelRouter not initialized"}, status=500)
+        router.update_from_dict(data)
+        success = router.save()
+        if not success:
+            return web.json_response({"error": "Failed to save routes configuration to disk"}, status=500)
+
+        # If proxy is currently running, hot-reload routes dynamically
+        proxy_status = await ProxyManager.get_status()
+        proxy_synced = False
+        if proxy_status.get("running") or proxy_status.get("health_ok"):
+            proxy_port = proxy_status.get("port", 9090)
+            try:
+                timeout = aiohttp.ClientTimeout(total=2.0)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(f"http://127.0.0.1:{proxy_port}/v1/routes", json=data) as resp:
+                        if resp.status == 200:
+                            proxy_synced = True
+            except Exception as sync_err:
+                print(f"[dashboard] Warning: hot-syncing routes to running proxy failed: {sync_err}", file=sys.stderr)
+
+        return web.json_response({
+            "success": True,
+            "message": "Model routing configuration saved successfully",
+            "proxy_synced": proxy_synced,
+            "config": router.to_dict(),
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
+async def handle_proxy_routes_test(request: web.Request) -> web.Response:
+    """POST /api/proxy/routes/test — evaluate model route resolution."""
+    try:
+        data = await request.json() if request.can_read_body else {}
+        model_name = data.get("model", "")
+        config_path = get_routes_config_path()
+        router = ModelRouter(config_path=config_path) if ModelRouter else None
+        if not router:
+            return web.json_response({"error": "ModelRouter not initialized"}, status=500)
+        res = router.resolve(model_name)
+        return web.json_response({
+            "model": model_name,
+            "resolved_upstream": res.upstream_url,
+            "route_name": res.route_name,
+            "route_id": res.route_id,
+            "is_default": res.is_default,
+            "pattern_matched": res.pattern_matched,
+            "max_concurrent": res.max_concurrent,
+            "slot_cooldown_ms": res.slot_cooldown_ms,
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
 def get_active_proxy_port() -> int:
     return getattr(ProxyManager, '_last_known_port', 9090)
 
@@ -1292,6 +1389,9 @@ def create_app():
     app.router.add_post("/api/proxy/restart", handle_proxy_restart)
     app.router.add_get("/api/proxy/logs", handle_proxy_logs)
     app.router.add_post("/api/proxy/clear-logs", handle_proxy_clear_logs)
+    app.router.add_get("/api/proxy/routes", handle_proxy_routes_get)
+    app.router.add_post("/api/proxy/routes", handle_proxy_routes_save)
+    app.router.add_post("/api/proxy/routes/test", handle_proxy_routes_test)
     app.router.add_post("/api/db/compress", handle_db_compress)
 
     # Raw Payload Log & Inspector routes

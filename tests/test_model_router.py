@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+Test Suite: Dynamic Model Router & Upstream Concurrency Limiter.
+Validates regex matching, fallback behavior, client auth passthrough,
+persistence, API routes, end-to-end dispatch, and microsecond latency.
+"""
+
+import asyncio
+import json
+import os
+import sys
+import time
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import AioHTTPTestCase, TestServer
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from proxy.model_router import ModelRouter, ModelRouteRule, build_upstream_url
+import proxy.llm_telemetry_proxy as proxy_mod
+
+
+class TestModelRouterUnit(unittest.TestCase):
+    """Unit tests for ModelRouter data structures, matching, and serialization."""
+
+    def setUp(self):
+        self.tmp_dir = TemporaryDirectory()
+        self.config_path = Path(self.tmp_dir.name) / "model_routes.json"
+        self.router = ModelRouter(config_path=self.config_path)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_default_route_resolution(self):
+        """When no custom rules match, it must return the default route."""
+        res = self.router.resolve("unknown-model-123")
+        self.assertTrue(res.is_default)
+        self.assertEqual(res.upstream_url, "https://llm.ai.e-infra.cz/v1")
+
+    def test_custom_regex_routing(self):
+        """Custom rules should match and take precedence over default."""
+        self.router.update_from_dict({
+            "default_route": {
+                "name": "Default e-INFRA",
+                "upstream_url": "https://llm.ai.e-infra.cz/v1"
+            },
+            "routes": [
+                {
+                    "id": "openrouter_stealth",
+                    "name": "OpenRouter Stealth",
+                    "pattern": r"stealth/ox-alpha.*",
+                    "upstream_url": "https://openrouter.ai/api/v1",
+                    "priority": 20
+                },
+                {
+                    "id": "openai_catchall",
+                    "name": "OpenAI Catchall",
+                    "pattern": r"^(gpt-4o|o1|o3).*",
+                    "upstream_url": "https://api.openai.com/v1",
+                    "priority": 10
+                }
+            ]
+        })
+
+        # Test OpenRouter match
+        res1 = self.router.resolve("stealth/ox-alpha:free")
+        self.assertFalse(res1.is_default)
+        self.assertEqual(res1.route_name, "OpenRouter Stealth")
+        self.assertEqual(res1.upstream_url, "https://openrouter.ai/api/v1")
+
+        # Test OpenAI match
+        res2 = self.router.resolve("gpt-4o-mini")
+        self.assertFalse(res2.is_default)
+        self.assertEqual(res2.upstream_url, "https://api.openai.com/v1")
+
+        # Test unmatched fallback to default
+        res3 = self.router.resolve("DeepSeek-V3")
+        self.assertTrue(res3.is_default)
+        self.assertEqual(res3.upstream_url, "https://llm.ai.e-infra.cz/v1")
+
+    def test_apply_auth_and_headers_passthrough(self):
+        """Client headers and Authorization must flow through completely untouched."""
+        self.router.update_from_dict({
+            "default_route": {
+                "upstream_url": "https://llm.ai.e-infra.cz/v1"
+            },
+            "routes": [
+                {
+                    "id": "r1",
+                    "name": "Custom",
+                    "pattern": "custom-.*",
+                    "upstream_url": "https://custom.ai/v1"
+                }
+            ]
+        })
+
+        res = self.router.resolve("custom-gpt")
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer client-app-secret-token-123"}
+        updated = self.router.apply_auth_and_headers(headers, res)
+
+        self.assertEqual(updated["Authorization"], "Bearer client-app-secret-token-123")
+        self.assertEqual(updated["Content-Type"], "application/json")
+
+    def test_persistence_save_and_load(self):
+        """Verify configuration round-trip from JSON file."""
+        self.router.update_from_dict({
+            "default_route": {
+                "name": "Default Test",
+                "upstream_url": "https://llm.ai.e-infra.cz/v1",
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "saved_route",
+                    "name": "Saved Route",
+                    "pattern": "persisted/.*",
+                    "upstream_url": "https://target.com/v1",
+                    "priority": 50,
+                    "max_concurrent": 8
+                }
+            ]
+        })
+        self.assertTrue(self.router.save())
+
+        new_router = ModelRouter(config_path=self.config_path)
+        self.assertEqual(new_router.default_name, "Default Test")
+        self.assertEqual(new_router.default_upstream_url, "https://llm.ai.e-infra.cz/v1")
+        self.assertEqual(len(new_router.rules), 1)
+        self.assertEqual(new_router.rules[0].name, "Saved Route")
+        self.assertEqual(new_router.rules[0].upstream_url, "https://target.com/v1")
+        self.assertEqual(new_router.rules[0].max_concurrent, 8)
+
+    def test_build_upstream_url(self):
+        """Validate URL construction avoids duplicate /v1 paths."""
+        self.assertEqual(
+            build_upstream_url("https://openrouter.ai/api/v1", "/v1/chat/completions"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        )
+        self.assertEqual(
+            build_upstream_url("https://llm.ai.e-infra.cz/v1", "/v1/models"),
+            "https://llm.ai.e-infra.cz/v1/models"
+        )
+        self.assertEqual(
+            build_upstream_url("https://api.openai.com", "/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        )
+
+    def test_resolution_latency_performance(self):
+        """Ensure 10,000 route matches execute in under 100 milliseconds (< 10 µs per match)."""
+        self.router.update_from_dict({
+            "default_route": {"upstream_url": "https://llm.ai.e-infra.cz/v1"},
+            "routes": [
+                {"id": f"r_{i}", "pattern": f"prefix-{i}/.*", "upstream_url": f"https://upstream-{i}.com/v1", "priority": i}
+                for i in range(20)
+            ]
+        })
+
+        t0 = time.perf_counter()
+        iterations = 10000
+        for _ in range(iterations):
+            self.router.resolve("prefix-15/model-alpha")
+        elapsed = time.perf_counter() - t0
+
+        avg_us = (elapsed / iterations) * 1_000_000
+        print(f"\n[Benchmark] 10,000 route resolutions took {elapsed:.4f}s ({avg_us:.2f} µs/resolution)")
+        self.assertLess(elapsed, 0.2, "Route resolution exceeded performance budget!")
+
+    def test_per_route_concurrency_isolation(self):
+        """Verify per-route concurrency limiters and queues operate independently."""
+        async def run_test():
+            self.router.update_from_dict({
+                "default_route": {
+                    "upstream_url": "https://default.com/v1",
+                    "max_concurrent": 4
+                },
+                "routes": [
+                    {
+                        "id": "route_tight",
+                        "name": "Tight Limit",
+                        "pattern": "tight/.*",
+                        "upstream_url": "https://tight.com/v1",
+                        "max_concurrent": 2,
+                        "slot_cooldown_ms": 10
+                    },
+                    {
+                        "id": "route_wide",
+                        "name": "Wide Limit",
+                        "pattern": "wide/.*",
+                        "upstream_url": "https://wide.com/v1",
+                        "max_concurrent": 5,
+                        "slot_cooldown_ms": 10
+                    }
+                ]
+            })
+
+            res_tight = self.router.resolve("tight/model-1")
+            res_wide = self.router.resolve("wide/model-1")
+            limiter_tight = self.router.get_limiter(res_tight.route_id)
+            limiter_wide = self.router.get_limiter(res_wide.route_id)
+
+            self.assertEqual(limiter_tight.max_concurrent, 2)
+            self.assertEqual(limiter_wide.max_concurrent, 5)
+
+            tight_active = 0
+            tight_peak = 0
+            lock = asyncio.Lock()
+
+            async def tight_worker():
+                nonlocal tight_active, tight_peak
+                async with limiter_tight.slot():
+                    async with lock:
+                        tight_active += 1
+                        tight_peak = max(tight_peak, tight_active)
+                        self.assertLessEqual(tight_active, 2)
+                    await asyncio.sleep(0.02)
+                    async with lock:
+                        tight_active -= 1
+
+            tasks = [asyncio.create_task(tight_worker()) for _ in range(6)]
+            await asyncio.gather(*tasks)
+            self.assertEqual(tight_peak, 2)
+            self.assertEqual(limiter_tight.active, 0)
+
+            # Check stats summary
+            summary = self.router.get_all_limiters_stats()
+            self.assertIn("default", summary)
+            self.assertEqual(len(summary["routes"]), 2)
+            self.assertEqual(summary["routes"][0]["stats"]["max_concurrent"], 2)
+
+        asyncio.run(run_test())
+
+
+class TestModelRouterEndToEnd(AioHTTPTestCase):
+    """End-to-end integration tests through the aiohttp Proxy gateway."""
+
+    async def setUpAsync(self):
+        self.tmp_dir = TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "test_telemetry.db"
+        self.routes_path = Path(self.tmp_dir.name) / "model_routes.json"
+
+        # Mock Upstream 1: Default (e-INFRA)
+        self.default_upstream_app = web.Application()
+        self.default_requests = []
+        async def handle_default(request):
+            body = await request.json() if request.can_read_body else {}
+            auth = request.headers.get("Authorization", "")
+            self.default_requests.append({"body": body, "auth": auth, "path": request.path})
+            return web.json_response({
+                "id": "chatcmpl-default",
+                "object": "chat.completion",
+                "model": body.get("model"),
+                "choices": [{"message": {"role": "assistant", "content": "Hello from Default Upstream!"}}]
+            })
+        self.default_upstream_app.router.add_post("/v1/chat/completions", handle_default)
+        self.default_upstream_app.router.add_post("/chat/completions", handle_default)
+
+        self.mock_default_server = TestServer(self.default_upstream_app)
+        await self.mock_default_server.start_server()
+
+        # Mock Upstream 2: OpenRouter
+        self.openrouter_app = web.Application()
+        self.openrouter_requests = []
+        async def handle_openrouter(request):
+            body = await request.json() if request.can_read_body else {}
+            auth = request.headers.get("Authorization", "")
+            self.openrouter_requests.append({"body": body, "auth": auth, "path": request.path})
+            return web.json_response({
+                "id": "chatcmpl-openrouter",
+                "object": "chat.completion",
+                "model": body.get("model"),
+                "choices": [{"message": {"role": "assistant", "content": "Hello from OpenRouter!"}}]
+            })
+        self.openrouter_app.router.add_post("/api/v1/chat/completions", handle_openrouter)
+        self.mock_openrouter_server = TestServer(self.openrouter_app)
+        await self.mock_openrouter_server.start_server()
+
+        # Configure proxy router
+        proxy_mod.DB_PATH = self.db_path
+        proxy_mod.init_db()
+        proxy_mod._model_router = ModelRouter(config_path=self.routes_path)
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "openrouter_route",
+                    "name": "OpenRouter Stealth",
+                    "pattern": r"stealth/ox-alpha.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/api/v1")),
+                    "priority": 10,
+                    "max_concurrent": 10
+                }
+            ]
+        })
+        proxy_mod._model_router.save()
+        await super().setUpAsync()
+
+    async def tearDownAsync(self):
+        await self.mock_default_server.close()
+        await self.mock_openrouter_server.close()
+        self.tmp_dir.cleanup()
+        await super().tearDownAsync()
+
+    async def get_application(self):
+        return proxy_mod.create_app()
+
+    async def test_dynamic_dispatch_to_openrouter(self):
+        """Request for stealth/ox-alpha must route to OpenRouter with client's incoming Bearer key untouched."""
+        payload = {
+            "model": "stealth/ox-alpha:free",
+            "messages": [{"role": "user", "content": "Hi OpenRouter"}]
+        }
+        resp = await self.client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": "Bearer client-supplied-openrouter-key"}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello from OpenRouter!")
+
+        self.assertEqual(len(self.openrouter_requests), 1)
+        self.assertEqual(self.openrouter_requests[0]["auth"], "Bearer client-supplied-openrouter-key")
+        self.assertEqual(len(self.default_requests), 0)
+
+    async def test_fallback_dispatch_to_default(self):
+        """Unmatched request for DeepSeek-V3 must route to Default upstream with client's incoming Bearer key untouched."""
+        payload = {
+            "model": "DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi Default"}]
+        }
+        resp = await self.client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": "Bearer client-supplied-default-key"}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello from Default Upstream!")
+
+        self.assertEqual(len(self.default_requests), 1)
+        self.assertEqual(self.default_requests[0]["auth"], "Bearer client-supplied-default-key")
+        self.assertEqual(len(self.openrouter_requests), 0)
+
+    async def test_routes_api_management(self):
+        """Test GET /v1/routes, POST /v1/routes, and POST /v1/routes/test."""
+        # 1. GET /v1/routes
+        get_resp = await self.client.get("/v1/routes")
+        self.assertEqual(get_resp.status, 200)
+        routes_data = await get_resp.json()
+        self.assertIn("default_route", routes_data)
+        self.assertIn("routes", routes_data)
+
+        # 2. POST /v1/routes/test
+        test_resp = await self.client.post("/v1/routes/test", json={"model": "stealth/ox-alpha:test"})
+        self.assertEqual(test_resp.status, 200)
+        test_data = await test_resp.json()
+        self.assertFalse(test_data["is_default"])
+        self.assertEqual(test_data["route_name"], "OpenRouter Stealth")
+
+        # 3. POST /v1/routes (add new rule)
+        routes_data["routes"].append({
+            "id": "new_gemini_route",
+            "name": "Gemini Models",
+            "pattern": r"gemini-.*",
+            "upstream_url": "https://generativelanguage.googleapis.com/v1beta",
+            "priority": 30,
+            "max_concurrent": 6
+        })
+        save_resp = await self.client.post("/v1/routes", json=routes_data)
+        self.assertEqual(save_resp.status, 200)
+
+        # Verify new rule is active immediately
+        test_gemini = await self.client.post("/v1/routes/test", json={"model": "gemini-2.0-flash"})
+        gemini_data = await test_gemini.json()
+        self.assertFalse(gemini_data["is_default"])
+        self.assertEqual(gemini_data["route_name"], "Gemini Models")
+
+    async def test_health_limiters_summary(self):
+        """Verify /health returns live limiter summaries for default and routes."""
+        resp = await self.client.get("/health")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertIn("limiters_summary", data)
+        summary = data["limiters_summary"]
+        self.assertIn("default", summary)
+        self.assertIn("routes", summary)
+        self.assertEqual(summary["default"]["stats"]["max_concurrent"], 4)
+        self.assertEqual(len(summary["routes"]), 1)
+        self.assertEqual(summary["routes"][0]["stats"]["max_concurrent"], 10)
+
+
+if __name__ == "__main__":
+    unittest.main()

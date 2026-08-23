@@ -36,6 +36,7 @@ const App = (() => {
     runningProxyConfig: null,
     isProxyStatusLoading: false,
     healthData: null,
+    routesConfig: null,
     
     // Dropdown Instance
     modelDropdownInstance: null,
@@ -664,6 +665,7 @@ const App = (() => {
     if (tabId === 'controlPanelTab') {
       loadHealth();
       loadProxyStatus();
+      loadProxyRoutes();
       loadProxyLogs();
       loadRawLogStatus();
       loadCrossCheck();
@@ -1113,16 +1115,9 @@ const App = (() => {
     const modal = document.getElementById('liveNodesModal');
     const closeBtn = document.getElementById('closeLiveNodesModalBtn');
 
-    if (openEditLiveNodesBtn && modal) {
+    if (openEditLiveNodesBtn) {
       openEditLiveNodesBtn.addEventListener('click', () => {
-        ensureLiveNodesConfig(State.allLiveModels);
-        UI.renderLiveNodesModal(State.allLiveModels, State.liveNodesConfig, (newConfig) => {
-          State.liveNodesConfig = newConfig;
-          localStorage.setItem('telemetry_dashboard_live_nodes_config', JSON.stringify(newConfig));
-          loadServerStatus();
-          modal.classList.remove('open');
-        });
-        modal.classList.add('open');
+        openLiveNodesModal();
       });
     }
 
@@ -1695,18 +1690,382 @@ const App = (() => {
     }
   }
 
+  // ── Dynamic Model Router & Upstream Key Manager ─────────────────────────
+  async function loadProxyRoutes() {
+    try {
+      const config = await TelemetryAPI.getProxyRoutes();
+      if (config && typeof config === 'object') {
+        State.routesConfig = config;
+        renderRoutesUI();
+      }
+    } catch (e) {
+      console.warn('Failed to load proxy routes:', e);
+    }
+  }
+
+  function renderRoutesUI() {
+    if (!State.routesConfig) return;
+    const defRoute = State.routesConfig.default_route || {};
+    const routes = State.routesConfig.routes || [];
+    const defMaxConcInput = document.getElementById('defaultRouterMaxConcurrent');
+
+    if (defMaxConcInput && document.activeElement !== defMaxConcInput) {
+      defMaxConcInput.value = defRoute.max_concurrent ?? 4;
+    }
+
+    // Active routes count badge
+    const activeBadge = document.getElementById('activeRoutesCountBadge');
+    const activeCount = routes.filter(r => r.enabled).length;
+    if (activeBadge) {
+      activeBadge.textContent = `${activeCount} / ${routes.length} active rule${routes.length === 1 ? '' : 's'}`;
+    }
+
+    // Render table rows
+    const tbody = document.getElementById('modelRoutesTableBody');
+    if (!tbody) return;
+
+    if (!routes || routes.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 16px;">
+            No custom routing rules configured. All models route to the default upstream.
+          </td>
+        </tr>
+      `;
+      return;
+    }
+
+    tbody.innerHTML = routes.map((r, idx) => {
+      const isEnabled = Boolean(r.enabled);
+      const statusBadge = isEnabled
+        ? '<span class="badge-status-active">Active</span>'
+        : '<span class="badge-status-inactive">Disabled</span>';
+      const maxConcVal = r.max_concurrent ?? 4;
+      const stats = r.limiter_stats || {};
+      const activeRunning = stats.active || 0;
+      const waitingQueued = stats.queued || 0;
+
+      return `
+        <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
+          <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}</td>
+          <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
+          <td><code class="code-tag">${UI.escapeHtml(r.pattern)}</code></td>
+          <td class="monospace-input" style="color: var(--accent); font-size: 11px;">${UI.escapeHtml(r.upstream_url)}</td>
+          <td>
+            <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
+            ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
+          </td>
+          <td>${statusBadge}</td>
+          <td style="text-align: right; white-space: nowrap;">
+            <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
+            <button class="btn-icon-action move-down-btn" title="Move Down" data-idx="${idx}" ${idx === routes.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>▼</button>
+            <button class="btn-icon-action toggle-enable-btn" title="${isEnabled ? 'Disable' : 'Enable'}" data-idx="${idx}">⚡</button>
+            <button class="btn-icon-action edit-route-btn" title="Edit Rule" data-idx="${idx}">✏️</button>
+            <button class="btn-icon-action danger delete-route-btn" title="Delete Rule" data-idx="${idx}">🗑️</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    // Attach table action handlers
+    tbody.querySelectorAll('.move-up-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        if (idx > 0) {
+          const temp = routes[idx];
+          routes[idx] = routes[idx - 1];
+          routes[idx - 1] = temp;
+          routes.forEach((item, i) => { item.priority = 100 - i * 10; });
+          renderRoutesUI();
+          saveAllRoutesConfig(false);
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.move-down-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        if (idx < routes.length - 1) {
+          const temp = routes[idx];
+          routes[idx] = routes[idx + 1];
+          routes[idx + 1] = temp;
+          routes.forEach((item, i) => { item.priority = 100 - i * 10; });
+          renderRoutesUI();
+          saveAllRoutesConfig(false);
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.toggle-enable-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        routes[idx].enabled = !routes[idx].enabled;
+        renderRoutesUI();
+        saveAllRoutesConfig(false);
+      });
+    });
+
+    tbody.querySelectorAll('.edit-route-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        openRouteModal(routes[idx]);
+      });
+    });
+
+    tbody.querySelectorAll('.delete-route-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        if (confirm(`Delete route rule "${routes[idx].name || routes[idx].pattern}"?`)) {
+          routes.splice(idx, 1);
+          renderRoutesUI();
+          saveAllRoutesConfig(false);
+        }
+      });
+    });
+  }
+
+  function openRouteModal(rule = null) {
+    const modal = document.getElementById('routeModal');
+    if (!modal) return;
+    const titleEl = document.getElementById('routeModalTitle');
+    const idInput = document.getElementById('modalRouteId');
+    const nameInput = document.getElementById('modalRouteName');
+    const patternInput = document.getElementById('modalRoutePattern');
+    const upstreamInput = document.getElementById('modalRouteUpstream');
+    const priorityInput = document.getElementById('modalRoutePriority');
+    const maxConcInput = document.getElementById('modalRouteMaxConcurrent');
+    const slotCdInput = document.getElementById('modalRouteSlotCooldown');
+    const enabledInput = document.getElementById('modalRouteEnabled');
+
+    if (rule) {
+      titleEl.textContent = '✏️ Edit Model Route Rule';
+      idInput.value = rule.id || '';
+      nameInput.value = rule.name || '';
+      patternInput.value = rule.pattern || '';
+      upstreamInput.value = rule.upstream_url || '';
+      priorityInput.value = rule.priority ?? 10;
+      if (maxConcInput) maxConcInput.value = rule.max_concurrent ?? 4;
+      if (slotCdInput) slotCdInput.value = rule.slot_cooldown_ms ?? 50;
+      enabledInput.checked = rule.enabled !== false;
+    } else {
+      titleEl.textContent = '➕ Add Model Route Rule';
+      idInput.value = '';
+      nameInput.value = '';
+      patternInput.value = '';
+      upstreamInput.value = document.getElementById('proxyConfigUpstream')?.value || 'https://openrouter.ai/api/v1';
+      const existingCount = (State.routesConfig?.routes?.length) || 0;
+      priorityInput.value = 100 - existingCount * 10;
+      if (maxConcInput) maxConcInput.value = 4;
+      if (slotCdInput) slotCdInput.value = 50;
+      enabledInput.checked = true;
+    }
+
+    modal.classList.add('open');
+    nameInput.focus();
+  }
+
+  function closeRouteModal() {
+    const modal = document.getElementById('routeModal');
+    if (modal) modal.classList.remove('open');
+  }
+
+  async function saveAllRoutesConfig(showAlert = true) {
+    if (!State.routesConfig) {
+      State.routesConfig = { default_route: {}, routes: [] };
+    }
+    const defUpstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || 'https://llm.ai.e-infra.cz/v1';
+    const defMaxConc = parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10);
+
+    State.routesConfig.default_route = {
+      name: 'Default Upstream (e-INFRA)',
+      upstream_url: defUpstream,
+      max_concurrent: defMaxConc,
+      slot_cooldown_ms: 50
+    };
+
+    if (showAlert) {
+      UI.showProxyAlert('Saving model routing rules...', 'info', 0);
+    }
+
+    try {
+      const res = await TelemetryAPI.saveProxyRoutes(State.routesConfig);
+      if (res.success) {
+        State.routesConfig = res.config || State.routesConfig;
+        renderRoutesUI();
+        if (showAlert) {
+          const syncMsg = res.proxy_synced ? ' (Hot-synced with active gateway)' : '';
+          UI.showProxyAlert(`Routing rules saved successfully!${syncMsg}`, 'success', 4000);
+        }
+      } else {
+        if (showAlert) {
+          UI.showProxyAlert(`Failed to save routing rules: ${res.error}`, 'error', 6000);
+        }
+      }
+    } catch (e) {
+      if (showAlert) {
+        UI.showProxyAlert(`Error saving routing rules: ${e.message}`, 'error', 6000);
+      }
+    }
+  }
+
+  function setupRouteEventListeners() {
+    const addBtn = document.getElementById('addNewRouteBtn');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => openRouteModal(null));
+    }
+
+    const saveBtn = document.getElementById('saveRoutesConfigBtn');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => saveAllRoutesConfig(true));
+    }
+
+    const closeBtn = document.getElementById('closeRouteModalBtn');
+    const cancelBtn = document.getElementById('cancelRouteBtn');
+    if (closeBtn) closeBtn.addEventListener('click', closeRouteModal);
+    if (cancelBtn) cancelBtn.addEventListener('click', closeRouteModal);
+
+    const saveRuleBtn = document.getElementById('saveRouteRuleBtn');
+    if (saveRuleBtn) {
+      saveRuleBtn.addEventListener('click', () => {
+        const id = document.getElementById('modalRouteId')?.value;
+        const name = document.getElementById('modalRouteName')?.value?.trim();
+        const pattern = document.getElementById('modalRoutePattern')?.value?.trim();
+        const upstream = document.getElementById('modalRouteUpstream')?.value?.trim();
+        const priority = parseInt(document.getElementById('modalRoutePriority')?.value || '10', 10);
+        const maxConcurrent = Math.max(1, parseInt(document.getElementById('modalRouteMaxConcurrent')?.value || '4', 10));
+        const slotCooldown = Math.max(0, parseInt(document.getElementById('modalRouteSlotCooldown')?.value || '50', 10));
+        const enabled = document.getElementById('modalRouteEnabled')?.checked;
+
+        if (!name) {
+          alert('Please provide a rule name.');
+          return;
+        }
+        if (!pattern) {
+          alert('Please enter a valid regular expression pattern.');
+          return;
+        }
+        try {
+          new RegExp(pattern);
+        } catch (err) {
+          alert(`Invalid regular expression pattern: ${err.message}`);
+          return;
+        }
+        if (!upstream) {
+          alert('Please provide an upstream target URL.');
+          return;
+        }
+
+        if (!State.routesConfig) {
+          State.routesConfig = { default_route: {}, routes: [] };
+        }
+        if (!State.routesConfig.routes) {
+          State.routesConfig.routes = [];
+        }
+
+        if (id) {
+          const idx = State.routesConfig.routes.findIndex(r => r.id === id);
+          if (idx !== -1) {
+            State.routesConfig.routes[idx] = {
+              ...State.routesConfig.routes[idx],
+              name, pattern, upstream_url: upstream,
+              priority, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown, enabled
+            };
+          }
+        } else {
+          const newRule = {
+            id: 'route_' + Math.random().toString(36).substring(2, 9),
+            name,
+            pattern,
+            upstream_url: upstream,
+            priority,
+            max_concurrent: maxConcurrent,
+            slot_cooldown_ms: slotCooldown,
+            enabled
+          };
+          State.routesConfig.routes.push(newRule);
+        }
+
+        State.routesConfig.routes.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+        closeRouteModal();
+        renderRoutesUI();
+        saveAllRoutesConfig(true);
+      });
+    }
+
+    const patternInput = document.getElementById('modalRoutePattern');
+    const badgeEl = document.getElementById('modalPatternValidityBadge');
+    if (patternInput && badgeEl) {
+      patternInput.addEventListener('input', () => {
+        const val = patternInput.value.trim();
+        if (!val) {
+          badgeEl.textContent = 'Required';
+          badgeEl.style.color = 'var(--text-muted)';
+          return;
+        }
+        try {
+          new RegExp(val);
+          badgeEl.textContent = 'Valid Regex';
+          badgeEl.style.color = 'var(--green)';
+        } catch (e) {
+          badgeEl.textContent = 'Invalid Regex';
+          badgeEl.style.color = 'var(--red)';
+        }
+      });
+    }
+
+    const testInput = document.getElementById('liveRouteTestInput');
+    const testResultEl = document.getElementById('liveRouteTestResult');
+    let debounceTimer = null;
+    if (testInput && testResultEl) {
+      testInput.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        const query = testInput.value.trim();
+        if (!query) {
+          testResultEl.style.display = 'none';
+          return;
+        }
+        debounceTimer = setTimeout(async () => {
+          try {
+            const res = await TelemetryAPI.testProxyRoute(query);
+            testResultEl.style.display = 'flex';
+            if (!res.is_default) {
+              testResultEl.className = 'route-test-result-banner match-custom';
+              testResultEl.innerHTML = `
+                <div><b style="color:var(--green);">✔ Matched Custom Route:</b> "${UI.escapeHtml(res.route_name)}" (Pattern: <code>${UI.escapeHtml(res.pattern_matched)}</code>)</div>
+                <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: <b>Passthrough</b> &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
+              `;
+            } else {
+              testResultEl.className = 'route-test-result-banner match-default';
+              testResultEl.innerHTML = `
+                <div><b style="color:var(--purple);">⚡ Fallback to Default Router:</b> "${UI.escapeHtml(res.route_name)}"</div>
+                <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: <b>Passthrough</b> &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
+              `;
+            }
+          } catch (err) {
+            testResultEl.style.display = 'flex';
+            testResultEl.className = 'route-test-result-banner';
+            testResultEl.innerHTML = `<span style="color:var(--red);">Test error: ${err.message}</span>`;
+          }
+        }, 150);
+      });
+    }
+  }
+
   /**
    * Setup Gateway Control Listeners and Actions
    */
   function setupProxyControl() {
     // Render stored upstream history options
     renderUpstreamHistoryOptions();
+    loadProxyRoutes();
+    setupRouteEventListeners();
 
     // Top header badge click -> switch to control panel tab
     const headerBadge = document.getElementById('proxyHeaderBadge');
     if (headerBadge) {
       headerBadge.addEventListener('click', () => {
         switchTab('controlPanelTab');
+        loadProxyRoutes();
       });
     }
 
@@ -2143,7 +2502,11 @@ const App = (() => {
     if (!container) return;
     
     if (!State.eInfraEnabled) {
-      container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding: 20px;">e-INFRA live sync is toggled off. Please toggle Sync on in the sidebar first.</div>';
+      if (State.liveNodesConfig && State.liveNodesConfig.length > 0) {
+        rebuildLiveNodesEditList();
+      } else {
+        container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding: 20px;">e-INFRA live sync is toggled off. Please toggle Sync on in the sidebar first.</div>';
+      }
       return;
     }
     
@@ -2167,7 +2530,11 @@ const App = (() => {
       rebuildLiveNodesEditList();
     } catch (e) {
       console.error('Failed to sync nodes for edit list', e);
-      container.innerHTML = `<div class="tag tag-error" style="padding:10px; text-align:center;">Failed to sync online nodes: ${e.message}</div>`;
+      if (State.liveNodesConfig && State.liveNodesConfig.length > 0) {
+        rebuildLiveNodesEditList();
+      } else {
+        container.innerHTML = `<div class="tag tag-error" style="padding:10px; text-align:center;">Failed to sync online nodes: ${e.message}</div>`;
+      }
     }
   }
 
@@ -2176,12 +2543,14 @@ const App = (() => {
     if (!container) return;
     
     const allFetched = State.allLiveModels || [];
-    if (!allFetched.length) {
+    if (!allFetched.length && (!State.liveNodesConfig || !State.liveNodesConfig.length)) {
       container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding: 20px;">No active nodes fetched yet. Toggle Sync on to retrieve them.</div>';
       return;
     }
     
-    ensureLiveNodesConfig(allFetched);
+    if (allFetched.length) {
+      ensureLiveNodesConfig(allFetched);
+    }
     const config = State.liveNodesConfig || [];
     
     container.innerHTML = config.map((node, index) => {

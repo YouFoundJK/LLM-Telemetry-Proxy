@@ -35,6 +35,7 @@ data/*.log
 data/.*.pid
 data/.*.port
 data/token_budget.json
+data/model_routes.json
 data/*.tmp
 
 # Raw Payload Logger
