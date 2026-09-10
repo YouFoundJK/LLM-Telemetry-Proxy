@@ -1,6 +1,14 @@
 # Core Runtime Dependencies
 aiohttp>=3.9.0
 
+# High-Performance Accelerators (Recommended for 24/7 Production)
+orjson>=3.9.0
+uvloop>=0.19.0; sys_platform != "win32"
+
+# Native Binary Build Tools (for compiling with ./dashboard.sh build)
+nuitka>=2.0.0
+patchelf; sys_platform == "linux"
+
 # Optional Documentation Site (MkDocs Material)
 mkdocs>=1.5.0
 mkdocs-material>=9.5.0

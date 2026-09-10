@@ -18,6 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+try:
+    from proxy.fast_json import json_loads, json_dumps
+except ImportError:
+    from fast_json import json_loads, json_dumps
+
 from proxy.telemetry_db import (
     _token_budget,
     DB_PATH,
@@ -260,7 +265,7 @@ def read_recent_jsonl_lines(file_path: Path, limit: int = 50) -> tuple[list[dict
     entries = []
     for l in recent_lines:
         try:
-            entries.append(json.loads(l))
+            entries.append(json_loads(l))
         except Exception:
             pass
 
@@ -272,7 +277,7 @@ def append_raw_payload(record: dict):
         return
     try:
         LOGGER_DIR.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record, ensure_ascii=False) + "\n"
+        line = json_dumps(record, ensure_ascii=False) + "\n"
         with open(LOGGER_FILE, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception as e:
@@ -502,13 +507,13 @@ async def handle_raw_log_stream(request: web.StreamResponse) -> web.StreamRespon
     q = asyncio.Queue(maxsize=100)
     _raw_subscribers.add(q)
     try:
-        init_payload = json.dumps({"type": "connected", "enabled": _raw_logging_enabled, "timestamp": datetime.now(timezone.utc).isoformat()})
+        init_payload = json_dumps({"type": "connected", "enabled": _raw_logging_enabled, "timestamp": datetime.now(timezone.utc).isoformat()})
         await response.write(f"data: {init_payload}\n\n".encode("utf-8"))
 
         while True:
             try:
                 record = await asyncio.wait_for(q.get(), timeout=15.0)
-                data = json.dumps(record, ensure_ascii=False)
+                data = json_dumps(record, ensure_ascii=False)
                 await response.write(f"data: {data}\n\n".encode("utf-8"))
             except asyncio.TimeoutError:
                 await response.write(b": keepalive\n\n")

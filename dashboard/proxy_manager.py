@@ -78,6 +78,21 @@ def get_proxy_script_path() -> Path:
     return candidates[0]
 
 
+def get_proxy_binary_path() -> Optional[Path]:
+    """Check for pre-compiled standalone native binary."""
+    exts = [".exe"] if sys.platform == "win32" else ["", ".bin"]
+    candidates = []
+    for d in [REPO_ROOT / "dist", REPO_ROOT / "bin"]:
+        for name in ["llm_telemetry_proxy", "llm_proxy"]:
+            for ext in exts:
+                candidates.append(d / f"{name}{ext}")
+                candidates.append(d / f"{name}.dist" / f"{name}{ext}")
+    for c in candidates:
+        if c.is_file() and (sys.platform == "win32" or os.access(c, os.X_OK)):
+            return c
+    return None
+
+
 def get_db_compress_script_path() -> Path:
     candidates = [
         REPO_ROOT / "proxy" / "db_compress.py",
@@ -404,11 +419,12 @@ class ProxyManager:
                     "status": status,
                 }
 
+        proxy_bin = get_proxy_binary_path()
         script_path = get_proxy_script_path()
-        if not script_path.exists():
+        if not proxy_bin and not script_path.exists():
             return {
                 "success": False,
-                "error": f"Proxy script not found at {script_path}",
+                "error": f"Proxy executable or script not found at {script_path}",
             }
 
         cls._last_known_port = port
@@ -418,14 +434,23 @@ class ProxyManager:
         log_file = get_log_file()
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            sys.executable,
-            str(script_path),
-            "--port", str(port),
-            "--host", host,
-            "--upstream", upstream,
-            "--token-limit", str(token_limit),
-        ]
+        if proxy_bin:
+            cmd = [
+                str(proxy_bin),
+                "--port", str(port),
+                "--host", host,
+                "--upstream", upstream,
+                "--token-limit", str(token_limit),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                str(script_path),
+                "--port", str(port),
+                "--host", host,
+                "--upstream", upstream,
+                "--token-limit", str(token_limit),
+            ]
         if max_concurrent is not None:
             cmd.extend(["--max-concurrent", str(max_concurrent)])
         if slot_cooldown_ms is not None:
@@ -438,16 +463,35 @@ class ProxyManager:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(log_file, "a", encoding="utf-8") as lf:
             lf.write(f"\n\n=== [LLM Telemetry Proxy Launch at {ts}] ===\n")
+            if proxy_bin:
+                lf.write(f"Mode: Pre-compiled Native Binary ({proxy_bin})\n")
+            else:
+                lf.write("Mode: Python Script\n")
             lf.write(f"Command: {' '.join(cmd)}\n")
             lf.flush()
 
         log_out = open(log_file, "a", encoding="utf-8")
 
         try:
+            env = dict(os.environ)
+            if sys.platform != "win32" and "LD_PRELOAD" not in env:
+                for lib in [
+                    "/usr/lib/x86_64-linux-gnu/libjemalloc.so.2",
+                    "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2",
+                    "/usr/lib64/libjemalloc.so.2",
+                    "/usr/lib/libjemalloc.so.2",
+                    "/usr/lib/x86_64-linux-gnu/libmimalloc.so.2",
+                    "/usr/lib/libmimalloc.so.2",
+                ]:
+                    if os.path.isfile(lib):
+                        env["LD_PRELOAD"] = lib
+                        break
+
             kwargs: Dict[str, Any] = {
                 "stdout": log_out,
                 "stderr": subprocess.STDOUT,
                 "cwd": str(REPO_ROOT),
+                "env": env,
             }
 
             if sys.platform == "win32":

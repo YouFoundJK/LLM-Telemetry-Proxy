@@ -52,6 +52,16 @@ Setup is as simple as pointing your API calls to this local proxy (`http://local
       <p>Inspect real-time prompt schemas, tool calls, model reasoning tokens, and completions in a dedicated live streaming view with automatic credential masking.</p>
     </td>
   </tr>
+  <tr>
+    <td width="50%">
+      <h3>⚡ 24/7 Production Engine</h3>
+      <p>Integrated with <code>uvloop</code> (C / libuv), <code>orjson</code> (Rust SIMD), <code>jemalloc</code> anti-fragmentation memory preloading, and post-boot <code>gc.freeze()</code>.</p>
+    </td>
+    <td width="50%">
+      <h3>🏎 Native Binary Pre-Compilation</h3>
+      <p>Compile into a standalone native C machine-code binary via Nuitka (<code>./start.sh build</code>). <code>start.sh</code> automatically detects and runs the binary.</p>
+    </td>
+  </tr>
 </table>
 
 ---
@@ -122,6 +132,52 @@ curl http://localhost:9090/v1/chat/completions \
     "model": "deepseek-v4-flash",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
+```
+
+---
+
+## ⚡ 24/7 Production Engine & Native Pre-Compilation
+
+For servers running the proxy permanently, the codebase includes a full native C/C++ compilation pipeline (`Nuitka`) and high-performance production accelerators:
+
+- **🏎 Standalone Machine-Code Binary**: Pre-compile `llm_telemetry_proxy.py` into a standalone native ELF binary with Link-Time Optimization (`--lto=yes`), completely bypassing CPython's bytecode interpreter loop.
+- **⚡ C/libuv Event Loop (`uvloop`)**: Multiplies asynchronous network socket throughput by 2x–3x.
+- **🦀 Rust SIMD JSON (`orjson`)**: Ultra-fast, zero-copy deserialization of SSE chunks and prompt payloads directly from raw incoming bytes.
+- **🛡 Anti-Fragmentation Allocator (`jemalloc`)**: Auto-preloaded by `start.sh` to prevent Linux `glibc malloc` heap fragmentation during months of uptime.
+- **❄️ Permanent GC Freezing (`gc.freeze()`)**: Locks routing tables and model definitions into Python's permanent generation, eliminating cyclic GC sweep pauses.
+
+### Compiling to Native Binary on Your Server
+
+```bash
+# 1. Install prerequisites (Debian/Ubuntu)
+sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf
+
+# 2. Build the native binary
+./start.sh build
+# or: ./dashboard/dashboard.sh build
+
+# 3. Start the service (automatically prioritizes the native binary!)
+./start.sh start --with-proxy
+```
+
+---
+
+## 📊 Performance Profiling & Benchmarking (Python vs Native Binary)
+
+Curious about the exact RAM, CPU, and latency differences on your hardware? A dedicated profiler with zero external dependencies is included in `scripts/benchmark_monitor.py`:
+
+```bash
+# 1. Record 30 minutes of the Python baseline
+python3 scripts/benchmark_monitor.py record --output python_run.csv --duration 1800
+
+# 2. Restart with the pre-compiled native binary
+./start.sh proxy restart
+
+# 3. Record 30 minutes of the Native Binary
+python3 scripts/benchmark_monitor.py record --output native_run.csv --duration 1800
+
+# 4. Generate side-by-side comparison report
+python3 scripts/benchmark_monitor.py compare python_run.csv native_run.csv
 ```
 
 ---

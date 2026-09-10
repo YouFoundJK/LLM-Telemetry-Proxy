@@ -19,10 +19,18 @@ import uuid
 import signal
 import atexit
 import argparse
+import asyncio
 from pathlib import Path
 from types import ModuleType
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List, Union
+
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    _HAS_UVLOOP = True
+except ImportError:
+    _HAS_UVLOOP = False
 
 import aiohttp
 from aiohttp import web
@@ -272,7 +280,32 @@ def main():
         pass
 
     init_db()
-    print(f"[telemetry] Proxy starting on {LISTEN_HOST}:{LISTEN_PORT}", file=sys.stderr)
+
+    # Freezing Python GC permanent generation for static objects (routes, mappings, configs)
+    import gc
+    if hasattr(gc, "freeze"):
+        try:
+            gc.freeze()
+        except Exception:
+            pass
+
+    # Detect high-performance accelerators for status banner
+    try:
+        from proxy.fast_json import HAS_ORJSON
+    except ImportError:
+        try:
+            from fast_json import HAS_ORJSON
+        except ImportError:
+            HAS_ORJSON = False
+
+    accel = []
+    if _HAS_UVLOOP:
+        accel.append("uvloop")
+    if HAS_ORJSON:
+        accel.append("orjson")
+    accel_str = f" [Accelerators: {' + '.join(accel)}]" if accel else ""
+
+    print(f"[telemetry] Proxy starting on {LISTEN_HOST}:{LISTEN_PORT}{accel_str}", file=sys.stderr)
     print(f"[telemetry] Upstream: {proxy_forwarder.UPSTREAM}", file=sys.stderr)
     print(f"[telemetry] Max Concurrent: {MAX_CONCURRENT} (Slot Cooldown: {SLOT_COOLDOWN_MS}ms, 429 Retries: {RETRY_429_MAX})", file=sys.stderr)
     print(f"[telemetry] DB: {telemetry_db.DB_PATH}", file=sys.stderr)
@@ -375,7 +408,10 @@ class _ProxyModule(ModuleType):
         telemetry_db._load_cache = val
 
 
-sys.modules[__name__].__class__ = _ProxyModule
+try:
+    sys.modules[__name__].__class__ = _ProxyModule
+except Exception:
+    pass
 
 if __name__ == "__main__":
     main()

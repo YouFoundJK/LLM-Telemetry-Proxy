@@ -21,6 +21,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+try:
+    from proxy.fast_json import json_loads, json_dumps
+except ImportError:
+    from fast_json import json_loads, json_dumps
+
 from proxy.telemetry_db import (
     log_call,
     log_proxy_call,
@@ -233,7 +238,7 @@ async def handle_streaming_upstream(
             for line in text.split("\n"):
                 line = line.strip()
                 if line.startswith("data: ") and line != "data: [DONE]":
-                    chunk_data = json.loads(line[6:])
+                    chunk_data = json_loads(line[6:])
                     if isinstance(chunk_data, dict):
                         if chunk_data.get("error"):
                             s_needed, s_delay, s_reason = evaluate_retry_condition(
@@ -276,7 +281,7 @@ async def handle_streaming_upstream(
                 for line in text.split("\n"):
                     line = line.strip()
                     if line.startswith("data: ") and line != "data: [DONE]":
-                        chunk_data = json.loads(line[6:])
+                        chunk_data = json_loads(line[6:])
                         if isinstance(chunk_data, dict):
                             if chunk_data.get("error"):
                                 s_needed, s_delay, s_reason = evaluate_retry_condition(
@@ -368,7 +373,7 @@ async def handle_streaming_upstream(
             for line in text.split("\n"):
                 if line.startswith("data: ") and line.strip() != "data: [DONE]":
                     try:
-                        chunk_data = json.loads(line[6:])
+                        chunk_data = json_loads(line[6:])
                         if isinstance(chunk_data, dict):
                             if chunk_data.get("usage") and isinstance(chunk_data["usage"], dict):
                                 collected_usage = chunk_data["usage"]
@@ -378,19 +383,23 @@ async def handle_streaming_upstream(
                                     if isinstance(choice, dict):
                                         delta = choice.get("delta")
                                         if isinstance(delta, dict):
-                                            if delta.get("content"):
-                                                content_chars += len(delta["content"])
-                                                collected_content += delta["content"]
-                                            if delta.get("reasoning_content"):
-                                                content_chars += len(delta["reasoning_content"])
-                                                collected_reasoning += delta["reasoning_content"]
+                                            c_val = delta.get("content")
+                                            if c_val:
+                                                content_chars += len(c_val)
+                                                if payload_inspector._raw_logging_enabled:
+                                                    collected_content += c_val
+                                            r_val = delta.get("reasoning_content")
+                                            if r_val:
+                                                content_chars += len(r_val)
+                                                if payload_inspector._raw_logging_enabled:
+                                                    collected_reasoning += r_val
                             if chunk_data.get("error"):
                                 err_obj = chunk_data["error"]
                                 if isinstance(err_obj, dict):
                                     error = err_obj.get("message") or err_obj.get("type") or str(err_obj)
                                 else:
                                     error = str(err_obj)
-                    except json.JSONDecodeError:
+                    except Exception:
                         pass
         except Exception:
             pass
@@ -429,7 +438,7 @@ async def handle_streaming_upstream(
         try:
             err_code = 504 if isinstance(stream_error, asyncio.TimeoutError) else 502
             err_msg = str(stream_error).strip() or type(stream_error).__name__
-            sse_err = json.dumps({
+            sse_err = json_dumps({
                 "error": {
                     "message": f"Upstream stream error: {err_msg}",
                     "type": "upstream_stream_error",

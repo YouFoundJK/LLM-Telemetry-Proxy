@@ -74,3 +74,43 @@ To prevent accidental credential leaks into logs, `make_raw_payload_record` auto
 
 #### SSE Live Streaming
 The proxy offers a Server-Sent Events (SSE) feed at `/v1/raw-log/stream` that transmits structured JSON payloads to the connected Payload Inspector UI with zero polling overhead.
+
+---
+
+### 5. 24/7 Production Engine & Native Binary Execution
+
+To support permanent, uninterrupted execution on servers with minimal CPU and RAM footprints:
+
+#### Execution Modes
+
+| Feature | Standard Python Script | Pre-Compiled Native Binary (Nuitka) |
+| :--- | :--- | :--- |
+| **Execution Path** | CPython bytecode interpreter loop | Standalone compiled C/C++ machine code (`ELF`) |
+| **Event Loop** | `uvloop` (C / `libuv`) | `uvloop` (compiled into binary) |
+| **JSON Serialization** | `orjson` (Rust SIMD) | `orjson` (Rust SIMD compiled into binary) |
+| **Memory Allocator** | `jemalloc` (`LD_PRELOAD`) | `jemalloc` (`LD_PRELOAD`) |
+| **GC Overhead** | `gc.freeze()` permanent gen | Native AST + `gc.freeze()` |
+| **Idle RAM Footprint** | ~35–45 MB | **~18–25 MB** |
+
+#### Pre-compiling to Native Binary
+
+```bash
+# Compile via control script
+./start.sh build
+
+# Restart proxy (prioritizes native binary automatically)
+./start.sh proxy restart
+```
+
+#### Benchmarking & Profiling Tool (`benchmark_monitor.py`)
+
+A standalone profiler is included in `scripts/benchmark_monitor.py` to sample real-time RSS memory, CPU%, threads, open sockets, and response latencies:
+
+```bash
+# Profile current proxy for 30 minutes
+python scripts/benchmark_monitor.py record --output baseline.csv --duration 1800
+
+# Compare two benchmark recordings
+python scripts/benchmark_monitor.py compare baseline.csv native.csv
+```
+

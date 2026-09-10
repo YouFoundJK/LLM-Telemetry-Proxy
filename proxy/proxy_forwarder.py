@@ -22,6 +22,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
+    from proxy.fast_json import json_loads, json_dumps, json_dumps_bytes
+except ImportError:
+    from fast_json import json_loads, json_dumps, json_dumps_bytes
+
+try:
     from proxy.model_router import build_upstream_url, apply_upstream_api_key, AcquiredSlot
 except ImportError:
     from model_router import build_upstream_url, apply_upstream_api_key, AcquiredSlot
@@ -120,13 +125,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     model, input_tokens, payload = None, None, None
     try:
         if body:
-            payload = json.loads(body)
+            payload = json_loads(body)
             model = payload.get("model")
             if payload.get("stream") and not payload.get("stream_options"):
                 payload["stream_options"] = {"include_usage": True}
-                body = json.dumps(payload).encode("utf-8")
+                body = json_dumps_bytes(payload)
             input_tokens = _extract_prompt_tokens(payload)
-    except (json.JSONDecodeError, KeyError):
+    except Exception:
         pass
 
     route_candidates = _model_router.resolve_chain(model)
@@ -262,7 +267,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
                                 resp_data = None
                                 try:
-                                    resp_data = json.loads(resp_body)
+                                    resp_data = json_loads(resp_body)
                                 except Exception:
                                     pass
 

@@ -26,8 +26,17 @@ import asyncio
 import aiohttp
 from aiohttp import web
 
-DASHBOARD_DIR = Path(__file__).resolve().parent
-REPO_ROOT = DASHBOARD_DIR.parent
+_this_file = Path(__file__).resolve()
+if _this_file.parent.name.endswith(".dist") or _this_file.parent.name == "dist":
+    # Compiled standalone binary in dist/ or dist/target.dist/
+    REPO_ROOT = _this_file.parent.parent if _this_file.parent.name.endswith(".dist") else _this_file.parent.parent
+    if (REPO_ROOT / "dist").exists() and not (REPO_ROOT / "dashboard").exists():
+        # Extra safeguard if placed directly in dist/
+        REPO_ROOT = REPO_ROOT.parent
+    DASHBOARD_DIR = REPO_ROOT / "dashboard"
+else:
+    DASHBOARD_DIR = _this_file.parent
+    REPO_ROOT = DASHBOARD_DIR.parent
 
 # Ensure proxy module can be imported
 if str(REPO_ROOT) not in sys.path:
@@ -42,6 +51,15 @@ except ImportError:
         from model_router import ModelRouter
     except ImportError:
         ModelRouter = None
+
+try:
+    from proxy.fast_json import json_loads, json_dumps, json_dumps_bytes
+except ImportError:
+    try:
+        from fast_json import json_loads, json_dumps, json_dumps_bytes
+    except ImportError:
+        def json_dumps_bytes(obj):
+            return json.dumps(obj).encode("utf-8")
 
 try:
     from proxy_manager import ProxyManager
@@ -826,8 +844,7 @@ async def handle_query_bulk(request: web.Request) -> web.Response:
             "available_types": _metadata_cache["types"] or []
         }
 
-        json_text = json.dumps(result_payload)
-        json_bytes = json_text.encode("utf-8")
+        json_bytes = json_dumps_bytes(result_payload)
 
         accept_enc = request.headers.get("Accept-Encoding", "")
         if "gzip" in accept_enc and len(json_bytes) > 1024:

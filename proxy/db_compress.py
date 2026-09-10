@@ -373,6 +373,7 @@ def compress(dry_run=False):
                     (timestamp, endpoint, method, call_type, model, status_code, error, logged, ttfb_ms, total_ms, calls_count)
                 VALUES
                     (:timestamp, :endpoint, :method, :call_type, :model, :status_code, :error, :logged, :ttfb_ms, :total_ms, :calls_count)
+            """, aggregated_proxy)
         # Update compaction version and timestamp in _telemetry_meta
         cur = conn.execute("SELECT value FROM _telemetry_meta WHERE key = 'compaction_version'")
         row = cur.fetchone()

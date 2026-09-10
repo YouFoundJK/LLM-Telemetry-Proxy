@@ -240,9 +240,22 @@ _token_budget = RollingTokenBudget(DAILY_TOKEN_LIMIT, db_path=DB_PATH, state_fil
 
 
 # ── SQLite ──────────────────────────────────────────────────────────────────
+def _configure_db_pragmas(conn: sqlite3.Connection):
+    """Apply high-performance SQLite PRAGMAs for concurrent WAL mode and memory tuning."""
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA temp_store = MEMORY;")
+        conn.execute("PRAGMA cache_size = -32000;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+    except Exception:
+        pass
+
+
 def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     conn.row_factory = sqlite3.Row
+    _configure_db_pragmas(conn)
     return conn
 
 
@@ -267,7 +280,8 @@ def _ensure_optional_columns(conn, table: str):
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+    _configure_db_pragmas(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS api_calls (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -402,6 +416,7 @@ def resolve_canonical_model(model_name: str, timestamp: str = None) -> str:
 def _insert_with_fallback(table, full_cols, full_vals, legacy_cols, legacy_vals):
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+        _configure_db_pragmas(conn)
         try:
             placeholders = ", ".join(["?"] * len(full_vals))
             conn.execute(f"INSERT INTO {table} ({', '.join(full_cols)}) VALUES ({placeholders})", full_vals)

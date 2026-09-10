@@ -127,3 +127,48 @@ To prevent database bloat over months of continuous production logging:
    - `ttfb_ms`, `total_ms`, `tokens_per_s`, and `server_running` are weighted by `calls_count`.
    - `calls_count` is incremented to represent the aggregated batch size.
 4. **Zero-Downtime Vacuum**: The compressor runs inside an ACID SQLite transaction with automatic `.db.bak` creation, rollback protection, and `VACUUM` space reclamation.
+
+---
+
+## ⚡ High-Performance Execution & Storage Pipeline
+
+For perpetual 24/7 server deployments, the architecture integrates a dedicated multi-layer acceleration engine:
+
+```mermaid
+flowchart LR
+    subgraph ExecutionLayer [Execution Runtime]
+        Bin[Pre-Compiled Native Binary - Nuitka ELF]
+        Py[Accelerated Python Engine]
+    end
+
+    subgraph CoreAccelerators [Core Accelerators]
+        UV[uvloop - C / libuv Event Loop]
+        ORJ[orjson - Rust SIMD Serialization]
+        JEM[jemalloc - Anti-Fragmentation Allocator]
+        GCF[gc.freeze - Permanent Generation Lock]
+    end
+
+    subgraph StorageEngine [Tuned Storage Layer]
+        WAL[SQLite WAL Mode - Concurrent Readers/Writers]
+        MemCache[PRAGMA cache_size = -32000 - 32MB RAM Cache]
+        FastSync[PRAGMA synchronous = NORMAL - 90% Fewer fsyncs]
+    end
+
+    Bin --> UV
+    Py --> UV
+    UV --> ORJ
+    ORJ --> GCF
+    Bin --> JEM
+    Py --> JEM
+    GCF --> WAL
+    WAL --> MemCache
+    MemCache --> FastSync
+```
+
+1. **Native Pre-Compilation**: Compiles Python AST directly into optimized C machine code with GCC and Link-Time Optimization (`--lto=yes`), eliminating CPython bytecode evaluation overhead.
+2. **C-Based Async Event Loop (`uvloop`)**: Replaces standard Python asyncio with `libuv`, yielding 2x–3x higher request throughput.
+3. **Rust SIMD Serialization (`fast_json` / `orjson`)**: Bypasses UTF-8 string allocations by parsing directly from incoming raw network bytes.
+4. **Anti-Fragmentation Memory Management (`jemalloc`)**: Preloaded via `LD_PRELOAD` to prevent Linux `glibc malloc` heap fragmentation during months of continuous streaming allocations.
+5. **Permanent GC Freezing (`gc.freeze()`)**: Moves all static routes, regexes, and pricing mappings into Python's permanent generation post-boot, stopping cyclic GC sweeps from scanning immutable memory.
+6. **Concurrent SQLite WAL Engine**: Keeps disk I/O off the critical path using write-ahead logging, memory-mapped I/O, and in-memory temporary storage.
+

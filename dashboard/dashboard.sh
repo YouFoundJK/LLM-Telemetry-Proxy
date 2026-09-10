@@ -9,6 +9,7 @@
 #   ./dashboard.sh status                     — check status of dashboard and proxy
 #   ./dashboard.sh url                        — print the dashboard URL
 #   ./dashboard.sh proxy {start|stop|restart|status|logs} — proxy subcommands
+#   ./dashboard.sh build [options]             — compile proxy/dashboard to native binaries via Nuitka
 #
 set -euo pipefail
 
@@ -57,9 +58,7 @@ is_dashboard_pid() {
     fi
     local cmd
     cmd=$(get_proc_cmdline "$pid")
-    if [[ "$cmd" =~ server\.py ]] && [[ "$cmd" =~ dashboard ]]; then
-        return 0
-    elif [[ "$cmd" =~ server\.py ]]; then
+    if [[ "$cmd" =~ server\.py ]] || [[ "$cmd" =~ dashboard_server ]]; then
         return 0
     fi
     return 1
@@ -74,7 +73,7 @@ is_proxy_pid() {
     fi
     local cmd
     cmd=$(get_proc_cmdline "$pid")
-    if [[ "$cmd" =~ llm_telemetry_proxy\.py ]]; then
+    if [[ "$cmd" =~ llm_telemetry_proxy\.py ]] || [[ "$cmd" =~ llm_telemetry_proxy ]] || [[ "$cmd" =~ llm_proxy ]]; then
         return 0
     fi
     return 1
@@ -230,10 +229,49 @@ start_dashboard() {
         fi
     fi
 
-    echo "Starting telemetry dashboard on port $target_port..."
+    # 1. Check for jemalloc or mimalloc to prevent long-term glibc heap fragmentation
+    for lib in \
+        /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+        /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 \
+        /usr/lib64/libjemalloc.so.2 \
+        /usr/lib/libjemalloc.so.2 \
+        /usr/lib/x86_64-linux-gnu/libmimalloc.so.2 \
+        /usr/lib/libmimalloc.so.2; do
+        if [[ -f "$lib" ]]; then
+            if [[ -z "${LD_PRELOAD:-}" ]]; then
+                export LD_PRELOAD="$lib"
+            elif [[ "$LD_PRELOAD" != *"$lib"* ]]; then
+                export LD_PRELOAD="$lib:$LD_PRELOAD"
+            fi
+            break
+        fi
+    done
+
+    # 2. Check for pre-compiled native binary
+    local dash_bin=""
+    for candidate in \
+        "$REPO_ROOT/dist/dashboard_server.bin" \
+        "$REPO_ROOT/dist/dashboard_server" \
+        "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server.bin" \
+        "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server" \
+        "$REPO_ROOT/bin/dashboard_server.bin" \
+        "$REPO_ROOT/bin/dashboard_server"; do
+        if [[ -x "$candidate" ]]; then
+            dash_bin="$candidate"
+            break
+        fi
+    done
+
     mkdir -p "$DATA_DIR"
     cd "$SCRIPT_DIR"
-    nohup "$PYTHON" server.py --port "$target_port" > "$DASHBOARD_LOG_FILE" 2>&1 &
+
+    if [[ -n "$dash_bin" ]]; then
+        echo "Starting pre-compiled native dashboard ($dash_bin) on port $target_port..."
+        nohup "$dash_bin" --port "$target_port" > "$DASHBOARD_LOG_FILE" 2>&1 &
+    else
+        echo "Starting telemetry dashboard on port $target_port..."
+        nohup "$PYTHON" server.py --port "$target_port" > "$DASHBOARD_LOG_FILE" 2>&1 &
+    fi
     local new_pid=$!
     echo "$new_pid" > "$DASHBOARD_PID_FILE"
     echo "$target_port" > "$DASHBOARD_PORT_FILE"
@@ -304,10 +342,49 @@ start_proxy() {
         fi
     fi
 
-    echo "Starting LLM telemetry proxy on port $pport..."
+    # 1. Check for jemalloc or mimalloc to prevent long-term glibc heap fragmentation
+    for lib in \
+        /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+        /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 \
+        /usr/lib64/libjemalloc.so.2 \
+        /usr/lib/libjemalloc.so.2 \
+        /usr/lib/x86_64-linux-gnu/libmimalloc.so.2 \
+        /usr/lib/libmimalloc.so.2; do
+        if [[ -f "$lib" ]]; then
+            if [[ -z "${LD_PRELOAD:-}" ]]; then
+                export LD_PRELOAD="$lib"
+            elif [[ "$LD_PRELOAD" != *"$lib"* ]]; then
+                export LD_PRELOAD="$lib:$LD_PRELOAD"
+            fi
+            break
+        fi
+    done
+
+    # 2. Check for pre-compiled native binary
+    local proxy_bin=""
+    for candidate in \
+        "$REPO_ROOT/dist/llm_telemetry_proxy.bin" \
+        "$REPO_ROOT/dist/llm_telemetry_proxy" \
+        "$REPO_ROOT/dist/llm_telemetry_proxy.dist/llm_telemetry_proxy.bin" \
+        "$REPO_ROOT/dist/llm_telemetry_proxy.dist/llm_telemetry_proxy" \
+        "$REPO_ROOT/bin/llm_telemetry_proxy.bin" \
+        "$REPO_ROOT/bin/llm_telemetry_proxy"; do
+        if [[ -x "$candidate" ]]; then
+            proxy_bin="$candidate"
+            break
+        fi
+    done
+
     mkdir -p "$REPO_ROOT/data"
     cd "$REPO_ROOT"
-    nohup "$PYTHON" "$REPO_ROOT/proxy/llm_telemetry_proxy.py" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
+
+    if [[ -n "$proxy_bin" ]]; then
+        echo "Starting pre-compiled native proxy ($proxy_bin) on port $pport..."
+        nohup "$proxy_bin" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
+    else
+        echo "Starting LLM telemetry proxy on port $pport..."
+        nohup "$PYTHON" "$REPO_ROOT/proxy/llm_telemetry_proxy.py" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
+    fi
     local new_pid=$!
     echo "$new_pid" > "$PROXY_PID_FILE"
 
@@ -440,8 +517,13 @@ case "$COMMAND" in
         esac
         ;;
 
+    build)
+        echo "=== Building LLM Telemetry Native Binaries via Nuitka ==="
+        "$PYTHON" "$REPO_ROOT/scripts/build_binaries.py" "$@"
+        ;;
+
     *)
-        echo "Usage: ./dashboard.sh {start [port] [--with-proxy]|stop [--all]|restart [port]|status|url|proxy {start|stop|restart|status|logs}}"
+        echo "Usage: ./dashboard.sh {start [port] [--with-proxy]|stop [--all]|restart [port]|status|url|proxy {start|stop|restart|status|logs}|build [options]}"
         exit 1
         ;;
 esac

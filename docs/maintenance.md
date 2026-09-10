@@ -88,3 +88,69 @@ Use `dashboard/dashboard.sh` or `start.sh` for reliable service control:
 # Stop all processes (including proxy)
 ./start.sh stop --all
 ```
+
+---
+
+## ⚡ 24/7 High-Performance Server Deployment & Native Binary Pre-Compilation
+
+For servers running the proxy permanently, maximum throughput, minimal CPU usage, and zero memory creep are achieved via native machine-code compilation (`Nuitka`) and anti-fragmentation memory allocators (`jemalloc`).
+
+### 1. Server Prerequisites (Debian/Ubuntu)
+
+```bash
+# Install GCC compiler, Python C-headers, jemalloc, and patchelf (one-time sudo)
+sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf
+```
+
+### 2. Install Accelerators
+
+In your Python virtual environment on the server:
+
+```bash
+pip install -r requirements.txt
+```
+
+This installs `orjson` (SIMD Rust JSON parser), `uvloop` (C/libuv event loop), and `nuitka` (native C compiler).
+
+### 3. Compile Standalone Native Binary
+
+Compile the proxy directly on the server to ensure exact matching with the host's `glibc` and CPU architecture:
+
+```bash
+./dashboard.sh build
+# or: python scripts/build_binaries.py --target proxy
+```
+
+The compiled binary will be placed at `dist/llm_telemetry_proxy.bin` (standalone ELF executable with Link-Time Optimization).
+
+### 4. Start & Supervise
+
+```bash
+./dashboard.sh start --with-proxy
+```
+
+`dashboard.sh` and `ProxyManager` automatically:
+- Detect the pre-compiled binary in `dist/` and launch it directly.
+- Detect `libjemalloc.so.2` and preload it via `LD_PRELOAD` to permanently prevent heap memory fragmentation.
+- Activate `gc.freeze()` at startup to eliminate cyclic garbage collector overhead.
+- Fall back gracefully to the Python script with runtime accelerators if the binary is absent.
+
+### 5. Resource Profiling & Comparison Tool (`benchmark_monitor.py`)
+
+A standalone profiler is available in `scripts/benchmark_monitor.py` to measure and compare real-world performance:
+
+```bash
+# 1. Profile current running proxy for 30 minutes (1800s)
+python scripts/benchmark_monitor.py record --output python_run.csv --duration 1800
+
+# 2. Restart proxy with native binary
+./dashboard.sh proxy restart
+
+# 3. Profile native binary for 30 minutes
+python scripts/benchmark_monitor.py record --output native_run.csv --duration 1800
+
+# 4. Generate side-by-side comparison report
+python scripts/benchmark_monitor.py compare python_run.csv native_run.csv
+```
+
+
