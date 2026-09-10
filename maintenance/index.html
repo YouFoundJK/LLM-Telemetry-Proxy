@@ -1108,8 +1108,8 @@
 <h2 id="247-high-performance-server-deployment-native-binary-pre-compilation">⚡ 24/7 High-Performance Server Deployment &amp; Native Binary Pre-Compilation</h2>
 <p>For servers running the proxy permanently, maximum throughput, minimal CPU usage, and zero memory creep are achieved via native machine-code compilation (<code>Nuitka</code>) and anti-fragmentation memory allocators (<code>jemalloc</code>).</p>
 <h3 id="1-server-prerequisites-debianubuntu">1. Server Prerequisites (Debian/Ubuntu)</h3>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Install GCC compiler, Python C-headers, jemalloc, and patchelf (one-time sudo)</span>
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>sudo<span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>gcc<span class="w"> </span>python3-dev<span class="w"> </span>libjemalloc2<span class="w"> </span>patchelf
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Install GCC compiler, Python C-headers, jemalloc, patchelf, and ccache (one-time sudo)</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>sudo<span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>gcc<span class="w"> </span>python3-dev<span class="w"> </span>libjemalloc2<span class="w"> </span>patchelf<span class="w"> </span>ccache
 </span></code></pre></div>
 <h3 id="2-install-accelerators">2. Install Accelerators</h3>
 <p>In your Python virtual environment on the server:</p>
