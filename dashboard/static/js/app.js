@@ -975,6 +975,22 @@ const App = (() => {
    * Setup filter listeners (Group By, Date, Errors, Token Metrics)
    */
   function setupFilters() {
+    // Ensure Model Selection dropdown toggle is active immediately
+    const modelTrigger = document.getElementById('modelSelectTrigger');
+    const modelWrapper = document.getElementById('modelSelectWrapper');
+    if (modelTrigger && modelWrapper && !modelTrigger._hasDropdownToggle) {
+      modelTrigger._hasDropdownToggle = true;
+      modelTrigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        modelWrapper.classList.toggle('open');
+      });
+      document.addEventListener('click', (e) => {
+        if (!modelWrapper.contains(e.target)) {
+          modelWrapper.classList.remove('open');
+        }
+      });
+    }
+
     // Initialize Flatpickr range picker
     State.datePickerInstance = flatpickr("#dateRangePicker", {
       mode: "range",
@@ -2343,6 +2359,31 @@ const App = (() => {
       headerConcurrencyBadge.addEventListener('click', () => {
         switchTab('controlPanelTab');
       });
+    }
+
+    const badgeWrapper = document.getElementById('headerConcurrencyBadgeWrapper');
+    const concurrencyDropdown = document.getElementById('headerConcurrencyDropdown');
+    if (badgeWrapper && concurrencyDropdown) {
+      let closeTimer = null;
+      const show = () => {
+        if (closeTimer) clearTimeout(closeTimer);
+        concurrencyDropdown.classList.add('open');
+      };
+      const hide = () => {
+        closeTimer = setTimeout(() => {
+          concurrencyDropdown.classList.remove('open');
+        }, 150);
+      };
+
+      badgeWrapper.addEventListener('mouseenter', show);
+      badgeWrapper.addEventListener('mouseleave', hide);
+      badgeWrapper.addEventListener('mouseover', show);
+      badgeWrapper.addEventListener('focusin', show);
+      badgeWrapper.addEventListener('focusout', hide);
+
+      concurrencyDropdown.addEventListener('mouseenter', show);
+      concurrencyDropdown.addEventListener('mouseleave', hide);
+      concurrencyDropdown.addEventListener('mouseover', show);
     }
 
     // Proxy configuration input listeners for dirty state tracking

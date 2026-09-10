@@ -683,18 +683,21 @@ const UI = (() => {
     const wrapper = document.querySelector('.custom-select-wrapper');
     if (!trigger || !dropdown || !wrapper) return;
 
-    // Toggle dropdown open/close
-    trigger.addEventListener('click', (e) => {
-      e.stopPropagation();
-      wrapper.classList.toggle('open');
-    });
+    // Toggle dropdown open/close (ensure single listener)
+    if (!trigger._hasDropdownToggle) {
+      trigger._hasDropdownToggle = true;
+      trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        wrapper.classList.toggle('open');
+      });
 
-    // Close when clicking outside
-    document.addEventListener('click', (e) => {
-      if (!wrapper.contains(e.target)) {
-        wrapper.classList.remove('open');
-      }
-    });
+      // Close when clicking outside
+      document.addEventListener('click', (e) => {
+        if (!wrapper.contains(e.target)) {
+          wrapper.classList.remove('open');
+        }
+      });
+    }
 
     // Populates options list
     function rebuild() {

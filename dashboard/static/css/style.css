@@ -1961,7 +1961,8 @@ td.num {
 }
 
 .header-concurrency-badge-wrapper:hover .header-concurrency-dropdown,
-.header-concurrency-dropdown:hover {
+.header-concurrency-dropdown:hover,
+.header-concurrency-dropdown.open {
   display: flex;
 }
 
