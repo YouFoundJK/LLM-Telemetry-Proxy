@@ -119,6 +119,15 @@ def check_toolchain() -> bool:
         else:
             log(f"Detected patchelf: {shutil.which('patchelf')}")
 
+    # 5. Check for ccache (accelerates rebuilds)
+    ccache_path = shutil.which("ccache")
+    if ccache_path:
+        log(f"Detected ccache: {ccache_path} (fast incremental compilation active)")
+    else:
+        log_warn("ccache not installed. First build is fine, but rebuilds will be slower.")
+        if sys.platform != "win32":
+            print("    TIP: Run: sudo apt-get install -y ccache\n")
+
     return ok
 
 
@@ -165,6 +174,10 @@ def compile_target(
         "--remove-output",
         f"--output-filename={output_bin_name}",
     ]
+
+    # Enable ccache for fast incremental builds if installed
+    if shutil.which("ccache"):
+        cmd.append("--enable-ccache")
 
     # Include high-performance packages in binary if present
     for pkg in ("orjson", "uvloop"):

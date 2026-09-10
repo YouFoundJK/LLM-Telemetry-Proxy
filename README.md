@@ -150,7 +150,7 @@ For servers running the proxy permanently, the codebase includes a full native C
 
 ```bash
 # 1. Install prerequisites (Debian/Ubuntu)
-sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf
+sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf ccache
 
 # 2. Build the native binary
 ./start.sh build

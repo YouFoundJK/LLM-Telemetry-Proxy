@@ -98,8 +98,8 @@ For servers running the proxy permanently, maximum throughput, minimal CPU usage
 ### 1. Server Prerequisites (Debian/Ubuntu)
 
 ```bash
-# Install GCC compiler, Python C-headers, jemalloc, and patchelf (one-time sudo)
-sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf
+# Install GCC compiler, Python C-headers, jemalloc, patchelf, and ccache (one-time sudo)
+sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf ccache
 ```
 
 ### 2. Install Accelerators

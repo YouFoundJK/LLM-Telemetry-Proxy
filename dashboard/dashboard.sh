@@ -296,19 +296,47 @@ start_dashboard() {
         fi
     done
 
+    # If binary failed to start, attempt automatic fallback to interpreted Python
+    if [[ "$started" != true ]] || ! kill -0 "$new_pid" 2>/dev/null; then
+        if [[ -n "$dash_bin" ]]; then
+            echo "⚠️  Native dashboard binary ($dash_bin) failed to run."
+            echo "   Falling back to standard Python server.py..."
+            echo "   Binary failure output:"
+            tail -n 15 "$DASHBOARD_LOG_FILE" 2>/dev/null || true
+            echo ""
+
+            nohup "$PYTHON" server.py --port "$target_port" > "$DASHBOARD_LOG_FILE" 2>&1 &
+            new_pid=$!
+            echo "$new_pid" > "$DASHBOARD_PID_FILE"
+            started=false
+            for _ in {1..6}; do
+                sleep 0.5
+                if kill -0 "$new_pid" 2>/dev/null; then
+                    local p
+                    p=$(get_listening_pid_on_port "$target_port")
+                    if [[ "$p" == "$new_pid" ]] || grep -q "Server starting on" "$DASHBOARD_LOG_FILE" 2>/dev/null; then
+                        started=true
+                        break
+                    fi
+                else
+                    break
+                fi
+            done
+        fi
+    fi
+
     if [[ "$started" == true ]] && kill -0 "$new_pid" 2>/dev/null; then
-        echo "✅ Dashboard running on http://localhost:$target_port"
-        echo "   PID: $new_pid"
+        local local_mode
+        local_mode=$(get_proc_mode "$new_pid")
+        echo "✅ Dashboard running $local_mode on http://localhost:$target_port (PID $new_pid)"
         echo "   Log: $DASHBOARD_LOG_FILE"
     else
-        echo "❌ Failed to start dashboard. Check log:"
-        cat "$DASHBOARD_LOG_FILE"
+        echo "❌ Failed to start dashboard. Check log: $DASHBOARD_LOG_FILE"
         rm -f "$DASHBOARD_PID_FILE" "$DASHBOARD_PORT_FILE"
-        return 1
     fi
 
     if [[ "$with_proxy" == true ]]; then
-        start_proxy "$PROXY_PORT"
+        start_proxy "$PROXY_PORT" || true
     fi
 }
 
@@ -393,8 +421,25 @@ start_proxy() {
     echo "$new_pid" > "$PROXY_PID_FILE"
 
     sleep 1
+    if ! kill -0 "$new_pid" 2>/dev/null; then
+        if [[ -n "$proxy_bin" ]]; then
+            echo "⚠️  Native proxy binary ($proxy_bin) failed to run."
+            echo "   Falling back to python proxy/llm_telemetry_proxy.py..."
+            echo "   Binary failure output:"
+            tail -n 15 "$PROXY_LOG_FILE" 2>/dev/null || true
+            echo ""
+
+            nohup "$PYTHON" "$REPO_ROOT/proxy/llm_telemetry_proxy.py" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
+            new_pid=$!
+            echo "$new_pid" > "$PROXY_PID_FILE"
+            sleep 1
+        fi
+    fi
+
     if kill -0 "$new_pid" 2>/dev/null; then
-        echo "✅ Proxy running on http://localhost:$pport (PID $new_pid)"
+        local local_mode
+        local_mode=$(get_proc_mode "$new_pid")
+        echo "✅ Proxy running $local_mode on http://localhost:$pport (PID $new_pid)"
         echo "   Log: $PROXY_LOG_FILE"
     else
         echo "❌ Proxy failed to start. Check log: $PROXY_LOG_FILE"
@@ -442,21 +487,25 @@ case "$COMMAND" in
         ;;
 
     restart)
+        echo "=== Restarting LLM Telemetry Suite ==="
+        echo "Stopping active processes and re-checking native binaries / Python fallbacks..."
         was_proxy_running=false
         if is_proxy_running; then
             was_proxy_running=true
         fi
 
-        stop_dashboard
+        stop_dashboard || true
         if [[ "$was_proxy_running" == true ]]; then
-            stop_proxy
+            stop_proxy || true
         fi
 
         sleep 1
-        start_dashboard "$@"
+        # Start dashboard (never let a dashboard failure terminate the script)
+        start_dashboard "$@" || true
 
+        # Ensure proxy is always started/restarted
         if [[ "$was_proxy_running" == true ]] && ! is_proxy_running; then
-            start_proxy "$PROXY_PORT"
+            start_proxy "$PROXY_PORT" || true
         fi
         ;;
 
