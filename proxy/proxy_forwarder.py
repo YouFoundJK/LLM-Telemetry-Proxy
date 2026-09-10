@@ -22,9 +22,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from proxy.model_router import build_upstream_url
+    from proxy.model_router import build_upstream_url, apply_upstream_api_key
 except ImportError:
-    from model_router import build_upstream_url
+    from model_router import build_upstream_url, apply_upstream_api_key
 
 from proxy.telemetry_db import (
     classify_endpoint,
@@ -145,6 +145,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     headers.pop("host", None)
     if body and "Content-Length" in headers:
         headers["Content-Length"] = str(len(body))
+    headers = apply_upstream_api_key(headers, route_res.api_key)
 
     req_id = f"req_{uuid.uuid4().hex[:12]}"
     req_seq = payload_inspector.next_raw_payload_seq()
@@ -428,6 +429,7 @@ async def _simple_forward(request, path, method):
     req_body = await request.read() if request.can_read_body else None
     if req_body and "Content-Length" in headers:
         headers["Content-Length"] = str(len(req_body))
+    headers = apply_upstream_api_key(headers, route_res.api_key)
 
     t_start = time.monotonic()
     status_code, error = None, None

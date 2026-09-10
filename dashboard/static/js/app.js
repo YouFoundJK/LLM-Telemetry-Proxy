@@ -1990,7 +1990,10 @@ const App = (() => {
             <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}</td>
             <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
             <td><code class="code-tag">${UI.escapeHtml(r.pattern)}</code></td>
-            <td class="monospace-input" style="color: var(--accent); font-size: 11px;">${UI.escapeHtml(r.upstream_url)}</td>
+            <td class="monospace-input" style="color: var(--accent); font-size: 11px;">
+              ${UI.escapeHtml(r.upstream_url)}
+              ${(r.has_api_key || r.api_key) ? '<span class="badge-tag" style="background:rgba(46,160,67,0.15); color:var(--green); margin-left:6px; font-size:10px;" title="Upstream API key stored — replaces client key">🔑 Key Stored</span>' : '<span class="badge-tag" style="opacity:0.5; margin-left:6px; font-size:10px;" title="No API key stored — client Authorization key passes through">Passthrough</span>'}
+            </td>
             <td>
               <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
               ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
@@ -2076,6 +2079,8 @@ const App = (() => {
     const nameInput = document.getElementById('modalRouteName');
     const patternInput = document.getElementById('modalRoutePattern');
     const upstreamInput = document.getElementById('modalRouteUpstream');
+    const apiKeyInput = document.getElementById('modalRouteApiKey');
+    const toggleApiKeyBtn = document.getElementById('toggleApiKeyVisibilityBtn');
     const priorityInput = document.getElementById('modalRoutePriority');
     const maxConcInput = document.getElementById('modalRouteMaxConcurrent');
     const slotCdInput = document.getElementById('modalRouteSlotCooldown');
@@ -2083,12 +2088,18 @@ const App = (() => {
     const retryModeInput = document.getElementById('modalRouteRetryMode');
     const enabledInput = document.getElementById('modalRouteEnabled');
 
+    if (toggleApiKeyBtn && apiKeyInput) {
+      apiKeyInput.type = 'password';
+      toggleApiKeyBtn.textContent = '👁️ Show';
+    }
+
     if (rule) {
       titleEl.textContent = '✏️ Edit Model Route Rule';
       idInput.value = rule.id || '';
       nameInput.value = rule.name || '';
       patternInput.value = rule.pattern || '';
       upstreamInput.value = rule.upstream_url || '';
+      if (apiKeyInput) apiKeyInput.value = rule.api_key || '';
       priorityInput.value = rule.priority ?? 10;
       if (maxConcInput) maxConcInput.value = rule.max_concurrent ?? 4;
       if (slotCdInput) slotCdInput.value = rule.slot_cooldown_ms ?? 50;
@@ -2101,6 +2112,7 @@ const App = (() => {
       nameInput.value = '';
       patternInput.value = '';
       upstreamInput.value = document.getElementById('proxyConfigUpstream')?.value || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
+      if (apiKeyInput) apiKeyInput.value = '';
       const existingCount = (State.routesConfig?.routes?.length) || 0;
       priorityInput.value = 100 - existingCount * 10;
       if (maxConcInput) maxConcInput.value = 4;
@@ -2199,6 +2211,7 @@ const App = (() => {
         const name = document.getElementById('modalRouteName')?.value?.trim();
         const pattern = document.getElementById('modalRoutePattern')?.value?.trim();
         const upstream = document.getElementById('modalRouteUpstream')?.value?.trim();
+        const apiKey = document.getElementById('modalRouteApiKey')?.value?.trim() || null;
         const priority = parseInt(document.getElementById('modalRoutePriority')?.value || '10', 10);
         const maxConcurrent = Math.max(1, parseInt(document.getElementById('modalRouteMaxConcurrent')?.value || '4', 10));
         const slotCooldown = Math.max(0, parseInt(document.getElementById('modalRouteSlotCooldown')?.value || '50', 10));
@@ -2251,6 +2264,7 @@ const App = (() => {
             State.routesConfig.routes[idx] = {
               ...State.routesConfig.routes[idx],
               name, pattern, upstream_url: upstream,
+              api_key: apiKey,
               priority, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown,
               retry_policy: retryPolicy, enabled
             };
@@ -2261,6 +2275,7 @@ const App = (() => {
             name,
             pattern,
             upstream_url: upstream,
+            api_key: apiKey,
             priority,
             max_concurrent: maxConcurrent,
             slot_cooldown_ms: slotCooldown,
@@ -2274,6 +2289,20 @@ const App = (() => {
         closeRouteModal();
         renderRoutesUI();
         saveAllRoutesConfig(true);
+      });
+    }
+
+    const toggleApiKeyBtn = document.getElementById('toggleApiKeyVisibilityBtn');
+    const apiKeyInput = document.getElementById('modalRouteApiKey');
+    if (toggleApiKeyBtn && apiKeyInput) {
+      toggleApiKeyBtn.addEventListener('click', () => {
+        if (apiKeyInput.type === 'password') {
+          apiKeyInput.type = 'text';
+          toggleApiKeyBtn.textContent = '🔒 Hide';
+        } else {
+          apiKeyInput.type = 'password';
+          toggleApiKeyBtn.textContent = '👁️ Show';
+        }
       });
     }
 
@@ -2313,17 +2342,20 @@ const App = (() => {
           try {
             const res = await TelemetryAPI.testProxyRoute(query);
             testResultEl.style.display = 'flex';
+            const authDesc = res.has_api_key
+              ? '<b style="color:var(--green);">Replaced (Stored Upstream Key)</b>'
+              : '<b>Passthrough</b>';
             if (!res.is_default) {
               testResultEl.className = 'route-test-result-banner match-custom';
               testResultEl.innerHTML = `
                 <div><b style="color:var(--green);">✔ Matched Custom Route:</b> "${UI.escapeHtml(res.route_name)}" (Pattern: <code>${UI.escapeHtml(res.pattern_matched)}</code>)</div>
-                <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: <b>Passthrough</b> &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
+                <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: ${authDesc} &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
               `;
             } else {
               testResultEl.className = 'route-test-result-banner match-default';
               testResultEl.innerHTML = `
                 <div><b style="color:var(--purple);">⚡ Fallback to Default Router:</b> "${UI.escapeHtml(res.route_name)}"</div>
-                <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: <b>Passthrough</b> &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
+                <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: ${authDesc} &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
               `;
             }
           } catch (err) {

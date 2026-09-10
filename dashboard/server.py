@@ -1179,6 +1179,7 @@ async def handle_proxy_routes_test(request: web.Request) -> web.Response:
             "max_rpm": res.max_rpm,
             "timeout": res.timeout,
             "fallback_upstream_url": res.fallback_upstream_url,
+            "has_api_key": bool(res.api_key),
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)

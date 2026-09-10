@@ -112,6 +112,67 @@ class TestModelRouterUnit(unittest.TestCase):
         self.assertEqual(new_router.rules[0].upstream_url, "https://target.com/v1")
         self.assertEqual(new_router.rules[0].max_concurrent, 8)
 
+    def test_route_with_api_key_persistence_and_resolution(self):
+        """Verify API key storage, serialization, masking, and resolution."""
+        self.router.update_from_dict({
+            "default_route": {
+                "name": "Default Test",
+                "upstream_url": "https://llm.ai.e-infra.cz/v1",
+                "api_key": "default-secret-key-12345"
+            },
+            "routes": [
+                {
+                    "id": "keyed_route",
+                    "name": "Keyed Route",
+                    "pattern": "secret-provider/.*",
+                    "upstream_url": "https://api.secretprovider.com/v1",
+                    "api_key": "sk-secret-provider-key-99999",
+                    "priority": 50,
+                },
+                {
+                    "id": "unkeyed_route",
+                    "name": "Unkeyed Route",
+                    "pattern": "open-provider/.*",
+                    "upstream_url": "https://api.openprovider.com/v1",
+                    "priority": 40,
+                }
+            ]
+        })
+
+        # Test resolution
+        res1 = self.router.resolve("secret-provider/v1")
+        self.assertEqual(res1.api_key, "sk-secret-provider-key-99999")
+
+        res2 = self.router.resolve("open-provider/free")
+        self.assertIsNone(res2.api_key)
+
+        res_def = self.router.resolve("unmatched-model")
+        self.assertEqual(res_def.api_key, "default-secret-key-12345")
+
+        # Test masking in to_dict
+        d_masked = self.router.to_dict(mask_keys=True)
+        self.assertTrue(d_masked["routes"][0]["has_api_key"])
+        self.assertEqual(d_masked["routes"][0]["api_key"], "sk-s...9999")
+        self.assertFalse(d_masked["routes"][1]["has_api_key"])
+        self.assertIsNone(d_masked["routes"][1]["api_key"])
+
+        # Test persistence
+        self.assertTrue(self.router.save())
+        reloaded = ModelRouter(config_path=self.config_path)
+        self.assertEqual(reloaded.rules[0].api_key, "sk-secret-provider-key-99999")
+        self.assertIsNone(reloaded.rules[1].api_key)
+        self.assertEqual(reloaded.default_api_key, "default-secret-key-12345")
+
+        # Test update_from_dict with masked key does not overwrite actual key
+        reloaded.update_from_dict(d_masked)
+        self.assertEqual(reloaded.rules[0].api_key, "sk-secret-provider-key-99999")
+
+        # Test clearing api_key with empty string
+        d_clear = reloaded.to_dict(mask_keys=False)
+        d_clear["routes"][0]["api_key"] = ""
+        reloaded.update_from_dict(d_clear)
+        self.assertIsNone(reloaded.rules[0].api_key)
+
     def test_build_upstream_url(self):
         """Validate URL construction avoids duplicate /v1 paths."""
         self.assertEqual(
@@ -307,6 +368,76 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
         self.assertEqual(len(self.openrouter_requests), 1)
         self.assertEqual(self.openrouter_requests[0]["auth"], "Bearer client-supplied-openrouter-key")
         self.assertEqual(len(self.default_requests), 0)
+
+    async def test_dynamic_dispatch_replaces_api_key_when_configured(self):
+        """When route has an api_key saved, upstream Authorization header is replaced by the saved key."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "openrouter_route",
+                    "name": "OpenRouter Stealth",
+                    "pattern": r"stealth/ox-alpha.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/api/v1")),
+                    "api_key": "sk-proxy-saved-upstream-secret-key",
+                    "priority": 10,
+                    "max_concurrent": 10
+                }
+            ]
+        })
+        self.openrouter_requests.clear()
+
+        payload = {
+            "model": "stealth/ox-alpha:free",
+            "messages": [{"role": "user", "content": "Hi OpenRouter"}]
+        }
+        resp = await self.client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": "Bearer client-supplied-original-key"}
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(len(self.openrouter_requests), 1)
+        # Upstream must receive the proxy's saved key, NOT the client's key!
+        self.assertEqual(self.openrouter_requests[0]["auth"], "Bearer sk-proxy-saved-upstream-secret-key")
+
+    async def test_dynamic_dispatch_injects_api_key_when_client_omits_auth(self):
+        """When client sends NO Authorization header, the route's saved api_key is injected upstream."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "openrouter_route",
+                    "name": "OpenRouter Stealth",
+                    "pattern": r"stealth/ox-alpha.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/api/v1")),
+                    "api_key": "sk-injected-upstream-key",
+                    "priority": 10,
+                    "max_concurrent": 10
+                }
+            ]
+        })
+        self.openrouter_requests.clear()
+
+        payload = {
+            "model": "stealth/ox-alpha:free",
+            "messages": [{"role": "user", "content": "Hi without auth"}]
+        }
+        resp = await self.client.post(
+            "/v1/chat/completions",
+            json=payload,
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(len(self.openrouter_requests), 1)
+        self.assertEqual(self.openrouter_requests[0]["auth"], "Bearer sk-injected-upstream-key")
 
     async def test_fallback_dispatch_to_default(self):
         """Unmatched request for DeepSeek-V3 must route to Default upstream with client's incoming Bearer key untouched."""

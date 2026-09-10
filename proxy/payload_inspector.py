@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Raw payload inspector, JSONL logging, SSE broadcasting, and proxy admin endpoints.
 Part of the LLM Telemetry Proxy.
@@ -395,6 +395,7 @@ async def handle_routes_test(request: web.Request) -> web.Response:
             "max_rpm": res.max_rpm,
             "timeout": res.timeout,
             "fallback_upstream_url": res.fallback_upstream_url,
+            "has_api_key": bool(res.api_key),
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)

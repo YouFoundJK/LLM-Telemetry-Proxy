@@ -903,6 +903,17 @@
               <input type="text" id="modalRouteUpstream" class="proxy-input monospace-input" placeholder="e.g. https://openrouter.ai/api/v1" required>
             </div>
 
+            <div class="proxy-form-group">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <label for="modalRouteApiKey">Upstream API Key <span style="font-size: 11px; color: var(--text-muted); font-weight: normal;">(Optional)</span></label>
+                <button type="button" id="toggleApiKeyVisibilityBtn" class="btn-icon-action" style="font-size: 11px; height: 22px; line-height: 20px; padding: 1px 6px;" title="Toggle API key visibility">👁️ Show</button>
+              </div>
+              <input type="password" id="modalRouteApiKey" class="proxy-input monospace-input" placeholder="e.g. sk-or-v1-... (leave blank to pass through client's key)" autocomplete="off">
+              <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">
+                If saved, requests matching this pattern will replace the client's API key with this upstream key.
+              </div>
+            </div>
+
             <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
               <div class="proxy-form-group">
                 <label for="modalRoutePriority">Priority</label>

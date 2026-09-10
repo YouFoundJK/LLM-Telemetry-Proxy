@@ -117,6 +117,43 @@ def build_upstream_url(upstream_base: str, path: str) -> str:
     return f"{base}{req_path}"
 
 
+def mask_api_key(key: Optional[str]) -> Optional[str]:
+    """Return a masked representation of an API key for safe display and logging."""
+    if not key:
+        return None
+    key_str = str(key).strip()
+    if not key_str:
+        return None
+    if len(key_str) > 10:
+        return f"{key_str[:4]}...{key_str[-4:]}"
+    return "***"
+
+
+def apply_upstream_api_key(headers: Dict[str, Any], api_key: Optional[str]) -> Dict[str, Any]:
+    """
+    If an upstream api_key is configured, replace incoming client Authorization/API-Key headers.
+    Returns the modified headers dictionary.
+    """
+    if not api_key:
+        return headers
+    key_str = str(api_key).strip()
+    if not key_str:
+        return headers
+
+    bearer_val = key_str if key_str.lower().startswith("bearer ") else f"Bearer {key_str}"
+    for k in list(headers.keys()):
+        if str(k).lower() == "authorization":
+            del headers[k]
+    headers["Authorization"] = bearer_val
+
+    raw_key = key_str[7:].strip() if key_str.lower().startswith("bearer ") else key_str
+    for k in list(headers.keys()):
+        if str(k).lower() in ("api-key", "x-api-key"):
+            headers[k] = raw_key
+
+    return headers
+
+
 # ── Concurrency & RPM Limiter ────────────────────────────────────────────────
 class _SlotContextManager:
     """Async context manager helper for limiter.slot()."""
@@ -327,6 +364,7 @@ class RouteResolutionResult:
     timeout: Optional[Dict[str, float]] = None
     fallback_upstream_url: Optional[str] = None
     retry_policy: Optional[Dict[str, Any]] = None
+    api_key: Optional[str] = None
 
 
 class ModelRouteRule:
@@ -336,6 +374,7 @@ class ModelRouteRule:
         name: str,
         pattern: str,
         upstream_url: str,
+        api_key: Optional[str] = None,
         enabled: bool = True,
         priority: int = 10,
         max_concurrent: int = 4,
@@ -350,6 +389,7 @@ class ModelRouteRule:
         self.name = str(name).strip() if name else "Custom Route"
         self.pattern = str(pattern).strip()
         self.upstream_url = str(upstream_url).strip().rstrip("/")
+        self.api_key = str(api_key).strip() if api_key and str(api_key).strip() else None
         self.enabled = bool(enabled)
         self.priority = int(priority)
         self.max_concurrent = max(1, int(max_concurrent))
@@ -393,6 +433,7 @@ class ModelRouteRule:
             "name": self.name,
             "pattern": self.pattern,
             "upstream_url": self.upstream_url,
+            "api_key": self.api_key,
             "enabled": self.enabled,
             "priority": self.priority,
             "max_concurrent": self.max_concurrent,
@@ -410,6 +451,8 @@ class ModelRouteRule:
             "name": self.name,
             "pattern": self.pattern,
             "upstream_url": self.upstream_url,
+            "api_key": mask_api_key(self.api_key) if mask_keys else self.api_key,
+            "has_api_key": bool(self.api_key),
             "enabled": self.enabled,
             "priority": self.priority,
             "max_concurrent": self.max_concurrent,
@@ -431,6 +474,7 @@ class ModelRouter:
         self.config_path = config_path
         self.default_upstream_url = DEFAULT_UPSTREAM_URL
         self.default_name = "Default Upstream (e-INFRA)"
+        self.default_api_key: Optional[str] = None
         self.default_max_concurrent = 4
         self.default_slot_cooldown_ms = 50
         self.default_max_rpm = -1
@@ -459,6 +503,7 @@ class ModelRouter:
             def_route = data.get("default_route", {})
             self.default_upstream_url = def_route.get("upstream_url", DEFAULT_UPSTREAM_URL).rstrip("/")
             self.default_name = def_route.get("name", "Default Upstream")
+            self.default_api_key = str(def_route["api_key"]).strip() if def_route.get("api_key") else None
             self.default_max_concurrent = max(1, int(def_route.get("max_concurrent", 4)))
             self.default_slot_cooldown_ms = max(0, int(def_route.get("slot_cooldown_ms", 50)))
             self.default_max_rpm = int(def_route.get("max_rpm", -1)) if def_route.get("max_rpm") is not None else -1
@@ -479,6 +524,7 @@ class ModelRouter:
                     name=r.get("name", ""),
                     pattern=r.get("pattern", ""),
                     upstream_url=r.get("upstream_url", DEFAULT_UPSTREAM_URL),
+                    api_key=r.get("api_key"),
                     enabled=r.get("enabled", True),
                     priority=r.get("priority", 10),
                     max_concurrent=r.get("max_concurrent", 4),
@@ -507,6 +553,7 @@ class ModelRouter:
             "default_route": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
+                "api_key": self.default_api_key,
                 "max_concurrent": self.default_max_concurrent,
                 "slot_cooldown_ms": self.default_slot_cooldown_ms,
                 "max_rpm": self.default_max_rpm,
@@ -572,6 +619,7 @@ class ModelRouter:
                         timeout=rule.timeout,
                         fallback_upstream_url=rule.fallback_upstream_url,
                         retry_policy=rule.retry_policy,
+                        api_key=rule.api_key,
                     )
 
         # Fallback to default route
@@ -587,6 +635,7 @@ class ModelRouter:
             timeout=self.default_timeout,
             fallback_upstream_url=self.default_fallback_upstream_url,
             retry_policy=self.default_retry_policy,
+            api_key=self.default_api_key,
         )
 
     def get_limiter(self, route_id: Optional[str] = None) -> UpstreamConcurrencyLimiter:
@@ -610,6 +659,7 @@ class ModelRouter:
                 "name": r.name,
                 "pattern": r.pattern,
                 "upstream_url": r.upstream_url,
+                "has_api_key": bool(r.api_key),
                 "enabled": r.enabled,
                 "max_rpm": r.max_rpm,
                 "timeout": r.timeout,
@@ -622,6 +672,7 @@ class ModelRouter:
             "default": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
+                "has_api_key": bool(self.default_api_key),
                 "max_rpm": self.default_max_rpm,
                 "timeout": self.default_timeout,
                 "fallback_upstream_url": self.default_fallback_upstream_url,
@@ -631,11 +682,13 @@ class ModelRouter:
             "routes": routes_stats,
         }
 
-    def to_dict(self, mask_keys: bool = True) -> Dict[str, Any]:
+    def to_dict(self, mask_keys: bool = False) -> Dict[str, Any]:
         return {
             "default_route": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
+                "api_key": mask_api_key(self.default_api_key) if mask_keys else self.default_api_key,
+                "has_api_key": bool(self.default_api_key),
                 "max_concurrent": self.default_max_concurrent,
                 "slot_cooldown_ms": self.default_slot_cooldown_ms,
                 "max_rpm": self.default_max_rpm,
@@ -644,7 +697,7 @@ class ModelRouter:
                 "retry_policy": self.default_retry_policy,
                 "limiter_stats": self.default_limiter.get_stats(),
             },
-            "routes": [r.to_dict() for r in self.rules],
+            "routes": [r.to_dict(mask_keys=mask_keys) for r in self.rules],
             "limiters_summary": self.get_all_limiters_stats(),
         }
 
@@ -657,6 +710,18 @@ class ModelRouter:
             self.default_upstream_url = def_route["upstream_url"].rstrip("/")
         if "name" in def_route:
             self.default_name = def_route["name"]
+        if "api_key" in def_route:
+            incoming_def_key = def_route["api_key"]
+            if incoming_def_key is not None:
+                incoming_def_str = str(incoming_def_key).strip()
+                if not incoming_def_str:
+                    self.default_api_key = None
+                elif self.default_api_key and incoming_def_str == mask_api_key(self.default_api_key):
+                    pass
+                else:
+                    self.default_api_key = incoming_def_str
+            else:
+                self.default_api_key = None
         if "max_concurrent" in def_route:
             self.default_max_concurrent = max(1, int(def_route["max_concurrent"]))
             self.default_limiter.max_concurrent = self.default_max_concurrent
@@ -688,11 +753,24 @@ class ModelRouter:
             fb_val = r.get("fallback_upstream_url")
             r_policy = r.get("retry_policy")
 
+            incoming_key = r.get("api_key")
+            if incoming_key is not None:
+                incoming_key_str = str(incoming_key).strip()
+                if not incoming_key_str:
+                    api_key_val = None
+                elif existing and existing.api_key and incoming_key_str == mask_api_key(existing.api_key):
+                    api_key_val = existing.api_key
+                else:
+                    api_key_val = incoming_key_str
+            else:
+                api_key_val = existing.api_key if existing else None
+
             rule = ModelRouteRule(
                 id=r_id,
                 name=r.get("name", ""),
                 pattern=r.get("pattern", ""),
                 upstream_url=r.get("upstream_url", self.default_upstream_url),
+                api_key=api_key_val,
                 enabled=r.get("enabled", True),
                 priority=priority_val,
                 max_concurrent=max_c,
