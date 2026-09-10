@@ -35,7 +35,11 @@ except ImportError:
 import aiohttp
 from aiohttp import web
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from proxy.repo_paths import resolve_repo_root, REPO_ROOT
+except ImportError:
+    from repo_paths import resolve_repo_root, REPO_ROOT
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -154,9 +158,22 @@ async def cors_middleware(request, handler):
             "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
             "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
         })
-    response = await handler(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    return response
+    try:
+        response = await handler(request)
+        if response is None:
+            response = web.json_response(
+                {"error": {"message": "Internal handler error: no response generated", "type": "proxy_internal_error"}},
+                status=500,
+            )
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
+    except web.HTTPException as ex:
+        ex.headers["Access-Control-Allow-Origin"] = "*"
+        raise ex
+    except Exception as ex:
+        err_response = web.json_response({"error": {"message": str(ex), "type": "proxy_internal_error"}}, status=500)
+        err_response.headers["Access-Control-Allow-Origin"] = "*"
+        return err_response
 
 
 def create_app():

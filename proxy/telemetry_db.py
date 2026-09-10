@@ -18,39 +18,11 @@ from typing import Optional, Dict, Any, Tuple, List, Union
 
 import aiohttp
 
-def resolve_repo_root(start_file: Optional[Path] = None) -> Path:
-    """Accurately locate the repository root under Python and Nuitka standalone binary execution."""
-    for env_key in ("LLM_PROXY_REPO_ROOT", "REPO_ROOT"):
-        val = os.environ.get(env_key)
-        if val and Path(val).is_dir():
-            return Path(val).resolve()
+try:
+    from proxy.repo_paths import resolve_repo_root, REPO_ROOT
+except ImportError:
+    from repo_paths import resolve_repo_root, REPO_ROOT
 
-    start = (start_file or Path(__file__)).resolve()
-    for p in [start.parent] + list(start.parents):
-        if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
-            return p
-        if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
-            return p
-
-    try:
-        cwd = Path.cwd().resolve()
-        for p in [cwd] + list(cwd.parents):
-            if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
-                return p
-            if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
-                return p
-    except Exception:
-        pass
-
-    p = start.parent
-    if p.name.endswith(".dist"):
-        return p.parent.parent
-    if p.name == "dist":
-        return p.parent
-    return p.parent
-
-
-REPO_ROOT = resolve_repo_root(Path(__file__))
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 

@@ -80,6 +80,42 @@ class TestBulkRetrievalAndIndexes(unittest.TestCase):
         print(f"\n[BENCHMARK] SQLite fetched {len(rows)} rows in {duration:.3f}s")
         self.assertLess(duration, 1.5, "Database read exceeded performance threshold")
 
+    def test_get_db_wal_read_success(self):
+        """Verify that get_db() opens and executes queries on a WAL-mode SQLite database without error."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+            temp_db = tf.name
+
+        try:
+            conn_init = sqlite3.connect(temp_db)
+            conn_init.execute("PRAGMA journal_mode = WAL;")
+            conn_init.execute("CREATE TABLE test (id INT);")
+            conn_init.commit()
+            conn_init.close()
+
+            orig_env = os.environ.get("TELEMETRY_DB_PATH")
+            os.environ["TELEMETRY_DB_PATH"] = temp_db
+            try:
+                wal_conn = get_db()
+                try:
+                    res = wal_conn.execute("SELECT 1").fetchone()
+                    self.assertEqual(res[0], 1)
+                finally:
+                    wal_conn.close()
+            finally:
+                if orig_env is not None:
+                    os.environ["TELEMETRY_DB_PATH"] = orig_env
+                else:
+                    os.environ.pop("TELEMETRY_DB_PATH", None)
+        finally:
+            try:
+                os.remove(temp_db)
+                for shm_wal in (temp_db + "-shm", temp_db + "-wal"):
+                    if os.path.exists(shm_wal):
+                        os.remove(shm_wal)
+            except Exception:
+                pass
+
 
 class TestBulkApiEndpoint(AioHTTPTestCase):
     async def get_application(self):

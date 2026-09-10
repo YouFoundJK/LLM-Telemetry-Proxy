@@ -17,7 +17,11 @@ from typing import Optional, Dict, Any, Tuple, List, Union
 import aiohttp
 from aiohttp import web
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from proxy.repo_paths import resolve_repo_root, REPO_ROOT
+except ImportError:
+    from repo_paths import resolve_repo_root, REPO_ROOT
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -89,13 +93,14 @@ def evaluate_retry_condition(
 
     # Check for empty response body (0 bytes / whitespace)
     if not is_retryable and retry_on_empty:
-        if body_text_or_json is None:
-            if status_code and status_code >= 400:
-                is_retryable = True
-                reason = f"HTTP {status_code} with no body"
-        elif isinstance(body_text_or_json, (bytes, str)) and not body_text_or_json.strip():
+        if body_text_or_json is not None and isinstance(body_text_or_json, (bytes, str)) and not body_text_or_json.strip():
             is_retryable = True
             reason = "Empty response returned from upstream (0 bytes)"
+        elif body_text_or_json is None and headers:
+            cl = headers.get("Content-Length", "") if hasattr(headers, "get") else ""
+            if cl == "0" and (status_code in retry_on_status or status_code == 200):
+                is_retryable = True
+                reason = f"HTTP {status_code} with empty body (Content-Length: 0)"
 
     # Check body content, error objects, and choices
     if not is_retryable and body_text_or_json:

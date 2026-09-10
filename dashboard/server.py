@@ -93,6 +93,14 @@ try:
 except ImportError:
     from dashboard.proxy_manager import ProxyManager
 
+try:
+    from proxy.telemetry_db import init_db
+except ImportError:
+    try:
+        from telemetry_db import init_db
+    except ImportError:
+        init_db = None
+
 # ── Config & Path Resolvers ──────────────────────────────────────────────────
 STATUS_API = "https://llm.ai.e-infra.cz/status/api/v1/models"
 DEFAULT_PORT = 9118
@@ -317,22 +325,41 @@ def get_db_fingerprint() -> str:
 
 def get_db():
     db_path = get_db_path()
+    if not db_path.exists():
+        if init_db:
+            try:
+                init_db()
+            except Exception as e:
+                print(f"[dashboard] Warning initializing DB: {e}", file=sys.stderr)
+        else:
+            try:
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn_init = sqlite3.connect(str(db_path), timeout=10.0)
+                conn_init.close()
+            except Exception:
+                pass
+
     path_str = str(db_path)
     clean_path = path_str.replace("\\", "/")
 
     if path_str.startswith("\\\\") or path_str.startswith("//"):
         # It's a Windows UNC path (e.g., \\wsl.localhost\Ubuntu\...)
         stripped = clean_path.lstrip("/")
-        uri = f"file:////{stripped}?mode=ro&nolock=1"
+        uri = f"file:////{stripped}?mode=ro"
     else:
         # Standard local path
         abs_path = db_path.absolute().as_posix()
         if not abs_path.startswith("/"):
             abs_path = "/" + abs_path
         encoded_path = urllib.parse.quote(abs_path)
-        uri = f"file:{encoded_path}?mode=ro&nolock=1"
+        uri = f"file:{encoded_path}?mode=ro"
 
-    conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    except Exception:
+        # Fallback to direct path connection with query_only pragma
+        conn = sqlite3.connect(str(db_path), timeout=30.0)
+
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA cache_size = -128000")  # 128MB memory cache
@@ -683,6 +710,8 @@ async def handle_query(request: web.Request) -> web.Response:
 
         return web.json_response(result)
     except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return web.json_response({
             "error": "Query execution failed",
             "details": str(e)
@@ -892,6 +921,8 @@ async def handle_query_bulk(request: web.Request) -> web.Response:
             headers={"Cache-Control": "no-cache"}
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return web.json_response({
             "error": "Query bulk execution failed",
             "details": str(e)
@@ -1669,6 +1700,12 @@ def main():
             pass
 
     db_path = get_db_path()
+    if init_db and not db_path.exists():
+        try:
+            init_db()
+        except Exception as e:
+            print(f"[dashboard] Warning initializing DB: {e}", file=sys.stderr)
+
     dashboard_html = get_dashboard_html_path()
 
     print(f"[dashboard] Server starting on http://localhost:{port}", file=sys.stderr)

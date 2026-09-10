@@ -133,6 +133,16 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
 
         # 1. Open Free Provider (Non-streaming 429 then 200)
         if model.startswith("open-free/") and not stream:
+            if model == "open-free/bad-request-test":
+                return web.json_response(
+                    {"error": {"message": "Invalid model parameter", "type": "invalid_request_error"}},
+                    status=400
+                )
+            if model == "open-free/exhaust-503":
+                return web.json_response(
+                    {"error": {"message": "Persistent 503 error", "type": "server_error"}},
+                    status=503
+                )
             self.open_provider_calls += 1
             if self.open_provider_calls <= 2:
                 # Return 429 on first 2 calls
@@ -226,6 +236,18 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
             return web.json_response({
                 "error": {"message": "429 Too Many Requests - Institutional quota"}
             }, status=429)
+
+        # 5. Bad Request (HTTP 400 - client error)
+        if model.startswith("bad-request/"):
+            return web.json_response({
+                "error": {"message": "Invalid model parameter", "type": "invalid_request_error"}
+            }, status=400)
+
+        # 6. Persistent Upstream Failure (HTTP 503)
+        if model.startswith("exhaust-fail/"):
+            return web.json_response({
+                "error": {"message": "Service unavailable", "type": "server_error"}
+            }, status=503)
 
         return web.json_response({"choices": [{"message": {"content": "Default ok"}}]})
 
@@ -359,6 +381,64 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
             self.assertEqual(row[0], 0)
             self.assertEqual(row[1], 0)
             self.assertEqual(row[2], 429)
+
+    async def test_upstream_400_bad_request_not_retried_and_returns_cleanly(self):
+        """HTTP 400 must NOT trigger rate-limit retry even when empty-body retry is enabled."""
+        payload = {
+            "model": "open-free/bad-request-test",
+            "messages": [{"role": "user", "content": "Invalid payload test"}]
+        }
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(resp.headers.get("X-Proxy-Retries-Attempted"), "0")
+        self.assertEqual(resp.headers.get("X-Proxy-Rate-Limit-Absorbed"), "0")
+        body = await resp.json()
+        self.assertIn("Invalid model parameter", body["error"]["message"])
+
+    async def test_upstream_exhausted_retries_returns_upstream_response_without_crash(self):
+        """When retries are exhausted (max_retries reached), proxy returns upstream 503 rather than None/AttributeError."""
+        payload = {
+            "model": "open-free/exhaust-503",
+            "messages": [{"role": "user", "content": "Persistent 503 test"}]
+        }
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 503)
+        self.assertEqual(resp.headers.get("X-Proxy-Retries-Attempted"), "3")
+        self.assertEqual(resp.headers.get("X-Proxy-Rate-Limit-Absorbed"), "0")
+        body = await resp.json()
+        self.assertIn("Persistent 503 error", body["error"]["message"])
+
+    def test_evaluate_retry_condition_does_not_flag_400_with_unread_body(self):
+        """evaluate_retry_condition must return False for HTTP 400 when body_text_or_json is None."""
+        from proxy.proxy_stream import evaluate_retry_condition
+        retry_policy = {
+            "enabled": True,
+            "max_retries": 3,
+            "mode": "immediate",
+            "retry_on_status": [429, 502, 503, 504, 529],
+            "retry_on_empty": True,
+        }
+        should_retry, delay, reason = evaluate_retry_condition(
+            status_code=400,
+            headers={},
+            body_text_or_json=None,
+            attempt=0,
+            retry_policy=retry_policy,
+        )
+        self.assertFalse(should_retry)
+        self.assertIsNone(reason)
+
+    async def test_cors_middleware_none_handler_safety(self):
+        """cors_middleware must safely handle a downstream handler returning None."""
+        async def dummy_none_handler(req):
+            return None
+
+        from aiohttp.test_utils import make_mocked_request
+        req = make_mocked_request("GET", "/test-none")
+        resp = await proxy_mod.cors_middleware(req, dummy_none_handler)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.status, 500)
+        self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "*")
 
 
 if __name__ == "__main__":

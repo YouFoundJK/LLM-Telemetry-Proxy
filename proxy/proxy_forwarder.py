@@ -17,7 +17,11 @@ from typing import Optional, Dict, Any, Tuple, List, Union
 import aiohttp
 from aiohttp import web
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from proxy.repo_paths import resolve_repo_root, REPO_ROOT
+except ImportError:
+    from repo_paths import resolve_repo_root, REPO_ROOT
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -231,12 +235,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{sniff_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={sniff_delay:.2f}s...")
                                 retry_needed, retry_delay, retry_reason = True, sniff_delay, sniff_reason
 
-                            elif sniff_reason and attempt >= max_retries:
+                            elif sniff_reason and attempt >= max_retries and route_idx < len(route_sequence) - 1:
                                 target_limiter.record_retry_failed()
-                                if route_idx < len(route_sequence) - 1:
-                                    cascade_to_next = True
-                                    cascade_reason = sniff_reason
-                                    break
+                                cascade_to_next = True
+                                cascade_reason = sniff_reason
+                                break
 
                             elif is_stream_candidate:
                                 s_resp, s_retry, s_delay, s_reason = await handle_streaming_upstream(
@@ -423,6 +426,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             else:
                 break
 
+        return web.json_response(
+            {"error": {"message": "Upstream route exhausted with no response", "type": "proxy_error"}},
+            status=status_code or 502,
+        )
+
     except asyncio.TimeoutError as to_err:
         to_msg = str(to_err).strip()
         error = f"upstream_first_byte_timeout: {to_msg}" if "first-byte" in to_msg.lower() else (f"upstream_timeout: {to_msg}" if to_msg else f"upstream_timeout: limit {total_timeout}s exceeded")
@@ -537,12 +545,11 @@ async def _simple_forward(request, path, method):
                                 target_limiter.record_retry_attempt()
                                 print(f"[telemetry] Upstream rate limit in _simple_forward on {path} ({sniff_reason}, attempt {attempt+1}/{max_retries+1}). Re-dispatching with delay={sniff_delay:.2f}s...", file=sys.stderr)
                                 retry_needed, retry_delay, retry_reason = True, sniff_delay, sniff_reason
-                            elif sniff_reason and attempt >= max_retries:
+                            elif sniff_reason and attempt >= max_retries and route_idx < len(route_sequence) - 1:
                                 target_limiter.record_retry_failed()
-                                if route_idx < len(route_sequence) - 1:
-                                    cascade_to_next = True
-                                    cascade_reason = sniff_reason
-                                    break
+                                cascade_to_next = True
+                                cascade_reason = sniff_reason
+                                break
                             else:
                                 if attempt > 0:
                                     if status_code and 200 <= status_code < 300:
@@ -602,6 +609,11 @@ async def _simple_forward(request, path, method):
                 continue
             else:
                 break
+
+        return web.json_response(
+            {"error": {"message": "Upstream route exhausted with no response", "type": "proxy_error"}},
+            status=status_code or 502,
+        )
 
     except asyncio.TimeoutError as to_err:
         to_msg = str(to_err).strip()

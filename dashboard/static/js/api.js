@@ -60,7 +60,13 @@ const TelemetryAPI = (() => {
       let errDetails = '';
       try {
         const errJson = await response.json();
-        errDetails = errJson.error?.message || errJson.error || errJson.details || '';
+        const baseErr = errJson.error?.message || errJson.error || '';
+        const extraDetails = errJson.details || '';
+        if (baseErr && extraDetails && baseErr !== extraDetails) {
+          errDetails = `${baseErr} (${extraDetails})`;
+        } else {
+          errDetails = baseErr || extraDetails || '';
+        }
       } catch (e) {
         errDetails = response.statusText;
       }

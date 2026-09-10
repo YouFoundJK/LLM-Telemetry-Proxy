@@ -14,7 +14,11 @@ from typing import Optional, Dict, Any, Tuple, List, Set
 
 from aiohttp import web
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from proxy.repo_paths import resolve_repo_root, REPO_ROOT
+except ImportError:
+    from repo_paths import resolve_repo_root, REPO_ROOT
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 

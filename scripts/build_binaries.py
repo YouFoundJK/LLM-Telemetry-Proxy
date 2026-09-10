@@ -172,12 +172,15 @@ def compile_target(
         "--include-module=_json",
         "--assume-yes-for-downloads",
         "--remove-output",
+        "--no-prefer-source-code",
         f"--output-filename={output_bin_name}",
     ]
 
-    # Enable ccache for fast incremental builds if installed
-    if shutil.which("ccache"):
-        cmd.append("--enable-ccache")
+    # Configure ccache for fast incremental builds if installed
+    env = dict(os.environ)
+    ccache_path = shutil.which("ccache")
+    if ccache_path:
+        env["NUITKA_CCACHE_BINARY"] = ccache_path
 
     # Include high-performance packages in binary if present
     for pkg in ("orjson", "uvloop"):
@@ -215,6 +218,7 @@ def compile_target(
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
             for line in iter(proc.stdout.readline, ""):
                 log_file.write(line)
