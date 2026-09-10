@@ -18,7 +18,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_UPSTREAM_URL = "https://llm.ai.e-infra.cz/v1"
 
@@ -168,13 +168,42 @@ class _SlotContextManager:
         await self.limiter.release()
 
 
+class AcquiredSlot:
+    """
+    Async context manager wrapper for a slot that was either try_acquired or needs normal acquire.
+    If already_acquired=True, __aenter__ is a no-op and __aexit__ safely releases the slot.
+    """
+    def __init__(self, limiter: 'UpstreamConcurrencyLimiter', already_acquired: bool = False):
+        self.limiter = limiter
+        self.already_acquired = already_acquired
+
+    async def __aenter__(self):
+        if not self.already_acquired:
+            await self.limiter.acquire()
+            self.already_acquired = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.already_acquired:
+            await self.limiter.release()
+            self.already_acquired = False
+
+
 class UpstreamConcurrencyLimiter:
     """
     Asynchronous concurrency and RPM limiter with strict FIFO queuing, slot cooldown gaps,
     rolling 60-second RPM pacing, and cancellation safety.
     """
 
-    def __init__(self, max_concurrent: int = 4, slot_cooldown_seconds: float = 0.05, max_rpm: int = -1):
+    def __init__(
+        self,
+        max_concurrent: int = 4,
+        slot_cooldown_seconds: float = 0.05,
+        max_rpm: int = -1,
+        slot_cooldown_ms: Optional[int] = None,
+    ):
+        if slot_cooldown_ms is not None:
+            slot_cooldown_seconds = slot_cooldown_ms / 1000.0
         self.max_concurrent = max(1, int(max_concurrent))
         self.slot_cooldown_seconds = max(0.0, float(slot_cooldown_seconds))
         self.max_rpm = int(max_rpm) if max_rpm is not None else -1
@@ -198,6 +227,42 @@ class UpstreamConcurrencyLimiter:
     @property
     def queued(self) -> int:
         return len(self._waiters)
+
+    @property
+    def queue_depth(self) -> int:
+        return len(self._waiters)
+
+    def has_immediate_capacity(self) -> bool:
+        """Inspect without waiting whether a slot can be admitted immediately."""
+        now = time.monotonic()
+        while self._rpm_history and (now - self._rpm_history[0]) >= 60.0:
+            self._rpm_history.popleft()
+
+        can_admit_conc = (self._active_count < self.max_concurrent)
+        can_admit_rpm = (self.max_rpm <= 0) or (len(self._rpm_history) < self.max_rpm)
+        return bool(not self._waiters and can_admit_conc and can_admit_rpm)
+
+    async def try_acquire(self) -> bool:
+        """
+        Atomically acquire a concurrency slot if immediately available without queuing.
+        Returns True if acquired immediately, False otherwise.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            while self._rpm_history and (now - self._rpm_history[0]) >= 60.0:
+                self._rpm_history.popleft()
+
+            can_admit_conc = (self._active_count < self.max_concurrent)
+            can_admit_rpm = (self.max_rpm <= 0) or (len(self._rpm_history) < self.max_rpm)
+
+            if not self._waiters and can_admit_conc and can_admit_rpm:
+                self._active_count += 1
+                self._total_admitted += 1
+                self._peak_active = max(self._peak_active, self._active_count)
+                if self.max_rpm > 0:
+                    self._rpm_history.append(now)
+                return True
+            return False
 
     def record_429_retry(self):
         self._total_retries_429 += 1
@@ -598,45 +663,102 @@ class ModelRouter:
                 print(f"[ModelRouter] Direct fallback save also failed to {target_path}: {e2}", file=sys.stderr)
                 return False
 
-    def resolve(self, model_name: Optional[str]) -> RouteResolutionResult:
+    def resolve_chain(self, model_name: Optional[str]) -> List[RouteResolutionResult]:
         """
-        Resolve target upstream for the requested model name.
-        Executes in microsecond time.
+        Resolve all matching candidate routes for the requested model name in priority order.
+        If no custom rules match, returns a single-item list containing the default route.
         """
+        matches: List[RouteResolutionResult] = []
         if model_name:
             clean_name = str(model_name).strip()
             for rule in self.rules:
                 if rule.matches(clean_name):
-                    return RouteResolutionResult(
-                        route_id=rule.id,
-                        route_name=rule.name,
-                        upstream_url=rule.upstream_url,
-                        is_default=False,
-                        pattern_matched=rule.pattern,
-                        max_concurrent=rule.max_concurrent,
-                        slot_cooldown_ms=rule.slot_cooldown_ms,
-                        max_rpm=rule.max_rpm,
-                        timeout=rule.timeout,
-                        fallback_upstream_url=rule.fallback_upstream_url,
-                        retry_policy=rule.retry_policy,
-                        api_key=rule.api_key,
+                    matches.append(
+                        RouteResolutionResult(
+                            route_id=rule.id,
+                            route_name=rule.name,
+                            upstream_url=rule.upstream_url,
+                            is_default=False,
+                            pattern_matched=rule.pattern,
+                            max_concurrent=rule.max_concurrent,
+                            slot_cooldown_ms=rule.slot_cooldown_ms,
+                            max_rpm=rule.max_rpm,
+                            timeout=rule.timeout,
+                            fallback_upstream_url=rule.fallback_upstream_url,
+                            retry_policy=rule.retry_policy,
+                            api_key=rule.api_key,
+                        )
                     )
 
-        # Fallback to default route
-        return RouteResolutionResult(
-            route_id=None,
-            route_name=self.default_name,
-            upstream_url=self.default_upstream_url,
-            is_default=True,
-            pattern_matched=None,
-            max_concurrent=self.default_max_concurrent,
-            slot_cooldown_ms=self.default_slot_cooldown_ms,
-            max_rpm=self.default_max_rpm,
-            timeout=self.default_timeout,
-            fallback_upstream_url=self.default_fallback_upstream_url,
-            retry_policy=self.default_retry_policy,
-            api_key=self.default_api_key,
-        )
+        if not matches:
+            matches.append(
+                RouteResolutionResult(
+                    route_id=None,
+                    route_name=self.default_name,
+                    upstream_url=self.default_upstream_url,
+                    is_default=True,
+                    pattern_matched=None,
+                    max_concurrent=self.default_max_concurrent,
+                    slot_cooldown_ms=self.default_slot_cooldown_ms,
+                    max_rpm=self.default_max_rpm,
+                    timeout=self.default_timeout,
+                    fallback_upstream_url=self.default_fallback_upstream_url,
+                    retry_policy=self.default_retry_policy,
+                    api_key=self.default_api_key,
+                )
+            )
+
+        return matches
+
+    def resolve(self, model_name: Optional[str]) -> RouteResolutionResult:
+        """
+        Resolve highest-priority target upstream for the requested model name.
+        Executes in microsecond time.
+        """
+        return self.resolve_chain(model_name)[0]
+
+    async def select_admission_route(
+        self, candidates: List[RouteResolutionResult]
+    ) -> Tuple[RouteResolutionResult, UpstreamConcurrencyLimiter, bool]:
+        """
+        Select an admission route following priority precedence:
+        1. Checks candidates in priority order; if a route has immediate capacity (no queue,
+           active < max_concurrent, and within max_rpm), atomically acquires it (already_acquired=True).
+        2. If all candidate routes are currently saturated / queued, selects the candidate
+           with the shortest wait queue (minimum limiter.queued, breaking ties by priority).
+           Returns (route, limiter, already_acquired=False).
+        """
+        if not candidates:
+            def_route = self.resolve(None)
+            limiter = self.get_limiter(def_route.route_id)
+            acquired = await limiter.try_acquire()
+            return def_route, limiter, acquired
+
+        if len(candidates) == 1:
+            limiter = self.get_limiter(candidates[0].route_id)
+            acquired = await limiter.try_acquire()
+            return candidates[0], limiter, acquired
+
+        # 1. Zero-wait overspill down the priority chain
+        for cand in candidates:
+            limiter = self.get_limiter(cand.route_id)
+            if await limiter.try_acquire():
+                return cand, limiter, True
+
+        # 2. All routes are saturated: pick shortest queue (break ties by priority, which is original list order)
+        best_candidate = candidates[0]
+        best_limiter = self.get_limiter(best_candidate.route_id)
+        min_queued = best_limiter.queued
+
+        for cand in candidates[1:]:
+            lim = self.get_limiter(cand.route_id)
+            q_depth = lim.queued
+            if q_depth < min_queued:
+                min_queued = q_depth
+                best_candidate = cand
+                best_limiter = lim
+
+        return best_candidate, best_limiter, False
 
     def get_limiter(self, route_id: Optional[str] = None) -> UpstreamConcurrencyLimiter:
         """

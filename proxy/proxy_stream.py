@@ -69,10 +69,6 @@ def evaluate_retry_condition(
     if not retry_policy or not retry_policy.get("enabled", True):
         return False, 0.0, None
 
-    max_retries = int(retry_policy.get("max_retries", 0))
-    if attempt >= max_retries or max_retries <= 0:
-        return False, 0.0, None
-
     retry_on_status = set(retry_policy.get("retry_on_status", [429, 502, 503, 504, 529]))
     retry_patterns = [p.lower() for p in retry_policy.get("retry_on_body_patterns", [])]
     retry_on_empty = bool(retry_policy.get("retry_on_empty", True))
@@ -153,6 +149,10 @@ def evaluate_retry_condition(
 
     if not is_retryable:
         return False, 0.0, None
+
+    max_retries = int(retry_policy.get("max_retries", 0))
+    if attempt >= max_retries or max_retries <= 0:
+        return False, 0.0, reason
 
     # Evaluate delay
     delay = 0.0

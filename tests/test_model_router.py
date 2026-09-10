@@ -272,6 +272,151 @@ class TestModelRouterUnit(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_resolve_chain_multi_priority_order(self):
+        """Verify multiple rules with identical regex patterns are sorted by priority descending, with default at end."""
+        self.router.update_from_dict({
+            "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1"},
+            "routes": [
+                {"id": "r_low", "name": "Route Low", "pattern": r"^shared/model.*", "priority": 10, "upstream_url": "https://low.ai/v1"},
+                {"id": "r_high", "name": "Route High", "pattern": r"^shared/model.*", "priority": 100, "upstream_url": "https://high.ai/v1"},
+                {"id": "r_mid", "name": "Route Mid", "pattern": r"^shared/model.*", "priority": 50, "upstream_url": "https://mid.ai/v1"},
+            ]
+        })
+        chain = self.router.resolve_chain("shared/model:v1")
+        self.assertEqual(len(chain), 3)
+        self.assertEqual(chain[0].route_name, "Route High")
+        self.assertEqual(chain[0].upstream_url, "https://high.ai/v1")
+        self.assertEqual(chain[1].route_name, "Route Mid")
+        self.assertEqual(chain[1].upstream_url, "https://mid.ai/v1")
+        self.assertEqual(chain[2].route_name, "Route Low")
+        self.assertEqual(chain[2].upstream_url, "https://low.ai/v1")
+
+        # Fallback to default when no rules match
+        def_chain = self.router.resolve_chain("unmatched-model")
+        self.assertEqual(len(def_chain), 1)
+        self.assertTrue(def_chain[0].is_default)
+
+        # self.router.resolve() returns highest priority (#1)
+        res = self.router.resolve("shared/model:v1")
+        self.assertEqual(res.route_name, "Route High")
+
+    def test_has_immediate_capacity_and_try_acquire(self):
+        """Verify limiter's try_acquire and has_immediate_capacity respect active slots and rolling RPM limits."""
+        async def run_test():
+            from proxy.model_router import UpstreamConcurrencyLimiter
+            limiter = UpstreamConcurrencyLimiter(max_concurrent=1, slot_cooldown_ms=0, max_rpm=2)
+
+            # Initial state: has capacity
+            self.assertTrue(limiter.has_immediate_capacity())
+            acquired = await limiter.try_acquire()
+            self.assertTrue(acquired)
+            self.assertEqual(limiter.active, 1)
+
+            # Saturated active slots: cannot immediately acquire
+            self.assertFalse(limiter.has_immediate_capacity())
+            acquired2 = await limiter.try_acquire()
+            self.assertFalse(acquired2)
+            self.assertEqual(limiter.active, 1)
+
+            # Release slot: active drops to 0, 1 RPM used out of 2
+            await limiter.release()
+            self.assertEqual(limiter.active, 0)
+            self.assertTrue(limiter.has_immediate_capacity())
+
+            # Acquire 2nd request: RPM hits limit (2/2)
+            acquired3 = await limiter.try_acquire()
+            self.assertTrue(acquired3)
+            await limiter.release()
+            self.assertEqual(limiter.active, 0)
+
+            # RPM limit is now exhausted: has_immediate_capacity is False
+            self.assertFalse(limiter.has_immediate_capacity())
+            acquired4 = await limiter.try_acquire()
+            self.assertFalse(acquired4)
+
+        asyncio.run(run_test())
+
+    def test_zero_wait_concurrency_and_rpm_overspill_selection(self):
+        """Verify select_admission_route overspills to next priority candidate when higher route is saturated or RPM-exhausted."""
+        async def run_test():
+            self.router.update_from_dict({
+                "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1", "max_concurrent": 10},
+                "routes": [
+                    {"id": "r1", "name": "Priority 1", "pattern": r"^overspill.*", "priority": 100, "upstream_url": "https://r1.ai/v1", "max_concurrent": 1, "max_rpm": 0},
+                    {"id": "r2", "name": "Priority 2", "pattern": r"^overspill.*", "priority": 50, "upstream_url": "https://r2.ai/v1", "max_concurrent": 2, "max_rpm": 0},
+                ]
+            })
+            candidates = self.router.resolve_chain("overspill-test")
+
+            # 1. Normal state: Priority 1 is free -> admitted immediately to Priority 1
+            admit_route, limiter, already_acquired = await self.router.select_admission_route(candidates)
+            self.assertEqual(admit_route.route_name, "Priority 1")
+            self.assertTrue(already_acquired)
+            self.assertEqual(limiter.active, 1)
+
+            # 2. Concurrency overspill: While Priority 1 has active slot, next request must overspill to Priority 2 immediately!
+            admit_route2, limiter2, already_acquired2 = await self.router.select_admission_route(candidates)
+            self.assertEqual(admit_route2.route_name, "Priority 2")
+            self.assertTrue(already_acquired2)
+            self.assertEqual(limiter2.active, 1)
+
+            # Release Priority 2
+            await limiter2.release()
+            # Release Priority 1
+            await limiter.release()
+
+        asyncio.run(run_test())
+
+    def test_shortest_queue_selection_when_all_saturated(self):
+        """When all routes are saturated, select_admission_route joins the shortest queue, tie-breaking by priority."""
+        async def run_test():
+            self.router.update_from_dict({
+                "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1", "max_concurrent": 1},
+                "routes": [
+                    {"id": "r1", "name": "Route 1 (Prio 100)", "pattern": r"^queue.*", "priority": 100, "upstream_url": "https://r1.ai/v1", "max_concurrent": 1},
+                    {"id": "r2", "name": "Route 2 (Prio 50)", "pattern": r"^queue.*", "priority": 50, "upstream_url": "https://r2.ai/v1", "max_concurrent": 1},
+                ]
+            })
+            candidates = self.router.resolve_chain("queue-test")
+            lim1 = self.router.get_limiter("r1")
+            lim2 = self.router.get_limiter("r2")
+            lim_def = self.router.get_limiter("default")
+
+            # Saturate active slots on all candidates
+            await lim1.try_acquire()
+            await lim2.try_acquire()
+            await lim_def.try_acquire()
+
+            # Simulate queue waiters: Route 1 has 3 waiters, Route 2 has 1 waiter, Default has 5 waiters
+            fut1 = asyncio.Future()
+            fut2 = asyncio.Future()
+            lim1._waiters.append(fut1)
+            lim1._waiters.append(fut1)
+            lim1._waiters.append(fut1)
+            lim2._waiters.append(fut2)
+            lim_def._waiters.append(fut1)
+            lim_def._waiters.append(fut1)
+
+            self.assertEqual(lim1.queue_depth, 3)
+            self.assertEqual(lim2.queue_depth, 1)
+
+            # All saturated -> shortest queue selected (Route 2 with 1 waiter)
+            admit_route, limiter, already_acquired = await self.router.select_admission_route(candidates)
+            self.assertEqual(admit_route.route_name, "Route 2 (Prio 50)")
+            self.assertFalse(already_acquired)
+
+            # Tie-break test: give Route 1 only 1 waiter as well
+            lim1._waiters.clear()
+            lim1._waiters.append(fut1)
+            self.assertEqual(lim1.queue_depth, 1)
+            self.assertEqual(lim2.queue_depth, 1)
+
+            # Strict '<' ensures Route 1 wins on tie-break because of higher priority!
+            admit_tie, _, _ = await self.router.select_admission_route(candidates)
+            self.assertEqual(admit_tie.route_name, "Route 1 (Prio 100)")
+
+        asyncio.run(run_test())
+
 
 class TestModelRouterEndToEnd(AioHTTPTestCase):
     """End-to-end integration tests through the aiohttp Proxy gateway."""
@@ -307,6 +452,10 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
             body = await request.json() if request.can_read_body else {}
             auth = request.headers.get("Authorization", "")
             self.openrouter_requests.append({"body": body, "auth": auth, "path": request.path})
+            if "failover" in body.get("model", ""):
+                return web.json_response({
+                    "error": {"message": "Rate limit exceeded on Route 1", "type": "rate_limit_error"}
+                }, status=429, headers={"Retry-After": "0"})
             return web.json_response({
                 "id": "chatcmpl-openrouter",
                 "object": "chat.completion",
@@ -555,6 +704,130 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
             self.assertFalse(res_stealth.is_default)
             self.assertEqual(res_stealth.upstream_url, "https://openrouter.ai/api/v1")
             self.assertEqual(res_stealth.max_concurrent, 6)
+
+    async def test_proxy_multi_route_concurrency_overspill(self):
+        """End-to-end: saturating Route 1 immediately routes identical-pattern requests to Route 2."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "r1_openrouter",
+                    "name": "Route 1 OpenRouter",
+                    "pattern": r"^overspill/.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/api/v1")),
+                    "priority": 100,
+                    "max_concurrent": 1
+                },
+                {
+                    "id": "r2_default",
+                    "name": "Route 2 Default",
+                    "pattern": r"^overspill/.*",
+                    "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                    "priority": 50,
+                    "max_concurrent": 4
+                }
+            ]
+        })
+        self.openrouter_requests.clear()
+        self.default_requests.clear()
+
+        # Hold a slot on Route 1
+        lim1 = proxy_mod._model_router.get_limiter("r1_openrouter")
+        slot_acquired = await lim1.try_acquire()
+        self.assertTrue(slot_acquired)
+        self.assertEqual(lim1.active, 1)
+
+        try:
+            # Send request matching ^overspill/.*
+            payload = {"model": "overspill/llama3", "messages": [{"role": "user", "content": "Hi"}]}
+            resp = await self.client.post("/v1/chat/completions", json=payload)
+            self.assertEqual(resp.status, 200)
+            data = await resp.json()
+            # Because Route 1 was saturated, request immediately overspilled to Route 2 (default server)!
+            self.assertEqual(data["choices"][0]["message"]["content"], "Hello from Default Upstream!")
+            self.assertEqual(len(self.default_requests), 1)
+            self.assertEqual(len(self.openrouter_requests), 0)
+        finally:
+            await lim1.release()
+
+    async def test_proxy_multi_route_failover_cascade(self):
+        """End-to-end: When Route 1 fails upstream (429) and exhausts retries, proxy cleanly cascades to Route 2."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "r1_failing",
+                    "name": "Route 1 Failing",
+                    "pattern": r"^failover/.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/api/v1")),
+                    "priority": 100,
+                    "max_concurrent": 4,
+                    "retry_policy": {"enabled": True, "max_retries": 1, "mode": "immediate"}
+                },
+                {
+                    "id": "r2_fallback",
+                    "name": "Route 2 Working",
+                    "pattern": r"^failover/.*",
+                    "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                    "priority": 50,
+                    "max_concurrent": 4
+                }
+            ]
+        })
+        self.openrouter_requests.clear()
+        self.default_requests.clear()
+
+        payload = {"model": "failover/test-model", "messages": [{"role": "user", "content": "Hi"}]}
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        # Successfully served by Route 2 after Route 1 exhausted retries!
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello from Default Upstream!")
+        # Route 1 was called initial + 1 retry = 2 attempts
+        self.assertEqual(len(self.openrouter_requests), 2)
+        # Route 2 was called once and succeeded
+        self.assertEqual(len(self.default_requests), 1)
+
+    async def test_routes_test_endpoint_returns_candidates_chain(self):
+        """POST /v1/routes/test returns full candidates list and matched count for overspill visualization."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "max_concurrent": 4
+            },
+            "routes": [
+                {
+                    "id": "r1_chain",
+                    "name": "Route Chain P100",
+                    "pattern": r"^chain/.*",
+                    "upstream_url": "https://chain100.ai/v1",
+                    "priority": 100
+                },
+                {
+                    "id": "r2_chain",
+                    "name": "Route Chain P50",
+                    "pattern": r"^chain/.*",
+                    "upstream_url": "https://chain50.ai/v1",
+                    "priority": 50
+                }
+            ]
+        })
+        test_resp = await self.client.post("/v1/routes/test", json={"model": "chain/sample"})
+        self.assertEqual(test_resp.status, 200)
+        data = await test_resp.json()
+        self.assertEqual(data["matched_routes_count"], 2)
+        self.assertEqual(len(data["candidates"]), 2)
+        self.assertEqual(data["candidates"][0]["route_name"], "Route Chain P100")
+        self.assertEqual(data["candidates"][1]["route_name"], "Route Chain P50")
 
 
 if __name__ == "__main__":

@@ -382,7 +382,21 @@ async def handle_routes_test(request: web.Request) -> web.Response:
     try:
         data = await request.json() if request.can_read_body else {}
         model_name = data.get("model", "")
-        res = _model_router.resolve(model_name)
+        chain = _model_router.resolve_chain(model_name)
+        res = chain[0] if chain else _model_router.resolve(model_name)
+        candidates_list = [
+            {
+                "route_id": c.route_id,
+                "route_name": c.route_name,
+                "resolved_upstream": c.upstream_url,
+                "is_default": c.is_default,
+                "pattern_matched": c.pattern_matched,
+                "max_concurrent": c.max_concurrent,
+                "max_rpm": c.max_rpm,
+                "has_api_key": bool(c.api_key),
+            }
+            for c in chain
+        ]
         return web.json_response({
             "model": model_name,
             "resolved_upstream": res.upstream_url,
@@ -396,6 +410,8 @@ async def handle_routes_test(request: web.Request) -> web.Response:
             "timeout": res.timeout,
             "fallback_upstream_url": res.fallback_upstream_url,
             "has_api_key": bool(res.api_key),
+            "matched_routes_count": len(chain),
+            "candidates": candidates_list,
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)

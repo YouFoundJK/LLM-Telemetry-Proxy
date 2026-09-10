@@ -2345,17 +2345,25 @@ const App = (() => {
             const authDesc = res.has_api_key
               ? '<b style="color:var(--green);">Replaced (Stored Upstream Key)</b>'
               : '<b>Passthrough</b>';
+            let cascadeHtml = '';
+            if (res.candidates && res.candidates.length > 1) {
+              const chainDesc = res.candidates.map((c, i) => `<span style="white-space:nowrap;"><b>#${i+1}</b> ${UI.escapeHtml(c.route_name)} (<code>${UI.escapeHtml(c.resolved_upstream)}</code>)</span>`).join(' <span style="color:var(--accent);">➔</span> ');
+              cascadeHtml = `<div style="margin-top:5px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.15); font-size:0.85em;"><b style="color:var(--accent);">Multi-Priority Overspill Chain (${res.candidates.length} routes):</b> ${chainDesc}</div>`;
+            }
+
             if (!res.is_default) {
               testResultEl.className = 'route-test-result-banner match-custom';
               testResultEl.innerHTML = `
                 <div><b style="color:var(--green);">✔ Matched Custom Route:</b> "${UI.escapeHtml(res.route_name)}" (Pattern: <code>${UI.escapeHtml(res.pattern_matched)}</code>)</div>
                 <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: ${authDesc} &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
+                ${cascadeHtml}
               `;
             } else {
               testResultEl.className = 'route-test-result-banner match-default';
               testResultEl.innerHTML = `
                 <div><b style="color:var(--purple);">⚡ Fallback to Default Router:</b> "${UI.escapeHtml(res.route_name)}"</div>
                 <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: ${authDesc} &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
+                ${cascadeHtml}
               `;
             }
           } catch (err) {
