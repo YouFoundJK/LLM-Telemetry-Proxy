@@ -21,6 +21,7 @@ Usage:
     # Kill it via: pkill -f llm_telemetry_proxy.py
 """
 
+import email.utils
 from collections import deque
 from typing import Optional, Dict, Any, Tuple, List, Union
 import asyncio
@@ -41,9 +42,23 @@ import aiohttp
 from aiohttp import web
 
 try:
-    from proxy.model_router import ModelRouter, build_upstream_url
+    from proxy.model_router import (
+        ModelRouter,
+        build_upstream_url,
+        UpstreamConcurrencyLimiter,
+        _SlotContextManager,
+        RouteResolutionResult,
+        normalize_timeout,
+    )
 except ImportError:
-    from model_router import ModelRouter, build_upstream_url
+    from model_router import (
+        ModelRouter,
+        build_upstream_url,
+        UpstreamConcurrencyLimiter,
+        _SlotContextManager,
+        RouteResolutionResult,
+        normalize_timeout,
+    )
 
 # ── Config ──────────────────────────────────────────────────────────────────
 # UPSTREAM = "https://llm-dev.ai.e-infra.cz/v1"
@@ -92,135 +107,27 @@ def _tlog(msg: str):
     print(line, file=sys.stderr, flush=True)
 
 
-class UpstreamConcurrencyLimiter:
-    """
-    Asynchronous concurrency limiter with strict FIFO queuing, slot cooldown gaps,
-    and cancellation safety.
-    """
-
-    def __init__(self, max_concurrent: int = 4, slot_cooldown_seconds: float = 0.05):
-        self.max_concurrent = max(1, int(max_concurrent))
-        self.slot_cooldown_seconds = max(0.0, float(slot_cooldown_seconds))
-        self._active_count = 0
-        self._waiters = deque()  # deque of asyncio.Future
-        self._lock = asyncio.Lock()
-        self._last_release_time = 0.0
-        self._total_admitted = 0
-        self._total_queued = 0
-        self._peak_active = 0
-        self._total_retries_429 = 0
-        self._total_retries_attempted = 0
-        self._total_retries_absorbed = 0
-        self._total_retries_failed = 0
-
-    @property
-    def active(self) -> int:
-        return self._active_count
-
-    @property
-    def queued(self) -> int:
-        return len(self._waiters)
-
-    def record_429_retry(self):
-        self._total_retries_429 += 1
-        self._total_retries_attempted += 1
-
-    def record_retry_attempt(self):
-        self._total_retries_429 += 1
-        self._total_retries_attempted += 1
-
-    def record_retry_absorbed(self):
-        self._total_retries_absorbed += 1
-
-    def record_retry_failed(self):
-        self._total_retries_failed += 1
-
-    def get_stats(self) -> dict:
-        return {
-            "max_concurrent": self.max_concurrent,
-            "active": self._active_count,
-            "queued": len(self._waiters),
-            "slot_cooldown_ms": int(round(self.slot_cooldown_seconds * 1000)),
-            "total_admitted": self._total_admitted,
-            "total_queued": self._total_queued,
-            "total_retries_429": self._total_retries_429,
-            "total_retries_attempted": self._total_retries_attempted,
-            "total_retries_absorbed": self._total_retries_absorbed,
-            "total_retries_failed": self._total_retries_failed,
-            "peak_active": self._peak_active,
-        }
-
-    def slot(self):
-        """Returns an async context manager for acquiring and releasing a concurrency slot."""
-        return _SlotContextManager(self)
-
-    async def acquire(self):
-        """Acquire a concurrency slot, waiting in FIFO order if max_concurrent is reached."""
-        async with self._lock:
-            # If we have capacity and no waiters are queued, admit immediately without delay!
-            if self._active_count < self.max_concurrent and not self._waiters:
-                self._active_count += 1
-                self._total_admitted += 1
-                self._peak_active = max(self._peak_active, self._active_count)
-                return
-
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            self._waiters.append(fut)
-            self._total_queued += 1
-
-        try:
-            await fut
-        except asyncio.CancelledError:
-            async with self._lock:
-                if fut in self._waiters:
-                    self._waiters.remove(fut)
-                elif fut.done() and not fut.cancelled():
-                    # The future was resolved with a slot just before/during cancellation.
-                    # Release the slot so capacity is not leaked.
-                    self._schedule_handover_or_decrement()
-            raise
-
-    async def release(self):
-        """Release a concurrency slot."""
-        async with self._lock:
-            self._schedule_handover_or_decrement()
-
-    def _schedule_handover_or_decrement(self):
-        """Must be called while holding self._lock."""
-        self._last_release_time = time.monotonic()
-        if not self._waiters:
-            self._active_count = max(0, self._active_count - 1)
-            return
-
-        # Queue has waiters (it was maxed out). Spawn cooldown handover task.
-        asyncio.create_task(self._cooldown_and_dispatch())
-
-    async def _cooldown_and_dispatch(self):
-        if self.slot_cooldown_seconds > 0:
-            await asyncio.sleep(self.slot_cooldown_seconds)
-
-        async with self._lock:
-            while self._waiters:
-                fut = self._waiters.popleft()
-                if not fut.done() and not fut.cancelled():
-                    self._total_admitted += 1
-                    fut.set_result(None)
-                    return
-            # If all waiters were cancelled during cooldown
-            self._active_count = max(0, self._active_count - 1)
-
-
-class _SlotContextManager:
-    def __init__(self, limiter: UpstreamConcurrencyLimiter):
-        self.limiter = limiter
-
-    async def __aenter__(self):
-        await self.limiter.acquire()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.limiter.release()
+def parse_retry_after(header_val: Optional[str]) -> Optional[float]:
+    """Parse integer/float seconds or RFC 7231 HTTP-date from Retry-After header."""
+    if not header_val:
+        return None
+    val_str = str(header_val).strip()
+    if not val_str:
+        return None
+    try:
+        sec = float(val_str)
+        return max(0.0, sec)
+    except (ValueError, TypeError):
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(val_str)
+        if dt is not None:
+            now_utc = datetime.now(timezone.utc)
+            delta = (dt - now_utc).total_seconds()
+            return max(0.0, delta)
+    except Exception:
+        pass
+    return None
 
 
 def evaluate_retry_condition(
@@ -247,7 +154,7 @@ def evaluate_retry_condition(
     retry_on_status = set(retry_policy.get("retry_on_status", [429, 502, 503, 504, 529]))
     retry_patterns = [p.lower() for p in retry_policy.get("retry_on_body_patterns", [])]
     retry_on_empty = bool(retry_policy.get("retry_on_empty", True))
-    max_retry_after = float(retry_policy.get("max_retry_after_seconds", 5.0))
+    max_retry_after = float(retry_policy.get("max_retry_after_seconds", 10.0))
     mode = str(retry_policy.get("mode", "immediate")).lower()
 
     is_retryable = False
@@ -334,21 +241,18 @@ def evaluate_retry_condition(
                 retry_after_hdr = v
                 break
 
-    if retry_after_hdr:
-        try:
-            parsed_after = float(retry_after_hdr)
-            if parsed_after > max_retry_after:
-                # Explicit cooldown exceeds acceptable threshold; fail fast
-                return False, 0.0, None
-            delay = max(0.0, parsed_after)
-        except (ValueError, TypeError):
-            pass
+    parsed_after = parse_retry_after(retry_after_hdr) if retry_after_hdr else None
+    if parsed_after is not None:
+        if parsed_after > max_retry_after:
+            # Explicit cooldown exceeds acceptable threshold; fail fast
+            return False, 0.0, None
+        delay = parsed_after
 
     if delay == 0.0:
         if mode == "immediate":
             delay = 0.0  # Instantaneous re-dispatch
         else:
-            delay = 0.5 * (2 ** attempt) + random.uniform(0.05, 0.2)
+            delay = min(max_retry_after, 0.5 * (2 ** attempt)) + random.uniform(0.1, 0.4)
 
     return True, delay, reason
 
@@ -1025,6 +929,16 @@ async def fetch_server_load(model_hint=None):
         d = data[target_name]
         return d["running"], d["tok_s"], target_name
 
+    # Check alternative date targets in mapping if canon_str is a versioned dict
+    mapping = load_model_mapping() or {}
+    raw_mapping_val = mapping.get(m_str)
+    if isinstance(raw_mapping_val, dict):
+        for mapped_target in raw_mapping_val.values():
+            if str(mapped_target).strip().lower() in norm_data:
+                target_name = norm_data[str(mapped_target).strip().lower()]
+                d = data[target_name]
+                return d["running"], d["tok_s"], target_name
+
     # 3. Strip thinking suffix (e.g. 'deepseek-v4-flash-thinking' -> 'deepseek-v4-flash')
     m_no_think = m_str.replace("-thinking", "").replace("_thinking", "")
     if m_no_think in norm_data:
@@ -1421,7 +1335,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         asyncio.create_task(broadcast_raw_payload(start_record))
 
     try:
-        timeout = aiohttp.ClientTimeout(total=300)
+        route_timeout = route_res.timeout or _model_router.default_timeout
+        connect_timeout = float(route_timeout.get("connect", 10.0))
+        first_byte_timeout = float(route_timeout.get("first_byte", 25.0))
+        sock_read_timeout = float(route_timeout.get("sock_read", 60.0))
+        total_timeout = float(route_timeout.get("total", 180.0))
+        req_timeout = aiohttp.ClientTimeout(
+            connect=connect_timeout,
+            sock_read=sock_read_timeout,
+            total=total_timeout,
+        )
+
         target_limiter = _model_router.get_limiter(route_res.route_id)
         retry_policy = dict(route_res.retry_policy or _model_router.default_retry_policy)
         if route_res.is_default:
@@ -1433,28 +1357,35 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
         max_retries = int(retry_policy.get("max_retries", 0)) if retry_policy.get("enabled", True) else 0
 
-        _tlog(f"[telemetry] [REQ START] req_id={req_id} model={model} path={path} is_stream={is_stream_req} max_retries={max_retries} route='{route_name}' upstream='{upstream_url}'")
+        _tlog(f"[telemetry] [REQ START] req_id={req_id} model={model} path={path} is_stream={is_stream_req} max_retries={max_retries} max_rpm={route_res.max_rpm} route='{route_name}' upstream='{upstream_url}'")
 
         attempt = 0
+        active_upstream_url = upstream_url
         while attempt <= max_retries:
             retry_needed = False
             retry_delay = 0.0
             retry_reason = None
 
-            # Gate: never exceed route-specific max_concurrent parallel upstream requests
+            # Route subsequent attempts to fallback upstream if primary failed and fallback configured
+            if attempt > 0 and route_res.fallback_upstream_url:
+                active_upstream_url = build_upstream_url(route_res.fallback_upstream_url, path)
+                _tlog(f"[telemetry] [FALLBACK ROUTING] req_id={req_id} attempt {attempt+1} directed to fallback: {active_upstream_url}")
+
+            # Gate: never exceed route-specific max_concurrent or max_rpm
             async with target_limiter.slot():
                 req_session = request.app.get(UPSTREAM_SESSION_KEY) if hasattr(request, "app") and UPSTREAM_SESSION_KEY in request.app else None
                 owns_session = False
                 if req_session is None or req_session.closed:
-                    req_session = aiohttp.ClientSession(timeout=timeout)
+                    req_session = aiohttp.ClientSession(timeout=req_timeout)
                     owns_session = True
 
                 try:
                     async with req_session.request(
-                        method, upstream_url,
+                        method, active_upstream_url,
                         headers=headers,
                         data=body if body else None,
                         params=request.query,
+                        timeout=req_timeout,
                     ) as upstream_resp:
                         status_code = upstream_resp.status
                         content_type = upstream_resp.headers.get("Content-Type", "")
@@ -1487,10 +1418,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             stream_reason = None
                             has_real_content = False
 
-                            async for chunk in upstream_resp.content:
-                                buffered_chunks.append(chunk)
+                            # First-byte deadline to fail fast before client drops connection
+                            try:
+                                chunk_res = await asyncio.wait_for(
+                                    upstream_resp.content.readchunk(),
+                                    timeout=first_byte_timeout
+                                )
+                                first_chunk = chunk_res[0] if isinstance(chunk_res, tuple) else chunk_res
+                                if first_chunk:
+                                    buffered_chunks.append(first_chunk)
+                            except asyncio.TimeoutError:
+                                _tlog(f"[telemetry] [TIMEOUT FIRST BYTE] req_id={req_id} model={model} upstream stalled for {first_byte_timeout}s without emitting any token chunk.")
+                                raise asyncio.TimeoutError(f"Upstream first-byte timeout ({first_byte_timeout}s)")
+                            except Exception:
+                                first_chunk = None
+
+                            if buffered_chunks:
                                 try:
-                                    text = chunk.decode("utf-8", errors="replace")
+                                    text = buffered_chunks[0].decode("utf-8", errors="replace")
                                     for line in text.split("\n"):
                                         line = line.strip()
                                         if line.startswith("data: ") and line != "data: [DONE]":
@@ -1528,8 +1473,51 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 except Exception:
                                     pass
 
-                                if stream_retry_needed or has_real_content:
-                                    break
+                            # Read further chunks if needed to determine content
+                            if not stream_retry_needed and not has_real_content and buffered_chunks:
+                                async for chunk in upstream_resp.content:
+                                    buffered_chunks.append(chunk)
+                                    try:
+                                        text = chunk.decode("utf-8", errors="replace")
+                                        for line in text.split("\n"):
+                                            line = line.strip()
+                                            if line.startswith("data: ") and line != "data: [DONE]":
+                                                chunk_data = json.loads(line[6:])
+                                                if isinstance(chunk_data, dict):
+                                                    if chunk_data.get("error"):
+                                                        s_needed, s_delay, s_reason = evaluate_retry_condition(
+                                                            status_code=None,
+                                                            headers=upstream_resp.headers,
+                                                            body_text_or_json=chunk_data,
+                                                            attempt=attempt,
+                                                            retry_policy=retry_policy,
+                                                        )
+                                                        if s_needed:
+                                                            stream_retry_needed = True
+                                                            stream_delay = s_delay
+                                                            stream_reason = s_reason
+                                                            break
+                                                    
+                                                    choices = chunk_data.get("choices")
+                                                    if isinstance(choices, list) and len(choices) > 0 and isinstance(choices[0], dict):
+                                                        delta = choices[0].get("delta")
+                                                        txt = choices[0].get("text")
+                                                        if isinstance(delta, dict):
+                                                            c_str = delta.get("content")
+                                                            r_str = delta.get("reasoning_content")
+                                                            t_calls = delta.get("tool_calls")
+                                                            f_call = delta.get("function_call")
+                                                            if (c_str and str(c_str).strip()) or (r_str and str(r_str).strip()) or t_calls or f_call:
+                                                                has_real_content = True
+                                                                break
+                                                        elif txt and str(txt).strip():
+                                                            has_real_content = True
+                                                            break
+                                    except Exception:
+                                        pass
+
+                                    if stream_retry_needed or has_real_content:
+                                        break
 
                             # If upstream stream ended with 0 content / 0 tool calls
                             if not stream_retry_needed and not has_real_content and retry_policy.get("retry_on_empty", True):
@@ -1610,15 +1598,40 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     except Exception:
                                         pass
 
-                                for b_chunk in buffered_chunks:
-                                    await response.write(b_chunk)
-                                    _parse_sse_chunk(b_chunk)
+                                client_disconnected = False
+                                try:
+                                    for b_chunk in buffered_chunks:
+                                        await response.write(b_chunk)
+                                        _parse_sse_chunk(b_chunk)
 
-                                async for chunk in upstream_resp.content:
-                                    await response.write(chunk)
-                                    _parse_sse_chunk(chunk)
+                                    async for chunk in upstream_resp.content:
+                                        await response.write(chunk)
+                                        _parse_sse_chunk(chunk)
 
-                                await response.write_eof()
+                                    await response.write_eof()
+                                except (RuntimeError, ConnectionResetError, BrokenPipeError) as client_disconn_err:
+                                    client_disconnected = True
+                                    _tlog(f"[telemetry] [CLIENT DISCONNECTED] req_id={req_id} model={model}: {client_disconn_err}")
+                                    error = "client_cancelled"
+
+                                if client_disconnected:
+                                    t_total = (time.monotonic() - t_start) * 1000
+                                    if t_first_byte is None:
+                                        t_first_byte = time.monotonic()
+                                    ttfb_ms = (t_first_byte - t_start) * 1000
+                                    try:
+                                        log_call(model, path, input_tokens, output_tokens,
+                                                 ttfb_ms, t_total, tokens_per_s,
+                                                 server_running, server_tok_s, server_model,
+                                                 499, error, call_type,
+                                                 route_name=route_name, upstream_url=active_upstream_url,
+                                                 retries_attempted=attempt, absorbed_429=1 if attempt > 0 else 0)
+                                        log_proxy_call(path, method, call_type, model, 499, error, 1, ttfb_ms, t_total,
+                                                       route_name=route_name, upstream_url=active_upstream_url,
+                                                       retries_attempted=attempt, absorbed_429=1 if attempt > 0 else 0)
+                                    except Exception:
+                                        pass
+                                    return response
 
                                 # Telemetry post-processing
                                 try:
@@ -1887,11 +1900,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     )
                 except (aiohttp.ClientError, ConnectionResetError, ConnectionRefusedError, BrokenPipeError,
                         asyncio.IncompleteReadError, asyncio.TimeoutError) as net_err:
-                    if attempt < max_retries and retry_policy.get("retry_on_disconnect", True):
+                    is_timeout = isinstance(net_err, asyncio.TimeoutError)
+                    can_retry = retry_policy.get("retry_on_timeout", False) if is_timeout else retry_policy.get("retry_on_disconnect", True)
+                    if attempt < max_retries and can_retry:
                         target_limiter.record_retry_attempt()
                         retry_needed = True
-                        retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (0.5 * (2 ** attempt) + random.uniform(0.05, 0.2))
-                        retry_reason = f"Upstream disconnect/no response: {type(net_err).__name__} ({net_err})"
+                        retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (min(float(retry_policy.get("max_retry_after_seconds", 10.0)), 0.5 * (2 ** attempt)) + random.uniform(0.1, 0.4))
+                        retry_reason = f"Upstream {'timeout' if is_timeout else 'disconnect/no response'}: {type(net_err).__name__} ({net_err})"
                         _tlog(
                             f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} "
                             f"reason='{retry_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={retry_delay:.2f}s..."
@@ -1918,9 +1933,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
                      504, error, call_type,
-                     route_name=route_name, upstream_url=upstream_url)
+                     route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
             log_proxy_call(path, method, call_type, model, 504, error, 1 if logged else 0, ttfb_ms, t_total,
-                           route_name=route_name, upstream_url=upstream_url)
+                           route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
         except Exception:
             pass
 
@@ -1964,9 +1979,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
                      499, error, call_type,
-                     route_name=route_name, upstream_url=upstream_url)
+                     route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
             log_proxy_call(path, method, call_type, model, 499, error, 1 if logged else 0, ttfb_ms, t_total,
-                           route_name=route_name, upstream_url=upstream_url)
+                           route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
         except Exception:
             pass
 
@@ -2009,9 +2024,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
                      status_code, error, call_type,
-                     route_name=route_name, upstream_url=upstream_url)
+                     route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
             log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total,
-                           route_name=route_name, upstream_url=upstream_url)
+                           route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
         except Exception:
             pass
 
@@ -2066,7 +2081,16 @@ async def _simple_forward(request, path, method):
     error = None
 
     try:
-        timeout = aiohttp.ClientTimeout(total=300)
+        route_timeout = route_res.timeout or _model_router.default_timeout
+        connect_timeout = float(route_timeout.get("connect", 10.0))
+        sock_read_timeout = float(route_timeout.get("sock_read", 60.0))
+        total_timeout = float(route_timeout.get("total", 180.0))
+        req_timeout = aiohttp.ClientTimeout(
+            connect=connect_timeout,
+            sock_read=sock_read_timeout,
+            total=total_timeout,
+        )
+
         target_limiter = _model_router.get_limiter(route_res.route_id)
         retry_policy = dict(route_res.retry_policy or _model_router.default_retry_policy)
         if route_res.is_default:
@@ -2087,7 +2111,7 @@ async def _simple_forward(request, path, method):
                 req_session = request.app.get(UPSTREAM_SESSION_KEY) if hasattr(request, "app") and UPSTREAM_SESSION_KEY in request.app else None
                 owns_session = False
                 if req_session is None or req_session.closed:
-                    req_session = aiohttp.ClientSession(timeout=timeout)
+                    req_session = aiohttp.ClientSession(timeout=req_timeout)
                     owns_session = True
 
                 try:
@@ -2096,6 +2120,7 @@ async def _simple_forward(request, path, method):
                         headers=headers,
                         data=req_body if req_body else None,
                         params=request.query,
+                        timeout=req_timeout,
                     ) as upstream_resp:
                         status_code = upstream_resp.status
                         body = await upstream_resp.read()
@@ -2290,6 +2315,9 @@ async def handle_routes_test(request: web.Request) -> web.Response:
             "pattern_matched": res.pattern_matched,
             "max_concurrent": res.max_concurrent,
             "slot_cooldown_ms": res.slot_cooldown_ms,
+            "max_rpm": res.max_rpm,
+            "timeout": res.timeout,
+            "fallback_upstream_url": res.fallback_upstream_url,
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)

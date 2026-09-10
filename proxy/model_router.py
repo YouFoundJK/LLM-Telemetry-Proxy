@@ -22,6 +22,28 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_UPSTREAM_URL = "https://llm.ai.e-infra.cz/v1"
 
+DEFAULT_ROUTE_TIMEOUT: Dict[str, float] = {
+    "connect": 10.0,
+    "first_byte": 25.0,
+    "sock_read": 60.0,
+    "total": 180.0,
+}
+
+
+def normalize_timeout(timeout: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    """Ensure timeout dict has valid schema, proper types, and sensible defaults."""
+    merged = dict(DEFAULT_ROUTE_TIMEOUT)
+    if not isinstance(timeout, dict):
+        return merged
+    for k in ("connect", "first_byte", "sock_read", "total"):
+        if k in timeout and timeout[k] is not None:
+            try:
+                merged[k] = max(0.5, float(timeout[k]))
+            except (ValueError, TypeError):
+                pass
+    return merged
+
+
 DEFAULT_RETRY_POLICY: Dict[str, Any] = {
     "enabled": True,
     "max_retries": 3,
@@ -36,7 +58,8 @@ DEFAULT_RETRY_POLICY: Dict[str, Any] = {
     ],
     "retry_on_empty": True,
     "retry_on_disconnect": True,
-    "max_retry_after_seconds": 5.0,
+    "retry_on_timeout": False,
+    "max_retry_after_seconds": 10.0,
 }
 
 
@@ -57,6 +80,7 @@ def normalize_retry_policy(policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     merged["mode"] = "exponential" if str(merged.get("mode", "")).lower() == "exponential" else "immediate"
     merged["retry_on_empty"] = bool(merged.get("retry_on_empty", True))
     merged["retry_on_disconnect"] = bool(merged.get("retry_on_disconnect", True))
+    merged["retry_on_timeout"] = bool(merged.get("retry_on_timeout", False))
 
     if not isinstance(merged.get("retry_on_status"), (list, set, tuple)):
         merged["retry_on_status"] = [429, 502, 503, 504, 529]
@@ -72,9 +96,9 @@ def normalize_retry_policy(policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         merged["retry_on_body_patterns"] = [str(p) for p in merged["retry_on_body_patterns"] if str(p).strip()]
 
     try:
-        merged["max_retry_after_seconds"] = max(0.0, float(merged.get("max_retry_after_seconds", 5.0)))
+        merged["max_retry_after_seconds"] = max(0.0, float(merged.get("max_retry_after_seconds", 10.0)))
     except (ValueError, TypeError):
-        merged["max_retry_after_seconds"] = 5.0
+        merged["max_retry_after_seconds"] = 10.0
 
     return merged
 
@@ -93,7 +117,7 @@ def build_upstream_url(upstream_base: str, path: str) -> str:
     return f"{base}{req_path}"
 
 
-# ── Concurrency Limiter ───────────────────────────────────────────────────────
+# ── Concurrency & RPM Limiter ────────────────────────────────────────────────
 class _SlotContextManager:
     """Async context manager helper for limiter.slot()."""
     def __init__(self, limiter: 'UpstreamConcurrencyLimiter'):
@@ -109,17 +133,19 @@ class _SlotContextManager:
 
 class UpstreamConcurrencyLimiter:
     """
-    Asynchronous concurrency limiter with strict FIFO queuing, slot cooldown gaps,
-    and cancellation safety.
+    Asynchronous concurrency and RPM limiter with strict FIFO queuing, slot cooldown gaps,
+    rolling 60-second RPM pacing, and cancellation safety.
     """
 
-    def __init__(self, max_concurrent: int = 4, slot_cooldown_seconds: float = 0.05):
+    def __init__(self, max_concurrent: int = 4, slot_cooldown_seconds: float = 0.05, max_rpm: int = -1):
         self.max_concurrent = max(1, int(max_concurrent))
         self.slot_cooldown_seconds = max(0.0, float(slot_cooldown_seconds))
+        self.max_rpm = int(max_rpm) if max_rpm is not None else -1
         self._active_count = 0
         self._waiters = deque()  # deque of asyncio.Future
         self._lock = asyncio.Lock()
         self._last_release_time = 0.0
+        self._rpm_history = deque()  # deque of float monotonic timestamps
         self._total_admitted = 0
         self._total_queued = 0
         self._peak_active = 0
@@ -151,11 +177,15 @@ class UpstreamConcurrencyLimiter:
         self._total_retries_failed += 1
 
     def get_stats(self) -> dict:
+        now = time.monotonic()
+        recent_rpm = sum(1 for t in self._rpm_history if (now - t) < 60.0)
         return {
             "max_concurrent": self.max_concurrent,
             "active": self._active_count,
             "queued": len(self._waiters),
             "slot_cooldown_ms": int(round(self.slot_cooldown_seconds * 1000)),
+            "max_rpm": self.max_rpm,
+            "current_rpm": recent_rpm,
             "total_admitted": self._total_admitted,
             "total_queued": self._total_queued,
             "total_retries_429": self._total_retries_429,
@@ -169,19 +199,67 @@ class UpstreamConcurrencyLimiter:
         """Returns an async context manager for acquiring and releasing a concurrency slot."""
         return _SlotContextManager(self)
 
-    async def acquire(self):
-        """Acquire a concurrency slot, waiting in FIFO order if max_concurrent is reached."""
-        async with self._lock:
-            if self._active_count < self.max_concurrent and not self._waiters:
+    def _schedule_rpm_check(self, delay: float):
+        """Schedule an asynchronous check once RPM window capacity reopens."""
+        async def _tick():
+            await asyncio.sleep(delay)
+            async with self._lock:
+                self._dispatch_next()
+        asyncio.create_task(_tick())
+
+    def _dispatch_next(self):
+        """Must be called while holding self._lock."""
+        now = time.monotonic()
+        while self._rpm_history and (now - self._rpm_history[0]) >= 60.0:
+            self._rpm_history.popleft()
+
+        while self._waiters:
+            if self._active_count >= self.max_concurrent:
+                return
+
+            if self.max_rpm > 0 and len(self._rpm_history) >= self.max_rpm:
+                wait_sec = max(0.01, (self._rpm_history[0] + 60.0) - now)
+                self._schedule_rpm_check(wait_sec)
+                return
+
+            fut = self._waiters.popleft()
+            if not fut.done() and not fut.cancelled():
                 self._active_count += 1
                 self._total_admitted += 1
                 self._peak_active = max(self._peak_active, self._active_count)
+                if self.max_rpm > 0:
+                    self._rpm_history.append(now)
+                fut.set_result(None)
+                return
+
+    async def acquire(self):
+        """Acquire a concurrency slot, waiting in FIFO order if max_concurrent or max_rpm is reached."""
+        async with self._lock:
+            now = time.monotonic()
+            while self._rpm_history and (now - self._rpm_history[0]) >= 60.0:
+                self._rpm_history.popleft()
+
+            can_admit_conc = (self._active_count < self.max_concurrent)
+            can_admit_rpm = (self.max_rpm <= 0) or (len(self._rpm_history) < self.max_rpm)
+
+            # If we have capacity and no waiters are queued, admit immediately without delay!
+            if not self._waiters and can_admit_conc and can_admit_rpm:
+                self._active_count += 1
+                self._total_admitted += 1
+                self._peak_active = max(self._peak_active, self._active_count)
+                if self.max_rpm > 0:
+                    self._rpm_history.append(now)
                 return
 
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
             self._waiters.append(fut)
             self._total_queued += 1
+
+            # If concurrency capacity is free but RPM is exhausted, schedule a wakeup
+            if can_admit_conc and not can_admit_rpm and self._rpm_history:
+                wait_sec = max(0.01, (self._rpm_history[0] + 60.0) - now)
+                self._schedule_rpm_check(wait_sec)
 
         try:
             await fut
@@ -212,10 +290,25 @@ class UpstreamConcurrencyLimiter:
             await asyncio.sleep(self.slot_cooldown_seconds)
 
         async with self._lock:
+            now = time.monotonic()
+            while self._rpm_history and (now - self._rpm_history[0]) >= 60.0:
+                self._rpm_history.popleft()
+
             while self._waiters:
                 fut = self._waiters.popleft()
                 if not fut.done() and not fut.cancelled():
+                    # If RPM limit is exceeded, we must decrement active count and wait for RPM window
+                    if self.max_rpm > 0 and len(self._rpm_history) >= self.max_rpm:
+                        self._active_count = max(0, self._active_count - 1)
+                        # Re-insert waiter at head of line
+                        self._waiters.appendleft(fut)
+                        wait_sec = max(0.01, (self._rpm_history[0] + 60.0) - now)
+                        self._schedule_rpm_check(wait_sec)
+                        return
+
                     self._total_admitted += 1
+                    if self.max_rpm > 0:
+                        self._rpm_history.append(now)
                     fut.set_result(None)
                     return
             self._active_count = max(0, self._active_count - 1)
@@ -230,6 +323,9 @@ class RouteResolutionResult:
     pattern_matched: Optional[str] = None
     max_concurrent: int = 4
     slot_cooldown_ms: int = 50
+    max_rpm: int = -1
+    timeout: Optional[Dict[str, float]] = None
+    fallback_upstream_url: Optional[str] = None
     retry_policy: Optional[Dict[str, Any]] = None
 
 
@@ -244,6 +340,9 @@ class ModelRouteRule:
         priority: int = 10,
         max_concurrent: int = 4,
         slot_cooldown_ms: int = 50,
+        max_rpm: int = -1,
+        timeout: Optional[Dict[str, Any]] = None,
+        fallback_upstream_url: Optional[str] = None,
         retry_policy: Optional[Dict[str, Any]] = None,
         limiter: Optional[UpstreamConcurrencyLimiter] = None,
     ):
@@ -255,14 +354,19 @@ class ModelRouteRule:
         self.priority = int(priority)
         self.max_concurrent = max(1, int(max_concurrent))
         self.slot_cooldown_ms = max(0, int(slot_cooldown_ms))
+        self.max_rpm = int(max_rpm) if max_rpm is not None else -1
+        self.timeout = normalize_timeout(timeout)
+        self.fallback_upstream_url = str(fallback_upstream_url).strip().rstrip("/") if fallback_upstream_url else None
         self.retry_policy = normalize_retry_policy(retry_policy)
         
         self.limiter = limiter or UpstreamConcurrencyLimiter(
             max_concurrent=self.max_concurrent,
             slot_cooldown_seconds=self.slot_cooldown_ms / 1000.0,
+            max_rpm=self.max_rpm,
         )
         self.limiter.max_concurrent = self.max_concurrent
         self.limiter.slot_cooldown_seconds = self.slot_cooldown_ms / 1000.0
+        self.limiter.max_rpm = self.max_rpm
 
         self._compiled: Optional[re.Pattern] = None
         self._compile_regex()
@@ -293,6 +397,9 @@ class ModelRouteRule:
             "priority": self.priority,
             "max_concurrent": self.max_concurrent,
             "slot_cooldown_ms": self.slot_cooldown_ms,
+            "max_rpm": self.max_rpm,
+            "timeout": self.timeout,
+            "fallback_upstream_url": self.fallback_upstream_url,
             "retry_policy": self.retry_policy,
         }
 
@@ -307,6 +414,9 @@ class ModelRouteRule:
             "priority": self.priority,
             "max_concurrent": self.max_concurrent,
             "slot_cooldown_ms": self.slot_cooldown_ms,
+            "max_rpm": self.max_rpm,
+            "timeout": self.timeout,
+            "fallback_upstream_url": self.fallback_upstream_url,
             "retry_policy": self.retry_policy,
             "limiter_stats": self.limiter.get_stats(),
         }
@@ -323,10 +433,14 @@ class ModelRouter:
         self.default_name = "Default Upstream (e-INFRA)"
         self.default_max_concurrent = 4
         self.default_slot_cooldown_ms = 50
+        self.default_max_rpm = -1
+        self.default_timeout = normalize_timeout(None)
+        self.default_fallback_upstream_url = None
         self.default_retry_policy = normalize_retry_policy(None)
         self.default_limiter = UpstreamConcurrencyLimiter(
             max_concurrent=self.default_max_concurrent,
             slot_cooldown_seconds=self.default_slot_cooldown_ms / 1000.0,
+            max_rpm=self.default_max_rpm,
         )
         self.rules: List[ModelRouteRule] = []
 
@@ -347,9 +461,13 @@ class ModelRouter:
             self.default_name = def_route.get("name", "Default Upstream")
             self.default_max_concurrent = max(1, int(def_route.get("max_concurrent", 4)))
             self.default_slot_cooldown_ms = max(0, int(def_route.get("slot_cooldown_ms", 50)))
+            self.default_max_rpm = int(def_route.get("max_rpm", -1)) if def_route.get("max_rpm") is not None else -1
+            self.default_timeout = normalize_timeout(def_route.get("timeout"))
+            self.default_fallback_upstream_url = def_route.get("fallback_upstream_url")
             self.default_retry_policy = normalize_retry_policy(def_route.get("retry_policy"))
             self.default_limiter.max_concurrent = self.default_max_concurrent
             self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
+            self.default_limiter.max_rpm = self.default_max_rpm
 
             existing_rules_map = {r.id: r for r in self.rules}
             loaded_rules = []
@@ -365,6 +483,9 @@ class ModelRouter:
                     priority=r.get("priority", 10),
                     max_concurrent=r.get("max_concurrent", 4),
                     slot_cooldown_ms=r.get("slot_cooldown_ms", 50),
+                    max_rpm=r.get("max_rpm", -1),
+                    timeout=r.get("timeout"),
+                    fallback_upstream_url=r.get("fallback_upstream_url"),
                     retry_policy=r.get("retry_policy"),
                     limiter=existing.limiter if existing else None,
                 )
@@ -388,6 +509,9 @@ class ModelRouter:
                 "upstream_url": self.default_upstream_url,
                 "max_concurrent": self.default_max_concurrent,
                 "slot_cooldown_ms": self.default_slot_cooldown_ms,
+                "max_rpm": self.default_max_rpm,
+                "timeout": self.default_timeout,
+                "fallback_upstream_url": self.default_fallback_upstream_url,
                 "retry_policy": self.default_retry_policy,
             },
             "routes": [r.to_config_dict() for r in self.rules],
@@ -444,6 +568,9 @@ class ModelRouter:
                         pattern_matched=rule.pattern,
                         max_concurrent=rule.max_concurrent,
                         slot_cooldown_ms=rule.slot_cooldown_ms,
+                        max_rpm=rule.max_rpm,
+                        timeout=rule.timeout,
+                        fallback_upstream_url=rule.fallback_upstream_url,
                         retry_policy=rule.retry_policy,
                     )
 
@@ -456,6 +583,9 @@ class ModelRouter:
             pattern_matched=None,
             max_concurrent=self.default_max_concurrent,
             slot_cooldown_ms=self.default_slot_cooldown_ms,
+            max_rpm=self.default_max_rpm,
+            timeout=self.default_timeout,
+            fallback_upstream_url=self.default_fallback_upstream_url,
             retry_policy=self.default_retry_policy,
         )
 
@@ -481,6 +611,9 @@ class ModelRouter:
                 "pattern": r.pattern,
                 "upstream_url": r.upstream_url,
                 "enabled": r.enabled,
+                "max_rpm": r.max_rpm,
+                "timeout": r.timeout,
+                "fallback_upstream_url": r.fallback_upstream_url,
                 "retry_policy": r.retry_policy,
                 "stats": r.limiter.get_stats(),
             })
@@ -489,6 +622,9 @@ class ModelRouter:
             "default": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
+                "max_rpm": self.default_max_rpm,
+                "timeout": self.default_timeout,
+                "fallback_upstream_url": self.default_fallback_upstream_url,
                 "retry_policy": self.default_retry_policy,
                 "stats": self.default_limiter.get_stats(),
             },
@@ -502,6 +638,9 @@ class ModelRouter:
                 "upstream_url": self.default_upstream_url,
                 "max_concurrent": self.default_max_concurrent,
                 "slot_cooldown_ms": self.default_slot_cooldown_ms,
+                "max_rpm": self.default_max_rpm,
+                "timeout": self.default_timeout,
+                "fallback_upstream_url": self.default_fallback_upstream_url,
                 "retry_policy": self.default_retry_policy,
                 "limiter_stats": self.default_limiter.get_stats(),
             },
@@ -524,6 +663,13 @@ class ModelRouter:
         if "slot_cooldown_ms" in def_route:
             self.default_slot_cooldown_ms = max(0, int(def_route["slot_cooldown_ms"]))
             self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
+        if "max_rpm" in def_route:
+            self.default_max_rpm = int(def_route["max_rpm"]) if def_route["max_rpm"] is not None else -1
+            self.default_limiter.max_rpm = self.default_max_rpm
+        if "timeout" in def_route:
+            self.default_timeout = normalize_timeout(def_route["timeout"])
+        if "fallback_upstream_url" in def_route:
+            self.default_fallback_upstream_url = def_route["fallback_upstream_url"]
         if "retry_policy" in def_route:
             self.default_retry_policy = normalize_retry_policy(def_route["retry_policy"])
 
@@ -537,6 +683,9 @@ class ModelRouter:
             priority_val = r.get("priority", 100 - i * 10)
             max_c = max(1, int(r.get("max_concurrent", 4)))
             slot_cd = max(0, int(r.get("slot_cooldown_ms", 50)))
+            rpm_val = int(r.get("max_rpm", -1)) if r.get("max_rpm") is not None else -1
+            to_val = r.get("timeout")
+            fb_val = r.get("fallback_upstream_url")
             r_policy = r.get("retry_policy")
 
             rule = ModelRouteRule(
@@ -548,6 +697,9 @@ class ModelRouter:
                 priority=priority_val,
                 max_concurrent=max_c,
                 slot_cooldown_ms=slot_cd,
+                max_rpm=rpm_val,
+                timeout=to_val,
+                fallback_upstream_url=fb_val,
                 retry_policy=r_policy,
                 limiter=existing.limiter if existing else None,
             )

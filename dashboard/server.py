@@ -1176,6 +1176,9 @@ async def handle_proxy_routes_test(request: web.Request) -> web.Response:
             "pattern_matched": res.pattern_matched,
             "max_concurrent": res.max_concurrent,
             "slot_cooldown_ms": res.slot_cooldown_ms,
+            "max_rpm": res.max_rpm,
+            "timeout": res.timeout,
+            "fallback_upstream_url": res.fallback_upstream_url,
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)

@@ -149,6 +149,46 @@ class TestUpstreamConcurrencyLimiterUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(limiter.active, 0)
         self.assertEqual(limiter.queued, 0)
 
+    async def test_max_rpm_disabled_by_default(self):
+        """Verify max_rpm is -1 by default and does not throttle calls."""
+        limiter = UpstreamConcurrencyLimiter(max_concurrent=10)
+        self.assertEqual(limiter.max_rpm, -1)
+
+        t_start = time.monotonic()
+        for _ in range(15):
+            async with limiter.slot():
+                pass
+        t_elapsed = time.monotonic() - t_start
+        self.assertLess(t_elapsed, 0.5)
+
+    async def test_max_rpm_rate_limiting(self):
+        """Verify max_rpm enforces rolling window pacing."""
+        # Setup limiter with max_rpm = 3, max_concurrent = 5
+        limiter = UpstreamConcurrencyLimiter(max_concurrent=5, max_rpm=3)
+        self.assertEqual(limiter.max_rpm, 3)
+
+        # First 3 should acquire immediately
+        t_start = time.monotonic()
+        for _ in range(3):
+            async with limiter.slot():
+                pass
+        t_first_three = time.monotonic() - t_start
+        self.assertLess(t_first_three, 0.2)
+        self.assertEqual(len(limiter._rpm_history), 3)
+
+        # Manually shift the oldest timestamp in _rpm_history to simulate 59.9s ago (expiring in 0.1s)
+        now = time.monotonic()
+        limiter._rpm_history[0] = now - 59.9
+
+        # The 4th slot acquisition should wait for the 1st call to slide out of the 60s window (~0.1s wait)
+        t_wait_start = time.monotonic()
+        async with limiter.slot():
+            pass
+        t_waited = time.monotonic() - t_wait_start
+        self.assertGreaterEqual(t_waited, 0.08)
+        self.assertEqual(len(limiter._rpm_history), 3)
+
+
 
 class TestProxyRateLimitingIntegration(AioHTTPTestCase):
     """Integration test suite: Proxy against mock upstream with 429 auto-retry and concurrency limiting."""
