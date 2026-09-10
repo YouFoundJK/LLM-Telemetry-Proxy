@@ -229,6 +229,13 @@ class TestProxyRateLimitingIntegration(AioHTTPTestCase):
         self.mock_upstream_app.router.add_get("/v1/models", mock_models)
 
         from aiohttp.test_utils import TestServer
+        from tempfile import TemporaryDirectory
+        self.tmp_dir = TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "test_limiter_telemetry.db"
+        self.orig_db = proxy_mod.DB_PATH
+        proxy_mod.DB_PATH = self.db_path
+        proxy_mod.init_db()
+
         self.mock_server = TestServer(self.mock_upstream_app)
         await self.mock_server.start_server()
 
@@ -243,7 +250,12 @@ class TestProxyRateLimitingIntegration(AioHTTPTestCase):
 
     async def tearDownAsync(self):
         proxy_mod.UPSTREAM = self.orig_upstream
+        proxy_mod.DB_PATH = self.orig_db
         await self.mock_server.close()
+        try:
+            self.tmp_dir.cleanup()
+        except Exception:
+            pass
         await super().tearDownAsync()
 
     async def get_application(self):

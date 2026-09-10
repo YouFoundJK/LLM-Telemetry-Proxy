@@ -1317,6 +1317,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     reasoning_tokens = None
     tokens_per_s = None
     logged = False
+    headers_prepared = False
+    response = None
 
     is_stream_req = bool(payload.get("stream") if isinstance(payload, dict) else False)
     if _raw_logging_enabled and _raw_subscribers:
@@ -1554,6 +1556,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     headers=stream_headers,
                                 )
                                 await response.prepare(request)
+                                headers_prepared = True
 
                                 t_first_byte = None
                                 collected_usage = None
@@ -1599,6 +1602,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         pass
 
                                 client_disconnected = False
+                                stream_error = None
                                 try:
                                     for b_chunk in buffered_chunks:
                                         await response.write(b_chunk)
@@ -1609,10 +1613,39 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         _parse_sse_chunk(chunk)
 
                                     await response.write_eof()
-                                except (RuntimeError, ConnectionResetError, BrokenPipeError) as client_disconn_err:
+                                except (RuntimeError, ConnectionResetError, BrokenPipeError, AssertionError, ConnectionError, OSError) as client_disconn_err:
                                     client_disconnected = True
                                     _tlog(f"[telemetry] [CLIENT DISCONNECTED] req_id={req_id} model={model}: {client_disconn_err}")
                                     error = "client_cancelled"
+                                except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as up_err:
+                                    stream_error = up_err
+                                    if isinstance(up_err, asyncio.TimeoutError):
+                                        err_detail = str(up_err).strip() or "read timeout"
+                                        error = f"upstream_stream_timeout: {err_detail}"
+                                    elif isinstance(up_err, aiohttp.ClientError):
+                                        err_detail = str(up_err).strip() or type(up_err).__name__
+                                        error = f"upstream_network_error: {err_detail}"
+                                    else:
+                                        err_detail = str(up_err).strip() or type(up_err).__name__
+                                        error = f"upstream_stream_error: {err_detail}"
+                                    _tlog(f"[telemetry] [UPSTREAM STREAM ERROR] req_id={req_id} model={model}: {error}")
+
+                                if stream_error and not client_disconnected:
+                                    try:
+                                        err_code = 504 if isinstance(stream_error, asyncio.TimeoutError) else 502
+                                        err_msg = str(stream_error).strip() or type(stream_error).__name__
+                                        sse_err = json.dumps({
+                                            "error": {
+                                                "message": f"Upstream stream error: {err_msg}",
+                                                "type": "upstream_stream_error",
+                                                "code": err_code,
+                                            }
+                                        })
+                                        await response.write(f"data: {sse_err}\n\n".encode("utf-8"))
+                                        await response.write(b"data: [DONE]\n\n")
+                                        await response.write_eof()
+                                    except (RuntimeError, ConnectionResetError, BrokenPipeError, AssertionError):
+                                        client_disconnected = True
 
                                 if client_disconnected:
                                     t_total = (time.monotonic() - t_start) * 1000
@@ -1632,6 +1665,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     except Exception:
                                         pass
                                     return response
+
+                                if stream_error:
+                                    status_code = 504 if isinstance(stream_error, asyncio.TimeoutError) else 502
 
                                 # Telemetry post-processing
                                 try:
@@ -1925,8 +1961,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             else:
                 break
 
-    except asyncio.TimeoutError:
-        error = "timeout"
+    except asyncio.TimeoutError as to_err:
+        to_msg = str(to_err).strip()
+        if "first-byte" in to_msg.lower():
+            error = f"upstream_first_byte_timeout: {to_msg}"
+        elif to_msg:
+            error = f"upstream_timeout: {to_msg}"
+        else:
+            error = f"upstream_timeout: limit {total_timeout}s exceeded"
         t_total = (time.monotonic() - t_start) * 1000
         try:
             log_call(model, path, input_tokens, output_tokens,
@@ -1962,14 +2004,22 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 reasoning_text="",
                 tool_calls=None,
                 raw_resp_json=None,
-                error="upstream timeout",
+                error=error,
                 seq=req_seq,
             )
             append_raw_payload(err_record)
             if _raw_subscribers:
                 asyncio.create_task(broadcast_raw_payload(err_record))
 
-        return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
+        if headers_prepared and response is not None:
+            try:
+                if not response.is_eof():
+                    await response.write_eof()
+            except Exception:
+                pass
+            return response
+
+        return web.json_response({"error": {"message": f"Upstream timeout: {error}", "type": "upstream_timeout"}}, status=504)
 
     except asyncio.CancelledError:
         error = "client_cancelled"
@@ -2017,15 +2067,23 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         raise
 
     except Exception as e:
-        error = str(e)[:200]
+        if isinstance(e, (aiohttp.ClientError, ConnectionResetError, ConnectionRefusedError, BrokenPipeError, asyncio.IncompleteReadError)):
+            detail = str(e).strip() or type(e).__name__
+            error = f"upstream_network_error: {detail}"
+            err_type = "upstream_network_error"
+        else:
+            detail = str(e).strip() or type(e).__name__
+            error = f"proxy_internal_error: {detail}"
+            err_type = "proxy_internal_error"
+        error = error[:200]
         t_total = (time.monotonic() - t_start) * 1000
         try:
             log_call(model, path, input_tokens, output_tokens,
                      ttfb_ms, t_total, None,
                      server_running, server_tok_s, server_model,
-                     status_code, error, call_type,
+                     status_code or 502, error, call_type,
                      route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
-            log_proxy_call(path, method, call_type, model, status_code, error, 1 if logged else 0, ttfb_ms, t_total,
+            log_proxy_call(path, method, call_type, model, status_code or 502, error, 1 if logged else 0, ttfb_ms, t_total,
                            route_name=route_name, upstream_url=active_upstream_url if 'active_upstream_url' in locals() else upstream_url)
         except Exception:
             pass
@@ -2060,7 +2118,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             if _raw_subscribers:
                 asyncio.create_task(broadcast_raw_payload(err_record))
 
-        return web.json_response({"error": {"message": str(e)}}, status=502)
+        if headers_prepared and response is not None:
+            try:
+                if not response.is_eof():
+                    await response.write_eof()
+            except Exception:
+                pass
+            return response
+
+        return web.json_response({"error": {"message": error, "type": err_type}}, status=502)
 
 
 async def _simple_forward(request, path, method):
@@ -2209,13 +2275,15 @@ async def _simple_forward(request, path, method):
             else:
                 break
 
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as to_err:
+        to_msg = str(to_err).strip()
+        error = f"upstream_timeout: {to_msg}" if to_msg else "upstream_timeout"
         try:
-            log_proxy_call(path, method, classify_endpoint(path), None, 504, "timeout", 0, None, (time.monotonic() - t_start) * 1000,
+            log_proxy_call(path, method, classify_endpoint(path), None, 504, error, 0, None, (time.monotonic() - t_start) * 1000,
                            route_name=_model_router.default_name, upstream_url=upstream_url)
         except Exception:
             pass
-        return web.json_response({"error": {"message": "upstream timeout"}}, status=504)
+        return web.json_response({"error": {"message": f"Upstream timeout: {error}", "type": "upstream_timeout"}}, status=504)
     except asyncio.CancelledError:
         try:
             log_proxy_call(path, method, classify_endpoint(path), None, 499, "client_cancelled", 0, None, (time.monotonic() - t_start) * 1000,
@@ -2224,14 +2292,22 @@ async def _simple_forward(request, path, method):
             pass
         raise
     except Exception as e:
-        error = str(e)[:200]
+        if isinstance(e, (aiohttp.ClientError, ConnectionResetError, ConnectionRefusedError, BrokenPipeError, asyncio.IncompleteReadError)):
+            detail = str(e).strip() or type(e).__name__
+            error = f"upstream_network_error: {detail}"
+            err_type = "upstream_network_error"
+        else:
+            detail = str(e).strip() or type(e).__name__
+            error = f"proxy_internal_error: {detail}"
+            err_type = "proxy_internal_error"
+        error = error[:200]
         t_total = (time.monotonic() - t_start) * 1000
         try:
             log_proxy_call(path, method, classify_endpoint(path), None, None, error, 0, None, t_total,
                            route_name=_model_router.default_name, upstream_url=upstream_url)
         except Exception:
             pass
-        return web.json_response({"error": {"message": str(e)}}, status=502)
+        return web.json_response({"error": {"message": error, "type": err_type}}, status=502)
 
 
 async def handle_health(request: web.Request) -> web.Response:

@@ -155,7 +155,18 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
         # 2. Open Free Provider (Streaming SSE)
         if model.startswith("open-free/") and stream:
             self.open_stream_calls += 1
-            if model == "open-free/empty-stream-test" and self.open_stream_calls == 1:
+            if model == "open-free/stream-mid-disconnect":
+                response = web.StreamResponse(
+                    status=200,
+                    headers={"Content-Type": "text/event-stream"}
+                )
+                await response.prepare(request)
+                c_data = json.dumps({"choices": [{"delta": {"content": "Hello before drop"}}]})
+                await response.write(f"data: {c_data}\n\n".encode("utf-8"))
+                if request.transport:
+                    request.transport.close()
+                return response
+            elif model == "open-free/empty-stream-test" and self.open_stream_calls == 1:
                 # Upstream sends HTTP 200 SSE with empty role/null chunks and immediate [DONE]
                 response = web.StreamResponse(
                     status=200,
@@ -309,6 +320,20 @@ class TestRateLimitAbsorptionE2E(AioHTTPTestCase):
         content = await resp.text()
         self.assertIn("Streamed", content)
         self.assertIn("successfully!", content)
+
+    async def test_upstream_stream_disconnect_emits_valid_sse_error_and_eof(self):
+        """When upstream stream abruptly disconnects mid-stream after headers were sent, proxy emits SSE error and EOF."""
+        payload = {
+            "model": "open-free/stream-mid-disconnect",
+            "messages": [{"role": "user", "content": "Test disconnect"}],
+            "stream": True
+        }
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 200)
+        content = await resp.text()
+        self.assertIn("Hello before drop", content)
+        self.assertIn("upstream_stream_error", content)
+        self.assertIn("data: [DONE]", content)
 
     async def test_institutional_provider_strictly_zero_retries(self):
         """For institutional providers with max_retries=0 / enabled=False, exactly 1 attempt must be made."""
