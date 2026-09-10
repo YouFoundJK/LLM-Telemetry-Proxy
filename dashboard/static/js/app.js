@@ -1916,135 +1916,140 @@ const App = (() => {
 
   function renderRoutesUI() {
     if (!State.routesConfig) return;
-    const defRoute = State.routesConfig.default_route || {};
-    const routes = State.routesConfig.routes || [];
-    const defMaxConcInput = document.getElementById('defaultRouterMaxConcurrent');
-    const upstreamInput = document.getElementById('proxyConfigUpstream');
+    try {
+      const defRoute = State.routesConfig.default_route || {};
+      const routes = State.routesConfig.routes || [];
+      const defMaxConcInput = document.getElementById('defaultRouterMaxConcurrent');
+      const upstreamInput = document.getElementById('proxyConfigUpstream');
 
-    if (defMaxConcInput && document.activeElement !== defMaxConcInput) {
-      defMaxConcInput.value = defRoute.max_concurrent ?? 4;
-    }
-    if (defRoute.upstream_url && upstreamInput && document.activeElement !== upstreamInput && !State.userEditingConfig) {
-      upstreamInput.value = defRoute.upstream_url;
-      if (State.runningProxyConfig) {
-        State.runningProxyConfig.upstream = defRoute.upstream_url;
+      if (defMaxConcInput && document.activeElement !== defMaxConcInput) {
+        defMaxConcInput.value = defRoute.max_concurrent ?? 4;
       }
-    }
+      if (defRoute.upstream_url && upstreamInput && document.activeElement !== upstreamInput && !State.userEditingConfig) {
+        upstreamInput.value = defRoute.upstream_url;
+        if (State.runningProxyConfig) {
+          State.runningProxyConfig.upstream = defRoute.upstream_url;
+        }
+      }
 
-    // Active routes count badge
-    const activeBadge = document.getElementById('activeRoutesCountBadge');
-    const activeCount = routes.filter(r => r.enabled).length;
-    if (activeBadge) {
-      activeBadge.textContent = `${activeCount} / ${routes.length} active rule${routes.length === 1 ? '' : 's'}`;
-    }
+      // Active routes count badge
+      const activeBadge = document.getElementById('activeRoutesCountBadge');
+      const activeCount = routes.filter(r => r.enabled).length;
+      if (activeBadge) {
+        activeBadge.textContent = `${activeCount} / ${routes.length} active rule${routes.length === 1 ? '' : 's'}`;
+      }
 
-    // Render table rows
-    const tbody = document.getElementById('modelRoutesTableBody');
-    if (!tbody) return;
+      // Render table rows
+      const tbody = document.getElementById('modelRoutesTableBody');
+      if (!tbody) return;
 
-    if (!routes || routes.length === 0) {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 16px;">
-            No custom routing rules configured. All models route to the default upstream.
-          </td>
-        </tr>
-      `;
-      return;
-    }
+      if (!routes || routes.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 16px;">
+              No custom routing rules configured. All models route to the default upstream.
+            </td>
+          </tr>
+        `;
+        return;
+      }
 
-    tbody.innerHTML = routes.map((r, idx) => {
-      const isEnabled = Boolean(r.enabled);
-      const statusBadge = isEnabled
-        ? '<span class="badge-status-active">Active</span>'
-        : '<span class="badge-status-inactive">Disabled</span>';
-      const maxConcVal = r.max_concurrent ?? 4;
-      const stats = r.limiter_stats || {};
-      const activeRunning = stats.active || 0;
-      const rp = r.retry_policy;
-      const retriesDisabled = (rp && (rp.enabled === false || rp.max_retries === 0));
-      const retryBadge = retriesDisabled
-        ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
-        : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${rp?.max_retries ?? 3} retries (${rp?.mode || 'immediate'})">🔄 ${rp?.max_retries ?? 3} (${rp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
+      tbody.innerHTML = routes.map((r, idx) => {
+        const isEnabled = Boolean(r.enabled);
+        const statusBadge = isEnabled
+          ? '<span class="badge-status-active">Active</span>'
+          : '<span class="badge-status-inactive">Disabled</span>';
+        const maxConcVal = r.max_concurrent ?? 4;
+        const stats = r.limiter_stats || {};
+        const activeRunning = stats.active || 0;
+        const waitingQueued = stats.queued || stats.waiting || 0;
+        const rp = r.retry_policy;
+        const retriesDisabled = (rp && (rp.enabled === false || rp.max_retries === 0));
+        const retryBadge = retriesDisabled
+          ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
+          : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${rp?.max_retries ?? 3} retries (${rp?.mode || 'immediate'})">🔄 ${rp?.max_retries ?? 3} (${rp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
 
-      return `
-        <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
-          <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}</td>
-          <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
-          <td><code class="code-tag">${UI.escapeHtml(r.pattern)}</code></td>
-          <td class="monospace-input" style="color: var(--accent); font-size: 11px;">${UI.escapeHtml(r.upstream_url)}</td>
-          <td>
-            <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
-            ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
-          </td>
-          <td>${retryBadge}</td>
-          <td>${statusBadge}</td>
-          <td style="text-align: right; white-space: nowrap;">
-            <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
-            <button class="btn-icon-action move-down-btn" title="Move Down" data-idx="${idx}" ${idx === routes.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>▼</button>
-            <button class="btn-icon-action toggle-enable-btn" title="${isEnabled ? 'Disable' : 'Enable'}" data-idx="${idx}">⚡</button>
-            <button class="btn-icon-action edit-route-btn" title="Edit Rule" data-idx="${idx}">✏️</button>
-            <button class="btn-icon-action danger delete-route-btn" title="Delete Rule" data-idx="${idx}">🗑️</button>
-          </td>
-        </tr>
-      `;
-    }).join('');
+        return `
+          <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
+            <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}</td>
+            <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
+            <td><code class="code-tag">${UI.escapeHtml(r.pattern)}</code></td>
+            <td class="monospace-input" style="color: var(--accent); font-size: 11px;">${UI.escapeHtml(r.upstream_url)}</td>
+            <td>
+              <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
+              ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
+            </td>
+            <td>${retryBadge}</td>
+            <td>${statusBadge}</td>
+            <td style="text-align: right; white-space: nowrap;">
+              <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
+              <button class="btn-icon-action move-down-btn" title="Move Down" data-idx="${idx}" ${idx === routes.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>▼</button>
+              <button class="btn-icon-action toggle-enable-btn" title="${isEnabled ? 'Disable' : 'Enable'}" data-idx="${idx}">⚡</button>
+              <button class="btn-icon-action edit-route-btn" title="Edit Rule" data-idx="${idx}">✏️</button>
+              <button class="btn-icon-action danger delete-route-btn" title="Delete Rule" data-idx="${idx}">🗑️</button>
+            </td>
+          </tr>
+        `;
+      }).join('');
 
-    // Attach table action handlers
-    tbody.querySelectorAll('.move-up-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const idx = parseInt(btn.dataset.idx, 10);
-        if (idx > 0) {
-          const temp = routes[idx];
-          routes[idx] = routes[idx - 1];
-          routes[idx - 1] = temp;
-          routes.forEach((item, i) => { item.priority = 100 - i * 10; });
+      // Attach table action handlers
+      tbody.querySelectorAll('.move-up-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          if (idx > 0) {
+            const temp = routes[idx];
+            routes[idx] = routes[idx - 1];
+            routes[idx - 1] = temp;
+            routes.forEach((item, i) => { item.priority = 100 - i * 10; });
+            renderRoutesUI();
+            saveAllRoutesConfig(false);
+          }
+        });
+      });
+
+      tbody.querySelectorAll('.move-down-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          if (idx < routes.length - 1) {
+            const temp = routes[idx];
+            routes[idx] = routes[idx + 1];
+            routes[idx + 1] = temp;
+            routes.forEach((item, i) => { item.priority = 100 - i * 10; });
+            renderRoutesUI();
+            saveAllRoutesConfig(false);
+          }
+        });
+      });
+
+      tbody.querySelectorAll('.toggle-enable-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          routes[idx].enabled = !routes[idx].enabled;
           renderRoutesUI();
           saveAllRoutesConfig(false);
-        }
+        });
       });
-    });
 
-    tbody.querySelectorAll('.move-down-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const idx = parseInt(btn.dataset.idx, 10);
-        if (idx < routes.length - 1) {
-          const temp = routes[idx];
-          routes[idx] = routes[idx + 1];
-          routes[idx + 1] = temp;
-          routes.forEach((item, i) => { item.priority = 100 - i * 10; });
-          renderRoutesUI();
-          saveAllRoutesConfig(false);
-        }
+      tbody.querySelectorAll('.edit-route-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          openRouteModal(routes[idx]);
+        });
       });
-    });
 
-    tbody.querySelectorAll('.toggle-enable-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.dataset.idx, 10);
-        routes[idx].enabled = !routes[idx].enabled;
-        renderRoutesUI();
-        saveAllRoutesConfig(false);
+      tbody.querySelectorAll('.delete-route-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          if (confirm(`Delete route rule "${routes[idx].name || routes[idx].pattern}"?`)) {
+            routes.splice(idx, 1);
+            renderRoutesUI();
+            saveAllRoutesConfig(false);
+          }
+        });
       });
-    });
-
-    tbody.querySelectorAll('.edit-route-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.dataset.idx, 10);
-        openRouteModal(routes[idx]);
-      });
-    });
-
-    tbody.querySelectorAll('.delete-route-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.dataset.idx, 10);
-        if (confirm(`Delete route rule "${routes[idx].name || routes[idx].pattern}"?`)) {
-          routes.splice(idx, 1);
-          renderRoutesUI();
-          saveAllRoutesConfig(false);
-        }
-      });
-    });
+    } catch (err) {
+      console.error('Error rendering routes UI:', err);
+    }
   }
 
   function openRouteModal(rule = null) {

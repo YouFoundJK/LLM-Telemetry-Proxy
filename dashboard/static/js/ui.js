@@ -1724,14 +1724,34 @@ const UI = (() => {
       headerText.textContent = isRunning ? `Proxy: ${port}` : 'Proxy: Offline';
     }
 
-    // 2. Compute Active Concurrency & Queue
+    // 2. Compute Active Concurrency & Queue (aggregating default + all enabled custom routes)
     let concurrencyStr = isRunning ? '0 / 4 (0)' : '—';
     let activeCount = 0;
+    let maxCount = 4;
     let queuedCount = 0;
-    if (status.health && status.health.rate_limiter) {
+
+    if (status.health && status.health.limiters_summary) {
+      const sum = status.health.limiters_summary;
+      const def = sum.default || {};
+      const defStats = def.stats || {};
+      activeCount = defStats.active || 0;
+      maxCount = defStats.max_concurrent || 4;
+      queuedCount = defStats.queued || 0;
+
+      const customRoutes = sum.routes || [];
+      for (const r of customRoutes) {
+        if (r.enabled !== false) {
+          const st = r.stats || {};
+          activeCount += (st.active || 0);
+          maxCount += (st.max_concurrent || 0);
+          queuedCount += (st.queued || 0);
+        }
+      }
+      concurrencyStr = `${activeCount} / ${maxCount} (${queuedCount})`;
+    } else if (status.health && status.health.rate_limiter) {
       const rl = status.health.rate_limiter;
       activeCount = rl.active || 0;
-      const maxCount = rl.max_concurrent || 4;
+      maxCount = rl.max_concurrent || 4;
       queuedCount = rl.queued || 0;
       concurrencyStr = `${activeCount} / ${maxCount} (${queuedCount})`;
     }
@@ -1757,8 +1777,9 @@ const UI = (() => {
     // Render hover popover dropdown list with per-route concurrency & queues
     const dropdownList = document.getElementById('headerConcurrencyDropdownList');
     if (dropdownList) {
+      let targetHtml = '';
       if (!isRunning) {
-        dropdownList.innerHTML = '<div class="concurrency-dropdown-empty">Proxy Gateway is stopped.</div>';
+        targetHtml = '<div class="concurrency-dropdown-empty">Proxy Gateway is stopped.</div>';
       } else if (status.health && status.health.limiters_summary) {
         const sum = status.health.limiters_summary;
         const def = sum.default || {};
@@ -1802,20 +1823,26 @@ const UI = (() => {
           }).join('');
         }
 
-        dropdownList.innerHTML = rowsHtml;
+        targetHtml = rowsHtml;
       } else {
-        dropdownList.innerHTML = `
+        targetHtml = `
           <div class="concurrency-item-row ${queuedCount > 0 ? 'is-queued' : (activeCount > 0 ? 'is-active' : '')}">
             <div class="concurrency-item-left">
               <div class="concurrency-item-name">Default Upstream</div>
               <div class="concurrency-item-pattern">${escapeHtml(upstream)}</div>
             </div>
             <div class="concurrency-item-right">
-              <span class="concurrency-pill ${activeCount > 0 ? 'active' : ''}">${activeCount} / 4</span>
+              <span class="concurrency-pill ${activeCount > 0 ? 'active' : ''}">${activeCount} / ${maxCount}</span>
               ${queuedCount > 0 ? `<span class="concurrency-pill queued">Q: ${queuedCount}</span>` : ''}
             </div>
           </div>
         `;
+      }
+
+      if (dropdownList.innerHTML !== targetHtml) {
+        const prevScroll = dropdownList.scrollTop;
+        dropdownList.innerHTML = targetHtml;
+        dropdownList.scrollTop = prevScroll;
       }
     }
 

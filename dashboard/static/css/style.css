@@ -61,7 +61,7 @@ body {
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  z-index: 100;
+  z-index: 1000;
   padding: 0 24px;
 }
 
@@ -243,6 +243,10 @@ body {
   transition: transform 0.2s;
 }
 
+.custom-select-wrapper.open {
+  z-index: 200;
+}
+
 .custom-select-wrapper.open .custom-select-trigger:after {
   transform: rotate(180deg);
 }
@@ -261,7 +265,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-  z-index: 150;
+  z-index: 250;
   display: none;
   max-height: 240px;
   overflow-y: auto;
@@ -874,7 +878,7 @@ td.num {
 .modal {
   display: none; 
   position: fixed; 
-  z-index: 1000; 
+  z-index: 2000; 
   left: 0;
   top: 0;
   width: 100%; 
@@ -1020,7 +1024,7 @@ td.num {
   border: none;
   cursor: pointer;
   padding: 0;
-  z-index: 250;
+  z-index: 1200;
   margin-left: 16px;
 }
 
@@ -1055,7 +1059,7 @@ td.num {
   height: 100vh;
   background: rgba(8, 11, 16, 0.65);
   backdrop-filter: blur(5px);
-  z-index: 190;
+  z-index: 1050;
   opacity: 0;
   transition: opacity 0.3s ease;
   pointer-events: none;
@@ -1134,7 +1138,7 @@ td.num {
     gap: 0;
     padding: 80px 20px 20px 20px;
     box-shadow: -8px 0 24px rgba(0,0,0,0.6);
-    z-index: 200;
+    z-index: 1150;
     transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
   
@@ -1935,6 +1939,7 @@ td.num {
   position: relative;
   display: inline-flex;
   align-items: center;
+  z-index: 1100;
 }
 
 .header-concurrency-dropdown {
@@ -1964,10 +1969,10 @@ td.num {
 .header-concurrency-dropdown::before {
   content: "";
   position: absolute;
-  top: -10px;
+  top: -12px;
   left: 0;
   right: 0;
-  height: 10px;
+  height: 14px;
 }
 
 .concurrency-dropdown-header {
