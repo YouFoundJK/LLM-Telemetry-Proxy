@@ -392,9 +392,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             return response
         return web.json_response({"error": {"message": f"Upstream timeout: {error}", "type": "upstream_timeout"}}, status=504)
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancel_err:
+        cancel_detail = str(cancel_err).strip() or "Client disconnected / request aborted"
+        error = f"client_cancelled: {cancel_detail}"
         _log_forward_failure(model, path, method, call_type, input_tokens, output_tokens, reasoning_tokens,
-                             ttfb_ms, t_start, 499, "client_cancelled", route_name, active_upstream_url if 'active_upstream_url' in locals() else upstream_url,
+                             ttfb_ms, t_start, 499, error, route_name, active_upstream_url if 'active_upstream_url' in locals() else upstream_url,
                              server_running, server_tok_s, server_model, req_id, request.headers, payload, is_stream_req, req_seq, request.remote, logged)
         raise
 
@@ -533,9 +535,11 @@ async def _simple_forward(request, path, method):
         except Exception:
             pass
         return web.json_response({"error": {"message": f"Upstream timeout: {error}", "type": "upstream_timeout"}}, status=504)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancel_err:
+        cancel_detail = str(cancel_err).strip() or "Client disconnected / request aborted"
+        error = f"client_cancelled: {cancel_detail}"
         try:
-            log_proxy_call(path, method, classify_endpoint(path), None, 499, "client_cancelled", 0, None, (time.monotonic() - t_start) * 1000,
+            log_proxy_call(path, method, classify_endpoint(path), None, 499, error, 0, None, (time.monotonic() - t_start) * 1000,
                            route_name=_model_router.default_name, upstream_url=upstream_url)
         except Exception:
             pass

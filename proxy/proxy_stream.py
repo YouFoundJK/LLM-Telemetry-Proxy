@@ -407,10 +407,11 @@ async def handle_streaming_upstream(
             _parse_sse_chunk(chunk)
 
         await response.write_eof()
-    except (RuntimeError, ConnectionResetError, BrokenPipeError, AssertionError) as client_disconn_err:
+    except (RuntimeError, ConnectionResetError, BrokenPipeError, AssertionError, ConnectionError, OSError) as client_disconn_err:
         client_disconnected = True
-        tlog_fn(f"[telemetry] [CLIENT DISCONNECTED] req_id={req_id} model={model}: {client_disconn_err}")
-        error = "client_cancelled"
+        disconn_detail = str(client_disconn_err).strip() or type(client_disconn_err).__name__
+        error = f"client_cancelled: {disconn_detail}"
+        tlog_fn(f"[telemetry] [CLIENT DISCONNECTED] req_id={req_id} model={model}: {disconn_detail}")
     except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as up_err:
         stream_error = up_err
         if isinstance(up_err, asyncio.TimeoutError):
@@ -438,8 +439,10 @@ async def handle_streaming_upstream(
             await response.write(f"data: {sse_err}\n\n".encode("utf-8"))
             await response.write(b"data: [DONE]\n\n")
             await response.write_eof()
-        except (RuntimeError, ConnectionResetError, BrokenPipeError, AssertionError):
+        except (RuntimeError, ConnectionResetError, BrokenPipeError, AssertionError, ConnectionError, OSError) as write_err:
             client_disconnected = True
+            disconn_detail = str(write_err).strip() or type(write_err).__name__
+            error = f"client_cancelled: {disconn_detail}"
 
     if client_disconnected:
         t_total = (time.monotonic() - t_start) * 1000
@@ -456,6 +459,20 @@ async def handle_streaming_upstream(
             log_proxy_call(path, method, call_type, model, 499, error, 1, ttfb_ms, t_total,
                            route_name=route_name, upstream_url=active_upstream_url,
                            retries_attempted=attempt, absorbed_429=1 if attempt > 0 else 0)
+            if payload_inspector._raw_logging_enabled:
+                raw_record = payload_inspector.make_raw_payload_record(
+                    req_id=req_id, path=path, method=method, call_type=call_type, model=model,
+                    client_ip=request.remote, req_headers=dict(request.headers), payload_obj=payload,
+                    status_code=499, resp_headers=dict(upstream_resp.headers), is_stream=True,
+                    ttfb_ms=ttfb_ms, total_ms=t_total, tokens_per_s=tokens_per_s,
+                    input_tokens=input_tokens, output_tokens=output_tokens, reasoning_tokens=reasoning_tokens,
+                    content_text=collected_content, reasoning_text=collected_reasoning,
+                    tool_calls=collected_tool_calls if collected_tool_calls else None,
+                    raw_resp_json=None, error=error, seq=req_seq,
+                )
+                payload_inspector.append_raw_payload(raw_record)
+                if payload_inspector._raw_subscribers:
+                    asyncio.create_task(payload_inspector.broadcast_raw_payload(raw_record))
         except Exception:
             pass
         return response, False, 0.0, None
