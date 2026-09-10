@@ -26,10 +26,13 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = REPO_ROOT / "dist"
+_print_lock = threading.Lock()
 
 
 def log(msg: str):
@@ -119,12 +122,18 @@ def check_toolchain() -> bool:
     return ok
 
 
+def log_target(target_name: str, msg: str, color_code: str = "36"):
+    with _print_lock:
+        print(f"\033[1;{color_code}m[{target_name}]\033[0m {msg}", flush=True)
+
+
 def compile_target(
     target_name: str,
     entry_script: Path,
     output_dir: Path,
     lto: str = "auto",
     jobs: int = 0,
+    color_code: str = "36",
 ) -> bool:
     """Compile a Python entry point into a native binary using Nuitka."""
     if not entry_script.exists():
@@ -135,9 +144,10 @@ def compile_target(
     bin_name = target_name
     exe_suffix = ".exe" if sys.platform == "win32" else ".bin"
     output_bin_name = f"{bin_name}{exe_suffix}"
+    build_log_path = output_dir / f"{target_name}_build.log"
 
-    log(f"Starting compilation of {target_name} ({entry_script.name})...")
-    log(f"Target binary: {output_dir / output_bin_name}")
+    log_target(target_name, f"Starting compilation of {entry_script.name} -> {output_bin_name}", color_code)
+    log_target(target_name, f"Verbose build log: {build_log_path}", color_code)
 
     if jobs <= 0:
         jobs = max(1, os.cpu_count() or 1)
@@ -182,11 +192,32 @@ def compile_target(
 
     cmd.append(str(entry_script))
 
-    log(f"Executing: {' '.join(cmd)}")
+    log_target(target_name, f"Running: {' '.join(cmd[:6])} ... {cmd[-1]}", color_code)
     try:
-        res = subprocess.run(cmd, cwd=str(REPO_ROOT))
-        if res.returncode != 0:
-            log_error(f"Nuitka compilation failed with exit code {res.returncode}")
+        with open(build_log_path, "w", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in iter(proc.stdout.readline, ""):
+                log_file.write(line)
+                log_file.flush()
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Highlight meaningful milestone messages
+                if any(k in stripped for k in ("PASS ", "Compiling", "Linking", "Total time", "WARNING:", "ERROR:", "Nuitka: Starting")):
+                    log_target(target_name, stripped, color_code)
+
+            proc.stdout.close()
+            returncode = proc.wait()
+
+        if returncode != 0:
+            log_error(f"Compilation of {target_name} failed with exit code {returncode}. See {build_log_path}")
             return False
 
         # Locate the compiled executable
@@ -205,7 +236,7 @@ def compile_target(
                 break
 
         if not compiled_bin:
-            log_error(f"Compiled binary not found in expected paths under {dist_folder}")
+            log_error(f"Compiled binary not found in expected paths under {dist_folder}. See {build_log_path}")
             return False
 
         # Create root-level convenience launcher / symlink in output_dir
@@ -234,14 +265,11 @@ def compile_target(
                 pass
 
         size_mb = compiled_bin.stat().st_size / (1024 * 1024)
-        log_success(f"Successfully compiled {target_name}!")
-        log_success(f"Binary path : {compiled_bin} ({size_mb:.1f} MB)")
-        if root_bin.exists() and root_bin != compiled_bin:
-            log_success(f"Direct link : {root_bin}")
+        log_success(f"Successfully compiled {target_name}! ({compiled_bin.name}: {size_mb:.1f} MB)")
         return True
 
     except Exception as e:
-        log_error(f"Unexpected error during compilation: {e}")
+        log_error(f"Unexpected error during compilation of {target_name}: {e}")
         return False
 
 
@@ -279,6 +307,11 @@ def main():
         help="Clean dist directory before compilation",
     )
     parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Compile targets one after another instead of in parallel",
+    )
+    parser.add_argument(
         "--check-only",
         action="store_true",
         help="Only check toolchain requirements without compiling",
@@ -305,24 +338,60 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     targets = []
+    colors = ["36", "35", "33", "32"]  # cyan, magenta, yellow, green
     if args.target in ("proxy", "all"):
         targets.append(("llm_telemetry_proxy", REPO_ROOT / "proxy" / "llm_telemetry_proxy.py"))
     if args.target in ("dashboard", "all"):
         targets.append(("dashboard_server", REPO_ROOT / "dashboard" / "server.py"))
 
+    total_cpus = os.cpu_count() or 1
+    if args.jobs > 0:
+        jobs_per_target = args.jobs
+    else:
+        # Distribute available CPU cores evenly across concurrent compilation jobs
+        jobs_per_target = max(1, total_cpus // len(targets)) if not args.sequential else total_cpus
+
     success_count = 0
-    for name, script in targets:
-        ok = compile_target(
-            target_name=name,
-            entry_script=script,
-            output_dir=out_dir,
-            lto=args.lto,
-            jobs=args.jobs,
-        )
-        if ok:
-            success_count += 1
-        else:
-            log_error(f"Failed to build {name}")
+    if len(targets) > 1 and not args.sequential:
+        log(f"Parallel compilation active: compiling {len(targets)} targets simultaneously")
+        log(f"Allocating {jobs_per_target} C-compiler jobs per target (total system cores: {total_cpus})")
+
+        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+            future_to_target = {}
+            for idx, (name, script) in enumerate(targets):
+                color = colors[idx % len(colors)]
+                future = executor.submit(
+                    compile_target,
+                    target_name=name,
+                    entry_script=script,
+                    output_dir=out_dir,
+                    lto=args.lto,
+                    jobs=jobs_per_target,
+                    color_code=color,
+                )
+                future_to_target[future] = name
+
+            for future in as_completed(future_to_target):
+                name = future_to_target[future]
+                try:
+                    ok = future.result()
+                    if ok:
+                        success_count += 1
+                except Exception as e:
+                    log_error(f"Target {name} crashed: {e}")
+    else:
+        for idx, (name, script) in enumerate(targets):
+            color = colors[idx % len(colors)]
+            ok = compile_target(
+                target_name=name,
+                entry_script=script,
+                output_dir=out_dir,
+                lto=args.lto,
+                jobs=jobs_per_target,
+                color_code=color,
+            )
+            if ok:
+                success_count += 1
 
     print("=" * 65)
     if success_count == len(targets):

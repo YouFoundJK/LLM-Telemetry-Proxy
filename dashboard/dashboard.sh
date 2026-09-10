@@ -22,6 +22,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export REPO_ROOT
+export LLM_PROXY_REPO_ROOT="$REPO_ROOT"
 DATA_DIR="$REPO_ROOT/data"
 DASHBOARD_PID_FILE="$DATA_DIR/.dashboard.pid"
 DASHBOARD_PORT_FILE="$DATA_DIR/.dashboard.port"
@@ -254,6 +256,8 @@ start_dashboard() {
         "$REPO_ROOT/dist/dashboard_server" \
         "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server.bin" \
         "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server" \
+        "$REPO_ROOT/dist/server.dist/dashboard_server.bin" \
+        "$REPO_ROOT/dist/server.dist/dashboard_server" \
         "$REPO_ROOT/bin/dashboard_server.bin" \
         "$REPO_ROOT/bin/dashboard_server"; do
         if [[ -x "$candidate" ]]; then

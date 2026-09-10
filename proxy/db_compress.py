@@ -13,10 +13,44 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Optional
 import sys
 
+def resolve_repo_root(start_file: Optional[Path] = None) -> Path:
+    """Accurately locate the repository root under Python and Nuitka standalone binary execution."""
+    for env_key in ("LLM_PROXY_REPO_ROOT", "REPO_ROOT"):
+        val = os.environ.get(env_key)
+        if val and Path(val).is_dir():
+            return Path(val).resolve()
+
+    start = (start_file or Path(__file__)).resolve()
+    for p in [start.parent] + list(start.parents):
+        if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
+            return p
+        if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
+            return p
+
+    try:
+        cwd = Path.cwd().resolve()
+        for p in [cwd] + list(cwd.parents):
+            if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
+                return p
+            if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
+                return p
+    except Exception:
+        pass
+
+    p = start.parent
+    if p.name.endswith(".dist"):
+        return p.parent.parent
+    if p.name == "dist":
+        return p.parent
+    return p.parent
+
+
+REPO_ROOT = resolve_repo_root(Path(__file__))
 env_db_path = os.environ.get("TELEMETRY_DB_PATH")
-DB_PATH = Path(env_db_path) if env_db_path else (Path(__file__).resolve().parent.parent / "data" / "llm_telemetry.db")
+DB_PATH = Path(env_db_path) if env_db_path else (REPO_ROOT / "data" / "llm_telemetry.db")
 BASE_EPOCH = datetime(2026, 1, 5, 0, 0, 0, tzinfo=timezone.utc) # Monday
 
 def backup_db(db_path):

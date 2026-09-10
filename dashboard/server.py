@@ -26,17 +26,44 @@ import asyncio
 import aiohttp
 from aiohttp import web
 
-_this_file = Path(__file__).resolve()
-if _this_file.parent.name.endswith(".dist") or _this_file.parent.name == "dist":
-    # Compiled standalone binary in dist/ or dist/target.dist/
-    REPO_ROOT = _this_file.parent.parent if _this_file.parent.name.endswith(".dist") else _this_file.parent.parent
-    if (REPO_ROOT / "dist").exists() and not (REPO_ROOT / "dashboard").exists():
-        # Extra safeguard if placed directly in dist/
-        REPO_ROOT = REPO_ROOT.parent
-    DASHBOARD_DIR = REPO_ROOT / "dashboard"
-else:
-    DASHBOARD_DIR = _this_file.parent
-    REPO_ROOT = DASHBOARD_DIR.parent
+def resolve_repo_root(start_file: Optional[Path] = None) -> Path:
+    """Accurately locate the repository root under Python and Nuitka standalone binary execution."""
+    # 1. Environment variable override from dashboard.sh / start.sh
+    for env_key in ("LLM_PROXY_REPO_ROOT", "REPO_ROOT"):
+        val = os.environ.get(env_key)
+        if val and Path(val).is_dir():
+            return Path(val).resolve()
+
+    # 2. Check parents of start_file for repository indicators
+    start = (start_file or Path(__file__)).resolve()
+    for p in [start.parent] + list(start.parents):
+        if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
+            return p
+        if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
+            return p
+
+    # 3. Check current working directory
+    try:
+        cwd = Path.cwd().resolve()
+        for p in [cwd] + list(cwd.parents):
+            if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
+                return p
+            if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
+                return p
+    except Exception:
+        pass
+
+    # 4. Fallback for Nuitka standalone directories (dist/<name>.dist/<name>.bin)
+    p = start.parent
+    if p.name.endswith(".dist"):
+        return p.parent.parent
+    if p.name == "dist":
+        return p.parent
+    return p.parent
+
+
+REPO_ROOT = resolve_repo_root(Path(__file__))
+DASHBOARD_DIR = REPO_ROOT / "dashboard"
 
 # Ensure proxy module can be imported
 if str(REPO_ROOT) not in sys.path:
@@ -1624,7 +1651,7 @@ def create_app():
     app.router.add_get("/inspector/css/{filename}", handle_css_asset)
 
     static_dir = get_static_dir_path()
-    static_dir.mkdir(exist_ok=True)
+    static_dir.mkdir(parents=True, exist_ok=True)
     app.router.add_static("/static", path=static_dir, name="static")
     app.router.add_static("/static/", path=static_dir)
 

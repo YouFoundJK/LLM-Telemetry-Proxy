@@ -21,8 +21,40 @@ from typing import Optional, Dict, Any, Tuple
 
 import aiohttp
 
-DASHBOARD_DIR = Path(__file__).resolve().parent
-REPO_ROOT = DASHBOARD_DIR.parent
+def resolve_repo_root(start_file: Optional[Path] = None) -> Path:
+    """Accurately locate the repository root under Python and Nuitka standalone binary execution."""
+    for env_key in ("LLM_PROXY_REPO_ROOT", "REPO_ROOT"):
+        val = os.environ.get(env_key)
+        if val and Path(val).is_dir():
+            return Path(val).resolve()
+
+    start = (start_file or Path(__file__)).resolve()
+    for p in [start.parent] + list(start.parents):
+        if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
+            return p
+        if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
+            return p
+
+    try:
+        cwd = Path.cwd().resolve()
+        for p in [cwd] + list(cwd.parents):
+            if (p / "proxy" / "llm_telemetry_proxy.py").is_file():
+                return p
+            if (p / "proxy").is_dir() and ((p / "dashboard").is_dir() or (p / "data").is_dir()):
+                return p
+    except Exception:
+        pass
+
+    p = start.parent
+    if p.name.endswith(".dist"):
+        return p.parent.parent
+    if p.name == "dist":
+        return p.parent
+    return p.parent
+
+
+REPO_ROOT = resolve_repo_root(Path(__file__))
+DASHBOARD_DIR = REPO_ROOT / "dashboard"
 
 DEFAULT_PROXY_PORT = 9090
 DEFAULT_UPSTREAM = "https://llm.ai.e-infra.cz/v1"
