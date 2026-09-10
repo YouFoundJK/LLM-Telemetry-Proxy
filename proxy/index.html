@@ -630,6 +630,56 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#5-247-production-engine-native-binary-execution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 24/7 Production Engine &amp; Native Binary Execution
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. 24/7 Production Engine &amp; Native Binary Execution">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#execution-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution Modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pre-compiling-to-native-binary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pre-compiling to Native Binary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#benchmarking-profiling-tool-benchmark_monitorpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benchmarking &amp; Profiling Tool (benchmark_monitor.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -834,6 +884,56 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#5-247-production-engine-native-binary-execution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 24/7 Production Engine &amp; Native Binary Execution
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. 24/7 Production Engine &amp; Native Binary Execution">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#execution-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution Modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pre-compiling-to-native-binary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pre-compiling to Native Binary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#benchmarking-profiling-tool-benchmark_monitorpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benchmarking &amp; Profiling Tool (benchmark_monitor.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -914,6 +1014,66 @@
 - <code>api-key</code>, <code>x-api-key</code>, <code>x-auth-token</code> &rarr; Masked safely</p>
 <h4 id="sse-live-streaming">SSE Live Streaming</h4>
 <p>The proxy offers a Server-Sent Events (SSE) feed at <code>/v1/raw-log/stream</code> that transmits structured JSON payloads to the connected Payload Inspector UI with zero polling overhead.</p>
+<hr />
+<h3 id="5-247-production-engine-native-binary-execution">5. 24/7 Production Engine &amp; Native Binary Execution</h3>
+<p>To support permanent, uninterrupted execution on servers with minimal CPU and RAM footprints:</p>
+<h4 id="execution-modes">Execution Modes</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Feature</th>
+<th style="text-align: left;">Standard Python Script</th>
+<th style="text-align: left;">Pre-Compiled Native Binary (Nuitka)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Execution Path</strong></td>
+<td style="text-align: left;">CPython bytecode interpreter loop</td>
+<td style="text-align: left;">Standalone compiled C/C++ machine code (<code>ELF</code>)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Event Loop</strong></td>
+<td style="text-align: left;"><code>uvloop</code> (C / <code>libuv</code>)</td>
+<td style="text-align: left;"><code>uvloop</code> (compiled into binary)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>JSON Serialization</strong></td>
+<td style="text-align: left;"><code>orjson</code> (Rust SIMD)</td>
+<td style="text-align: left;"><code>orjson</code> (Rust SIMD compiled into binary)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Memory Allocator</strong></td>
+<td style="text-align: left;"><code>jemalloc</code> (<code>LD_PRELOAD</code>)</td>
+<td style="text-align: left;"><code>jemalloc</code> (<code>LD_PRELOAD</code>)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>GC Overhead</strong></td>
+<td style="text-align: left;"><code>gc.freeze()</code> permanent gen</td>
+<td style="text-align: left;">Native AST + <code>gc.freeze()</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Idle RAM Footprint</strong></td>
+<td style="text-align: left;">~35–45 MB</td>
+<td style="text-align: left;"><strong>~18–25 MB</strong></td>
+</tr>
+</tbody>
+</table>
+<h4 id="pre-compiling-to-native-binary">Pre-compiling to Native Binary</h4>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Compile via control script</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>./start.sh<span class="w"> </span>build
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="c1"># Restart proxy (prioritizes native binary automatically)</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>./start.sh<span class="w"> </span>proxy<span class="w"> </span>restart
+</span></code></pre></div>
+<h4 id="benchmarking-profiling-tool-benchmark_monitorpy">Benchmarking &amp; Profiling Tool (<code>benchmark_monitor.py</code>)</h4>
+<p>A standalone profiler is included in <code>scripts/benchmark_monitor.py</code> to sample real-time RSS memory, CPU%, threads, open sockets, and response latencies:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># Profile current proxy for 30 minutes</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>record<span class="w"> </span>--output<span class="w"> </span>baseline.csv<span class="w"> </span>--duration<span class="w"> </span><span class="m">1800</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="c1"># Compare two benchmark recordings</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>compare<span class="w"> </span>baseline.csv<span class="w"> </span>native.csv
+</span></code></pre></div>
 
 
 

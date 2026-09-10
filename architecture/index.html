@@ -580,6 +580,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#high-performance-execution-storage-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ⚡ High-Performance Execution &amp; Storage Pipeline
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -777,6 +788,17 @@
     <span class="md-ellipsis">
       
         🗜 Historical Compaction Strategy (db_compress.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#high-performance-execution-storage-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ⚡ High-Performance Execution &amp; Storage Pipeline
       
     </span>
   </a>
@@ -1045,6 +1067,45 @@
 <li><code>ttfb_ms</code>, <code>total_ms</code>, <code>tokens_per_s</code>, and <code>server_running</code> are weighted by <code>calls_count</code>.</li>
 <li><code>calls_count</code> is incremented to represent the aggregated batch size.</li>
 <li><strong>Zero-Downtime Vacuum</strong>: The compressor runs inside an ACID SQLite transaction with automatic <code>.db.bak</code> creation, rollback protection, and <code>VACUUM</code> space reclamation.</li>
+</ol>
+<hr />
+<h2 id="high-performance-execution-storage-pipeline">⚡ High-Performance Execution &amp; Storage Pipeline</h2>
+<p>For perpetual 24/7 server deployments, the architecture integrates a dedicated multi-layer acceleration engine:</p>
+<pre class="mermaid"><code>flowchart LR
+    subgraph ExecutionLayer [Execution Runtime]
+        Bin[Pre-Compiled Native Binary - Nuitka ELF]
+        Py[Accelerated Python Engine]
+    end
+
+    subgraph CoreAccelerators [Core Accelerators]
+        UV[uvloop - C / libuv Event Loop]
+        ORJ[orjson - Rust SIMD Serialization]
+        JEM[jemalloc - Anti-Fragmentation Allocator]
+        GCF[gc.freeze - Permanent Generation Lock]
+    end
+
+    subgraph StorageEngine [Tuned Storage Layer]
+        WAL[SQLite WAL Mode - Concurrent Readers/Writers]
+        MemCache[PRAGMA cache_size = -32000 - 32MB RAM Cache]
+        FastSync[PRAGMA synchronous = NORMAL - 90% Fewer fsyncs]
+    end
+
+    Bin --&gt; UV
+    Py --&gt; UV
+    UV --&gt; ORJ
+    ORJ --&gt; GCF
+    Bin --&gt; JEM
+    Py --&gt; JEM
+    GCF --&gt; WAL
+    WAL --&gt; MemCache
+    MemCache --&gt; FastSync</code></pre>
+<ol>
+<li><strong>Native Pre-Compilation</strong>: Compiles Python AST directly into optimized C machine code with GCC and Link-Time Optimization (<code>--lto=yes</code>), eliminating CPython bytecode evaluation overhead.</li>
+<li><strong>C-Based Async Event Loop (<code>uvloop</code>)</strong>: Replaces standard Python asyncio with <code>libuv</code>, yielding 2x–3x higher request throughput.</li>
+<li><strong>Rust SIMD Serialization (<code>fast_json</code> / <code>orjson</code>)</strong>: Bypasses UTF-8 string allocations by parsing directly from incoming raw network bytes.</li>
+<li><strong>Anti-Fragmentation Memory Management (<code>jemalloc</code>)</strong>: Preloaded via <code>LD_PRELOAD</code> to prevent Linux <code>glibc malloc</code> heap fragmentation during months of continuous streaming allocations.</li>
+<li><strong>Permanent GC Freezing (<code>gc.freeze()</code>)</strong>: Moves all static routes, regexes, and pricing mappings into Python's permanent generation post-boot, stopping cyclic GC sweeps from scanning immutable memory.</li>
+<li><strong>Concurrent SQLite WAL Engine</strong>: Keeps disk I/O off the critical path using write-ahead logging, memory-mapped I/O, and in-memory temporary storage.</li>
 </ol>
 
 
