@@ -166,14 +166,24 @@ def compile_target(
         "-m",
         "nuitka",
         "--standalone",
+        "--deployment",
         f"--output-dir={output_dir}",
         f"--jobs={jobs}",
-        "--include-package=proxy",
+        # Trace only the proxy modules actually imported by the entry point
+        "--follow-import-to=proxy",
         "--include-module=_json",
+        # Explicitly exclude CLI-only modules never imported by the proxy server
+        "--nofollow-import-to=proxy.db_compress",
+        "--nofollow-import-to=proxy.llm_telemetry_query",
+        # Python runtime optimizations — reduce heap memory footprint
+        "--python-flag=-OO",
+        "--python-flag=no_site",
         "--assume-yes-for-downloads",
         "--remove-output",
         "--no-prefer-source-code",
         f"--output-filename={output_bin_name}",
+        # Compilation diagnostic report
+        f"--report={output_dir / f'{target_name}_compilation_report.xml'}",
     ]
 
     # Configure ccache for fast incremental builds if installed
@@ -181,14 +191,6 @@ def compile_target(
     ccache_path = shutil.which("ccache")
     if ccache_path:
         env["NUITKA_CCACHE_BINARY"] = ccache_path
-
-    # Include high-performance packages in binary if present
-    for pkg in ("orjson", "uvloop"):
-        try:
-            __import__(pkg)
-            cmd.append(f"--include-package={pkg}")
-        except ImportError:
-            pass
 
     # Configure LTO (Link Time Optimization)
     if lto == "yes":
@@ -199,11 +201,18 @@ def compile_target(
         if sys.platform != "win32":
             cmd.append("--lto=auto")
 
-    # Anti-bloat exclusions to keep binary lean
+    # Anti-bloat: prevent test/dev/unused packages from being bundled
     cmd.extend([
-        "--noinclude-unittest-mode=allow",
-        "--noinclude-pytest-mode=allow",
-        "--noinclude-setuptools-mode=allow",
+        "--noinclude-unittest-mode=nofollow",
+        "--noinclude-pytest-mode=nofollow",
+        "--noinclude-setuptools-mode=nofollow",
+        "--noinclude-IPython-mode=nofollow",
+        # Exclude common stdlib bloat never used by the proxy
+        "--nofollow-import-to=doctest",
+        "--nofollow-import-to=pydoc",
+        "--nofollow-import-to=tkinter",
+        "--nofollow-import-to=distutils",
+        "--nofollow-import-to=ensurepip",
     ])
 
     cmd.append(str(entry_script))
