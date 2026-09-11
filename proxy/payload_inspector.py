@@ -400,6 +400,8 @@ async def handle_routes_test(request: web.Request) -> web.Response:
                 "resolved_upstream": c.upstream_url,
                 "is_default": c.is_default,
                 "pattern_matched": c.pattern_matched,
+                "priority": c.priority,
+                "strategy": c.strategy,
                 "max_concurrent": c.max_concurrent,
                 "max_rpm": c.max_rpm,
                 "has_api_key": bool(c.api_key),
@@ -408,11 +410,14 @@ async def handle_routes_test(request: web.Request) -> web.Response:
         ]
         return web.json_response({
             "model": model_name,
+            "routing_strategy": _model_router.routing_strategy,
             "resolved_upstream": res.upstream_url,
             "route_name": res.route_name,
             "route_id": res.route_id,
             "is_default": res.is_default,
             "pattern_matched": res.pattern_matched,
+            "priority": res.priority,
+            "strategy": res.strategy,
             "max_concurrent": res.max_concurrent,
             "slot_cooldown_ms": res.slot_cooldown_ms,
             "max_rpm": res.max_rpm,

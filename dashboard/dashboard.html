@@ -620,7 +620,14 @@
                     Matches requested model against regex and routes directly with dedicated concurrency limits.
                   </div>
                 </div>
-                <div style="display: flex; gap: 8px; align-items: center;">
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <div style="display: flex; align-items: center; gap: 4px;">
+                    <label for="routesRoutingStrategy" style="font-size: 11px; color: var(--text-muted); margin-bottom: 0; white-space: nowrap;">Strategy:</label>
+                    <select id="routesRoutingStrategy" class="proxy-input" style="height: 26px; font-size: 11px; padding: 2px 6px;" title="Strategy for evaluating candidate routes with equal priority">
+                      <option value="priority">Priority Spillover (Default)</option>
+                      <option value="balanced">Equal-Priority Balanced Pool</option>
+                    </select>
+                  </div>
                   <button type="button" id="addNewRouteBtn" class="btn-action" style="padding: 4px 10px; font-size: 11px; font-weight: 500; height: 26px;">
                     ➕ Add Model Route
                   </button>
@@ -914,11 +921,22 @@
               </div>
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
               <div class="proxy-form-group">
-                <label for="modalRoutePriority">Priority</label>
-                <input type="number" id="modalRoutePriority" class="proxy-input" value="10" min="0" step="1" title="Higher priority rules match first">
+                <label for="modalRoutePriority">Priority <span style="font-size: 10px; color: var(--text-muted);">(Equal = Pool)</span></label>
+                <input type="number" id="modalRoutePriority" class="proxy-input" value="10" min="0" step="1" title="Higher priority rules match first. Rules with equal priority share load in balanced mode.">
               </div>
+              <div class="proxy-form-group">
+                <label for="modalRouteStrategy">Strategy Override</label>
+                <select id="modalRouteStrategy" class="proxy-input" style="height: 32px; font-size: 12px;">
+                  <option value="inherit">Inherit Global</option>
+                  <option value="balanced">Balanced Pool (Equal Priority)</option>
+                  <option value="priority">Priority Spillover</option>
+                </select>
+              </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
               <div class="proxy-form-group">
                 <label for="modalRouteMaxConcurrent">Max Concurrency</label>
                 <input type="number" id="modalRouteMaxConcurrent" class="proxy-input" value="4" min="1" max="128" step="1" title="Maximum concurrent parallel requests permitted for this upstream">

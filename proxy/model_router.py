@@ -430,6 +430,8 @@ class RouteResolutionResult:
     fallback_upstream_url: Optional[str] = None
     retry_policy: Optional[Dict[str, Any]] = None
     api_key: Optional[str] = None
+    priority: int = 10
+    strategy: str = "inherit"
 
 
 class ModelRouteRule:
@@ -449,6 +451,7 @@ class ModelRouteRule:
         fallback_upstream_url: Optional[str] = None,
         retry_policy: Optional[Dict[str, Any]] = None,
         limiter: Optional[UpstreamConcurrencyLimiter] = None,
+        strategy: str = "inherit",
     ):
         self.id = str(id) if id else f"route_{uuid.uuid4().hex[:8]}"
         self.name = str(name).strip() if name else "Custom Route"
@@ -457,6 +460,7 @@ class ModelRouteRule:
         self.api_key = str(api_key).strip() if api_key and str(api_key).strip() else None
         self.enabled = bool(enabled)
         self.priority = int(priority)
+        self.strategy = str(strategy).strip().lower() if strategy else "inherit"
         self.max_concurrent = max(1, int(max_concurrent))
         self.slot_cooldown_ms = max(0, int(slot_cooldown_ms))
         self.max_rpm = int(max_rpm) if max_rpm is not None else -1
@@ -501,6 +505,7 @@ class ModelRouteRule:
             "api_key": self.api_key,
             "enabled": self.enabled,
             "priority": self.priority,
+            "strategy": self.strategy,
             "max_concurrent": self.max_concurrent,
             "slot_cooldown_ms": self.slot_cooldown_ms,
             "max_rpm": self.max_rpm,
@@ -520,6 +525,7 @@ class ModelRouteRule:
             "has_api_key": bool(self.api_key),
             "enabled": self.enabled,
             "priority": self.priority,
+            "strategy": self.strategy,
             "max_concurrent": self.max_concurrent,
             "slot_cooldown_ms": self.slot_cooldown_ms,
             "max_rpm": self.max_rpm,
@@ -537,6 +543,8 @@ class ModelRouter:
 
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path
+        self.routing_strategy = "priority"
+        self._rr_counter = 0
         self.default_upstream_url = DEFAULT_UPSTREAM_URL
         self.default_name = "Default Upstream (e-INFRA)"
         self.default_api_key: Optional[str] = None
@@ -565,6 +573,7 @@ class ModelRouter:
             with open(target_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
+            self.routing_strategy = str(data.get("routing_strategy", "priority")).strip().lower()
             def_route = data.get("default_route", {})
             self.default_upstream_url = def_route.get("upstream_url", DEFAULT_UPSTREAM_URL).rstrip("/")
             self.default_name = def_route.get("name", "Default Upstream")
@@ -592,6 +601,7 @@ class ModelRouter:
                     api_key=r.get("api_key"),
                     enabled=r.get("enabled", True),
                     priority=r.get("priority", 10),
+                    strategy=r.get("strategy", "inherit"),
                     max_concurrent=r.get("max_concurrent", 4),
                     slot_cooldown_ms=r.get("slot_cooldown_ms", 50),
                     max_rpm=r.get("max_rpm", -1),
@@ -615,6 +625,7 @@ class ModelRouter:
             return False
 
         data = {
+            "routing_strategy": self.routing_strategy,
             "default_route": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
@@ -687,6 +698,8 @@ class ModelRouter:
                             fallback_upstream_url=rule.fallback_upstream_url,
                             retry_policy=rule.retry_policy,
                             api_key=rule.api_key,
+                            priority=rule.priority,
+                            strategy=rule.strategy,
                         )
                     )
 
@@ -705,6 +718,8 @@ class ModelRouter:
                     fallback_upstream_url=self.default_fallback_upstream_url,
                     retry_policy=self.default_retry_policy,
                     api_key=self.default_api_key,
+                    priority=0,
+                    strategy="inherit",
                 )
             )
 
@@ -722,11 +737,19 @@ class ModelRouter:
     ) -> Tuple[RouteResolutionResult, UpstreamConcurrencyLimiter, bool]:
         """
         Select an admission route following priority precedence:
-        1. Checks candidates in priority order; if a route has immediate capacity (no queue,
-           active < max_concurrent, and within max_rpm), atomically acquires it (already_acquired=True).
-        2. If all candidate routes are currently saturated / queued, selects the candidate
-           with the shortest wait queue (minimum limiter.queued, breaking ties by priority).
-           Returns (route, limiter, already_acquired=False).
+        - If strategy is 'priority' (default):
+          1. Checks candidates in priority order; if a route has immediate capacity (no queue,
+             active < max_concurrent, and within max_rpm), atomically acquires it (already_acquired=True).
+          2. If all candidate routes are currently saturated / queued, selects the candidate
+             with the shortest wait queue (minimum limiter.queued, breaking ties by priority).
+             Returns (route, limiter, already_acquired=False).
+        - If strategy is 'balanced':
+          1. Groups candidates by priority tier (descending).
+          2. Within the highest available priority tier with capacity, distributes requests to the
+             candidate with minimum active concurrency (limiter.active), breaking ties with round-robin.
+          3. If all candidates in a tier are saturated, falls through to check the next priority tier.
+          4. If all candidate routes across all tiers are saturated / queued, selects the candidate
+             with the shortest wait queue, breaking ties with round-robin among equal-priority candidates.
         """
         if not candidates:
             def_route = self.resolve(None)
@@ -739,26 +762,78 @@ class ModelRouter:
             acquired = await limiter.try_acquire()
             return candidates[0], limiter, acquired
 
-        # 1. Zero-wait overspill down the priority chain
+        # Determine if balanced mode is active
+        is_balanced = (self.routing_strategy in ("balanced", "least_conn", "round_robin"))
+        if not is_balanced:
+            is_balanced = any(c.strategy in ("balanced", "least_conn", "round_robin") for c in candidates)
+
+        if not is_balanced:
+            # ── Default Priority Spillover ──────────────────────────────────
+            # 1. Zero-wait overspill down the priority chain
+            for cand in candidates:
+                limiter = self.get_limiter(cand.route_id)
+                if await limiter.try_acquire():
+                    return cand, limiter, True
+
+            # 2. All routes are saturated: pick shortest queue (break ties by priority, which is original list order)
+            best_candidate = candidates[0]
+            best_limiter = self.get_limiter(best_candidate.route_id)
+            min_queued = best_limiter.queued
+
+            for cand in candidates[1:]:
+                lim = self.get_limiter(cand.route_id)
+                q_depth = lim.queued
+                if q_depth < min_queued:
+                    min_queued = q_depth
+                    best_candidate = cand
+                    best_limiter = lim
+
+            return best_candidate, best_limiter, False
+
+        # ── Balanced Routing Strategy (Equal Priority Pool) ─────────────────
+        prio_map: Dict[int, List[RouteResolutionResult]] = {}
         for cand in candidates:
-            limiter = self.get_limiter(cand.route_id)
-            if await limiter.try_acquire():
-                return cand, limiter, True
+            prio_map.setdefault(cand.priority, []).append(cand)
 
-        # 2. All routes are saturated: pick shortest queue (break ties by priority, which is original list order)
-        best_candidate = candidates[0]
-        best_limiter = self.get_limiter(best_candidate.route_id)
-        min_queued = best_limiter.queued
+        sorted_prios = sorted(prio_map.keys(), reverse=True)
 
-        for cand in candidates[1:]:
-            lim = self.get_limiter(cand.route_id)
-            q_depth = lim.queued
-            if q_depth < min_queued:
-                min_queued = q_depth
-                best_candidate = cand
-                best_limiter = lim
+        for prio in sorted_prios:
+            tier_candidates = prio_map[prio]
+            tier_len = len(tier_candidates)
+            self._rr_counter += 1
+            cur_rr = self._rr_counter
 
-        return best_candidate, best_limiter, False
+            # Sort candidate order by:
+            # 1. Has any existing queue waiters? (prefer routes with 0 queued waiters)
+            # 2. Least active connections (lowest active slots)
+            # 3. Round-robin rotational offset for tie breaking
+            def tier_sort_key(item: Tuple[int, RouteResolutionResult]):
+                idx, c = item
+                lim = self.get_limiter(c.route_id)
+                return (lim.queued > 0, lim.active, (idx - cur_rr) % tier_len)
+
+            indexed_tier = list(enumerate(tier_candidates))
+            indexed_tier.sort(key=tier_sort_key)
+
+            for _, cand in indexed_tier:
+                limiter = self.get_limiter(cand.route_id)
+                if await limiter.try_acquire():
+                    return cand, limiter, True
+
+        # All routes across all tiers are saturated: pick candidate with shortest queue.
+        # Break ties:
+        # 1. Higher priority first
+        # 2. Round-robin among equal-priority candidates with identical min queue
+        all_limiters = [(c, self.get_limiter(c.route_id)) for c in candidates]
+        min_queued = min(lim.queued for _, lim in all_limiters)
+        min_q_candidates = [c for c, lim in all_limiters if lim.queued == min_queued]
+
+        max_prio = max(c.priority for c in min_q_candidates)
+        top_tier_tied = [c for c in min_q_candidates if c.priority == max_prio]
+
+        self._rr_counter += 1
+        picked_cand = top_tier_tied[self._rr_counter % len(top_tier_tied)]
+        return picked_cand, self.get_limiter(picked_cand.route_id), False
 
     def get_limiter(self, route_id: Optional[str] = None) -> UpstreamConcurrencyLimiter:
         """
@@ -806,6 +881,7 @@ class ModelRouter:
 
     def to_dict(self, mask_keys: bool = False) -> Dict[str, Any]:
         return {
+            "routing_strategy": self.routing_strategy,
             "default_route": {
                 "name": self.default_name,
                 "upstream_url": self.default_upstream_url,
@@ -827,6 +903,9 @@ class ModelRouter:
         """
         Update router state from a dict, preserving live limiter instances.
         """
+        if "routing_strategy" in data:
+            self.routing_strategy = str(data["routing_strategy"]).strip().lower()
+
         def_route = data.get("default_route", {})
         if "upstream_url" in def_route:
             self.default_upstream_url = def_route["upstream_url"].rstrip("/")
@@ -895,6 +974,7 @@ class ModelRouter:
                 api_key=api_key_val,
                 enabled=r.get("enabled", True),
                 priority=priority_val,
+                strategy=r.get("strategy", existing.strategy if existing else "inherit"),
                 max_concurrent=max_c,
                 slot_cooldown_ms=slot_cd,
                 max_rpm=rpm_val,

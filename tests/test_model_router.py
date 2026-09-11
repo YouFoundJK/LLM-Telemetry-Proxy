@@ -417,6 +417,146 @@ class TestModelRouterUnit(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_balanced_strategy_equal_priority_distribution(self):
+        """When multiple routes share the same priority in balanced mode, requests are evenly distributed across all routes."""
+        async def run_test():
+            self.router.update_from_dict({
+                "routing_strategy": "balanced",
+                "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1", "max_concurrent": 10},
+                "routes": [
+                    {"id": "r1", "name": "TokenRouter 1", "pattern": r"^glm-5.*", "priority": 100, "upstream_url": "https://tr1.ai/v1", "max_concurrent": 4},
+                    {"id": "r2", "name": "TokenRouter 2", "pattern": r"^glm-5.*", "priority": 100, "upstream_url": "https://tr2.ai/v1", "max_concurrent": 4},
+                    {"id": "r3", "name": "TokenRouter 3", "pattern": r"^glm-5.*", "priority": 100, "upstream_url": "https://tr3.ai/v1", "max_concurrent": 4},
+                    {"id": "r4", "name": "TokenRouter 4", "pattern": r"^glm-5.*", "priority": 100, "upstream_url": "https://tr4.ai/v1", "max_concurrent": 4},
+                ]
+            })
+            candidates = self.router.resolve_chain("glm-5.3-free")
+            self.assertEqual(len(candidates), 4)
+
+            # 4 sequential requests must distribute 1 to each of the 4 routes
+            admitted_routes = []
+            for _ in range(4):
+                admit_r, lim, acquired = await self.router.select_admission_route(candidates)
+                self.assertTrue(acquired)
+                admitted_routes.append(admit_r.route_name)
+
+            # Each of the 4 routes should have exactly 1 active connection
+            self.assertEqual(set(admitted_routes), {"TokenRouter 1", "TokenRouter 2", "TokenRouter 3", "TokenRouter 4"})
+            self.assertEqual(self.router.get_limiter("r1").active, 1)
+            self.assertEqual(self.router.get_limiter("r2").active, 1)
+            self.assertEqual(self.router.get_limiter("r3").active, 1)
+            self.assertEqual(self.router.get_limiter("r4").active, 1)
+
+            # Next 4 requests should also distribute to each (reaching 2/4 on each)
+            for _ in range(4):
+                admit_r, lim, acquired = await self.router.select_admission_route(candidates)
+                self.assertTrue(acquired)
+
+            self.assertEqual(self.router.get_limiter("r1").active, 2)
+            self.assertEqual(self.router.get_limiter("r2").active, 2)
+            self.assertEqual(self.router.get_limiter("r3").active, 2)
+            self.assertEqual(self.router.get_limiter("r4").active, 2)
+
+        asyncio.run(run_test())
+
+    def test_balanced_strategy_least_active_selection(self):
+        """Router in balanced mode picks the route with the fewest active slots."""
+        async def run_test():
+            self.router.update_from_dict({
+                "routing_strategy": "balanced",
+                "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1"},
+                "routes": [
+                    {"id": "r1", "name": "API A", "pattern": r"^test.*", "priority": 100, "upstream_url": "https://a.ai/v1", "max_concurrent": 4},
+                    {"id": "r2", "name": "API B", "pattern": r"^test.*", "priority": 100, "upstream_url": "https://b.ai/v1", "max_concurrent": 4},
+                    {"id": "r3", "name": "API C", "pattern": r"^test.*", "priority": 100, "upstream_url": "https://c.ai/v1", "max_concurrent": 4},
+                ]
+            })
+            candidates = self.router.resolve_chain("test-model")
+            lim_a = self.router.get_limiter("r1")
+            lim_b = self.router.get_limiter("r2")
+            lim_c = self.router.get_limiter("r3")
+
+            # Simulate API A has 3 active, API C has 1 active, API B has 0 active
+            await lim_a.try_acquire()
+            await lim_a.try_acquire()
+            await lim_a.try_acquire()
+            await lim_c.try_acquire()
+
+            self.assertEqual(lim_a.active, 3)
+            self.assertEqual(lim_b.active, 0)
+            self.assertEqual(lim_c.active, 1)
+
+            # Balanced selection MUST pick API B (0 active)
+            admit_r, lim, acquired = await self.router.select_admission_route(candidates)
+            self.assertEqual(admit_r.route_name, "API B")
+            self.assertTrue(acquired)
+            self.assertEqual(lim_b.active, 1)
+
+            # Next selection should pick between API B and API C (both 1 active), NOT API A (3 active)
+            admit_r2, _, _ = await self.router.select_admission_route(candidates)
+            self.assertIn(admit_r2.route_name, ["API B", "API C"])
+
+        asyncio.run(run_test())
+
+    def test_balanced_strategy_queue_distribution(self):
+        """When all equal-priority routes are saturated, incoming requests are balanced across wait queues rather than piling on one."""
+        async def run_test():
+            self.router.update_from_dict({
+                "routing_strategy": "balanced",
+                "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1"},
+                "routes": [
+                    {"id": "r1", "name": "Route 1", "pattern": r"^sat.*", "priority": 100, "upstream_url": "https://r1.ai/v1", "max_concurrent": 1},
+                    {"id": "r2", "name": "Route 2", "pattern": r"^sat.*", "priority": 100, "upstream_url": "https://r2.ai/v1", "max_concurrent": 1},
+                ]
+            })
+            candidates = self.router.resolve_chain("sat-test")
+            lim1 = self.router.get_limiter("r1")
+            lim2 = self.router.get_limiter("r2")
+
+            # Fill active slots
+            await lim1.try_acquire()
+            await lim2.try_acquire()
+
+            # Now both are saturated (1/1 active).
+            # The first queued admission request should pick one of them (e.g. Route 1)
+            admit1, _, acquired1 = await self.router.select_admission_route(candidates)
+            self.assertFalse(acquired1)
+            fut1 = asyncio.Future()
+            self.router.get_limiter(admit1.route_id)._waiters.append(fut1)
+
+            # The second queued admission request should pick the other route with 0 waiters!
+            admit2, _, acquired2 = await self.router.select_admission_route(candidates)
+            self.assertFalse(acquired2)
+            self.assertNotEqual(admit1.route_id, admit2.route_id)
+
+        asyncio.run(run_test())
+
+    def test_balanced_strategy_respects_priority_tiers(self):
+        """Balanced strategy balances within the higher tier first, only spilling to lower tier when higher tier is saturated."""
+        async def run_test():
+            self.router.update_from_dict({
+                "routing_strategy": "balanced",
+                "default_route": {"name": "Default Route", "upstream_url": "https://default.ai/v1"},
+                "routes": [
+                    {"id": "prio_100_a", "name": "Prio 100 A", "pattern": r"^tier.*", "priority": 100, "upstream_url": "https://100a.ai/v1", "max_concurrent": 1},
+                    {"id": "prio_100_b", "name": "Prio 100 B", "pattern": r"^tier.*", "priority": 100, "upstream_url": "https://100b.ai/v1", "max_concurrent": 1},
+                    {"id": "prio_50", "name": "Prio 50 Backup", "pattern": r"^tier.*", "priority": 50, "upstream_url": "https://50.ai/v1", "max_concurrent": 5},
+                ]
+            })
+            candidates = self.router.resolve_chain("tier-test")
+
+            # First two requests must go to Prio 100 A and Prio 100 B (not Prio 50)
+            admit1, _, _ = await self.router.select_admission_route(candidates)
+            admit2, _, _ = await self.router.select_admission_route(candidates)
+            self.assertEqual({admit1.route_name, admit2.route_name}, {"Prio 100 A", "Prio 100 B"})
+
+            # Now tier 100 is saturated (both 1/1). Third request spills over to Prio 50
+            admit3, _, acquired3 = await self.router.select_admission_route(candidates)
+            self.assertEqual(admit3.route_name, "Prio 50 Backup")
+            self.assertTrue(acquired3)
+
+        asyncio.run(run_test())
+
 
 class TestModelRouterEndToEnd(AioHTTPTestCase):
     """End-to-end integration tests through the aiohttp Proxy gateway."""

@@ -1948,6 +1948,12 @@ const App = (() => {
         }
       }
 
+      // Strategy dropdown sync
+      const stratSelect = document.getElementById('routesRoutingStrategy');
+      if (stratSelect && State.routesConfig) {
+        stratSelect.value = State.routesConfig.routing_strategy || 'priority';
+      }
+
       // Active routes count badge
       const activeBadge = document.getElementById('activeRoutesCountBadge');
       const activeCount = routes.filter(r => r.enabled).length;
@@ -1985,9 +1991,15 @@ const App = (() => {
           ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
           : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${rp?.max_retries ?? 3} retries (${rp?.mode || 'immediate'})">🔄 ${rp?.max_retries ?? 3} (${rp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
 
+        const sharedPrioCount = routes.filter(other => other.enabled && other.pattern === r.pattern && (other.priority ?? 10) === (r.priority ?? 10)).length;
+        const isBalanced = ((State.routesConfig?.routing_strategy === 'balanced') || r.strategy === 'balanced');
+        const poolBadge = (isBalanced && sharedPrioCount > 1)
+          ? `<span class="badge-tag" style="background:rgba(88,166,255,0.15); color:var(--accent); margin-left:4px; font-size:9px;" title="Equal-priority balanced pool (${sharedPrioCount} routes sharing traffic)">⚡ Pool (${sharedPrioCount})</span>`
+          : '';
+
         return `
           <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
-            <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}</td>
+            <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}${poolBadge}</td>
             <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
             <td><code class="code-tag">${UI.escapeHtml(r.pattern)}</code></td>
             <td class="monospace-input" style="color: var(--accent); font-size: 11px;">
@@ -2016,10 +2028,15 @@ const App = (() => {
         btn.addEventListener('click', (e) => {
           const idx = parseInt(btn.dataset.idx, 10);
           if (idx > 0) {
+            const tempPrio = routes[idx].priority;
+            const prevPrio = routes[idx - 1].priority;
+            if (tempPrio !== prevPrio) {
+              routes[idx].priority = prevPrio;
+              routes[idx - 1].priority = tempPrio;
+            }
             const temp = routes[idx];
             routes[idx] = routes[idx - 1];
             routes[idx - 1] = temp;
-            routes.forEach((item, i) => { item.priority = 100 - i * 10; });
             renderRoutesUI();
             saveAllRoutesConfig(false);
           }
@@ -2030,10 +2047,15 @@ const App = (() => {
         btn.addEventListener('click', (e) => {
           const idx = parseInt(btn.dataset.idx, 10);
           if (idx < routes.length - 1) {
+            const tempPrio = routes[idx].priority;
+            const nextPrio = routes[idx + 1].priority;
+            if (tempPrio !== nextPrio) {
+              routes[idx].priority = nextPrio;
+              routes[idx + 1].priority = tempPrio;
+            }
             const temp = routes[idx];
             routes[idx] = routes[idx + 1];
             routes[idx + 1] = temp;
-            routes.forEach((item, i) => { item.priority = 100 - i * 10; });
             renderRoutesUI();
             saveAllRoutesConfig(false);
           }
@@ -2082,6 +2104,7 @@ const App = (() => {
     const apiKeyInput = document.getElementById('modalRouteApiKey');
     const toggleApiKeyBtn = document.getElementById('toggleApiKeyVisibilityBtn');
     const priorityInput = document.getElementById('modalRoutePriority');
+    const strategyInput = document.getElementById('modalRouteStrategy');
     const maxConcInput = document.getElementById('modalRouteMaxConcurrent');
     const slotCdInput = document.getElementById('modalRouteSlotCooldown');
     const maxRetriesInput = document.getElementById('modalRouteMaxRetries');
@@ -2101,6 +2124,7 @@ const App = (() => {
       upstreamInput.value = rule.upstream_url || '';
       if (apiKeyInput) apiKeyInput.value = rule.api_key || '';
       priorityInput.value = rule.priority ?? 10;
+      if (strategyInput) strategyInput.value = rule.strategy || 'inherit';
       if (maxConcInput) maxConcInput.value = rule.max_concurrent ?? 4;
       if (slotCdInput) slotCdInput.value = rule.slot_cooldown_ms ?? 50;
       if (maxRetriesInput) maxRetriesInput.value = (rule.retry_policy?.enabled === false) ? 0 : (rule.retry_policy?.max_retries ?? 3);
@@ -2113,8 +2137,8 @@ const App = (() => {
       patternInput.value = '';
       upstreamInput.value = document.getElementById('proxyConfigUpstream')?.value || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
       if (apiKeyInput) apiKeyInput.value = '';
-      const existingCount = (State.routesConfig?.routes?.length) || 0;
-      priorityInput.value = 100 - existingCount * 10;
+      priorityInput.value = 100;
+      if (strategyInput) strategyInput.value = 'inherit';
       if (maxConcInput) maxConcInput.value = 4;
       if (slotCdInput) slotCdInput.value = 50;
       if (maxRetriesInput) maxRetriesInput.value = 3;
@@ -2137,6 +2161,8 @@ const App = (() => {
     }
     const defUpstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
     const defMaxConc = parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10);
+    const stratVal = document.getElementById('routesRoutingStrategy')?.value || State.routesConfig?.routing_strategy || 'priority';
+    State.routesConfig.routing_strategy = stratVal;
 
     const prevDef = State.routesConfig.default_route || {};
     State.routesConfig.default_route = {
@@ -2194,6 +2220,17 @@ const App = (() => {
       addBtn.addEventListener('click', () => openRouteModal(null));
     }
 
+    const stratSelect = document.getElementById('routesRoutingStrategy');
+    if (stratSelect) {
+      stratSelect.addEventListener('change', () => {
+        if (State.routesConfig) {
+          State.routesConfig.routing_strategy = stratSelect.value;
+          renderRoutesUI();
+          saveAllRoutesConfig(true);
+        }
+      });
+    }
+
     const saveBtn = document.getElementById('saveRoutesConfigBtn');
     if (saveBtn) {
       saveBtn.addEventListener('click', () => saveAllRoutesConfig(true));
@@ -2213,6 +2250,7 @@ const App = (() => {
         const upstream = document.getElementById('modalRouteUpstream')?.value?.trim();
         const apiKey = document.getElementById('modalRouteApiKey')?.value?.trim() || null;
         const priority = parseInt(document.getElementById('modalRoutePriority')?.value || '10', 10);
+        const strategy = document.getElementById('modalRouteStrategy')?.value || 'inherit';
         const maxConcurrent = Math.max(1, parseInt(document.getElementById('modalRouteMaxConcurrent')?.value || '4', 10));
         const slotCooldown = Math.max(0, parseInt(document.getElementById('modalRouteSlotCooldown')?.value || '50', 10));
         const maxRetries = Math.max(0, parseInt(document.getElementById('modalRouteMaxRetries')?.value || '3', 10));
@@ -2265,7 +2303,7 @@ const App = (() => {
               ...State.routesConfig.routes[idx],
               name, pattern, upstream_url: upstream,
               api_key: apiKey,
-              priority, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown,
+              priority, strategy, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown,
               retry_policy: retryPolicy, enabled
             };
           }
@@ -2277,6 +2315,7 @@ const App = (() => {
             upstream_url: upstream,
             api_key: apiKey,
             priority,
+            strategy,
             max_concurrent: maxConcurrent,
             slot_cooldown_ms: slotCooldown,
             retry_policy: retryPolicy,
