@@ -179,8 +179,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             route_timeout = route_res.timeout or _model_router.default_timeout
             connect_timeout = float(route_timeout.get("connect", 10.0))
             first_byte_timeout = float(route_timeout.get("first_byte", 25.0))
-            sock_read_timeout = float(route_timeout.get("sock_read", 60.0))
-            total_timeout = float(route_timeout.get("total", 180.0))
+            sock_read_timeout = float(route_timeout.get("sock_read", 300.0))
+            total_timeout = float(route_timeout.get("total", 600.0))
             req_timeout = aiohttp.ClientTimeout(connect=connect_timeout, sock_read=sock_read_timeout, total=total_timeout)
 
             target_limiter = _model_router.get_limiter(route_res.route_id)
@@ -250,6 +250,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     route_name=route_name, active_upstream_url=active_upstream_url,
                                     server_running=server_running, server_tok_s=server_tok_s, server_model=server_model,
                                     tlog_fn=_tlog_fn,
+                                    total_timeout=total_timeout,
                                 )
                                 if s_retry and attempt < max_retries:
                                     retry_needed, retry_delay, retry_reason = True, s_delay, s_reason
@@ -497,8 +498,8 @@ async def _simple_forward(request, path, method):
             route_timeout = route_res.timeout or _model_router.default_timeout
             req_timeout = aiohttp.ClientTimeout(
                 connect=float(route_timeout.get("connect", 10.0)),
-                sock_read=float(route_timeout.get("sock_read", 60.0)),
-                total=float(route_timeout.get("total", 180.0)),
+                sock_read=float(route_timeout.get("sock_read", 300.0)),
+                total=float(route_timeout.get("total", 600.0)),
             )
 
             target_limiter = _model_router.get_limiter(route_res.route_id)

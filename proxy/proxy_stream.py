@@ -210,6 +210,7 @@ async def handle_streaming_upstream(
     server_tok_s: Any,
     server_model: Any,
     tlog_fn: Any,
+    total_timeout: Optional[float] = None,
 ) -> Tuple[Optional[web.StreamResponse], bool, float, Optional[str]]:
     """
     Handles streaming responses with deferred client handshake and retry sniff detection.
@@ -365,6 +366,26 @@ async def handle_streaming_upstream(
     collected_tool_calls = []
     error = None
     input_tokens = None
+    if isinstance(payload, dict):
+        p_text = ""
+        if "messages" in payload and isinstance(payload["messages"], list):
+            for m in payload["messages"]:
+                if isinstance(m, dict):
+                    c = m.get("content", "")
+                    if isinstance(c, str):
+                        p_text += c + " "
+                    elif isinstance(c, list):
+                        for part in c:
+                            if isinstance(part, dict) and part.get("text"):
+                                p_text += str(part["text"]) + " "
+        elif "prompt" in payload:
+            p = payload["prompt"]
+            p_text = p if isinstance(p, str) else (" ".join(str(x) for x in p) if isinstance(p, list) else "")
+        elif "input" in payload:
+            inp = payload["input"]
+            p_text = inp if isinstance(inp, str) else (" ".join(str(x) for x in inp) if isinstance(inp, list) else "")
+        if p_text:
+            input_tokens = max(1, len(p_text) // 4)
     output_tokens = None
     reasoning_tokens = None
     tokens_per_s = None
@@ -411,12 +432,15 @@ async def handle_streaming_upstream(
 
     client_disconnected = False
     stream_error = None
+    deadline = (t_start + total_timeout) if (total_timeout and total_timeout > 0) else None
     try:
         for b_chunk in buffered_chunks:
             await response.write(b_chunk)
             _parse_sse_chunk(b_chunk)
 
         async for chunk in upstream_resp.content:
+            if deadline and time.monotonic() > deadline:
+                raise asyncio.TimeoutError(f"limit {total_timeout}s exceeded")
             await response.write(chunk)
             _parse_sse_chunk(chunk)
 

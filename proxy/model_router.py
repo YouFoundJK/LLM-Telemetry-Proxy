@@ -25,8 +25,8 @@ DEFAULT_UPSTREAM_URL = "https://llm.ai.e-infra.cz/v1"
 DEFAULT_ROUTE_TIMEOUT: Dict[str, float] = {
     "connect": 10.0,
     "first_byte": 25.0,
-    "sock_read": 60.0,
-    "total": 180.0,
+    "sock_read": 300.0,
+    "total": 600.0,
 }
 
 

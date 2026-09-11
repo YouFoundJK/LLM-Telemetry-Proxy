@@ -187,7 +187,7 @@ def create_app():
             enable_cleanup_closed=True,
             force_close=False,
         )
-        timeout = aiohttp.ClientTimeout(total=300, connect=10, sock_read=300)
+        timeout = aiohttp.ClientTimeout(total=600, connect=10, sock_read=300)
         application[UPSTREAM_SESSION_KEY] = aiohttp.ClientSession(connector=connector, timeout=timeout)
 
     async def on_cleanup(application):
