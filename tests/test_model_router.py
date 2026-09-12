@@ -607,6 +607,7 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
         await self.mock_openrouter_server.start_server()
 
         # Configure proxy router
+        self.orig_model_router = proxy_mod._model_router
         proxy_mod.DB_PATH = self.db_path
         proxy_mod.init_db()
         proxy_mod._model_router = ModelRouter(config_path=self.routes_path)
@@ -633,6 +634,7 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
     async def tearDownAsync(self):
         await self.mock_default_server.close()
         await self.mock_openrouter_server.close()
+        proxy_mod._model_router = self.orig_model_router
         self.tmp_dir.cleanup()
         await super().tearDownAsync()
 
@@ -969,6 +971,185 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
         self.assertEqual(data["candidates"][0]["route_name"], "Route Chain P100")
         self.assertEqual(data["candidates"][1]["route_name"], "Route Chain P50")
 
+    def test_negative_regex_exclusion(self):
+        """Verify that negative regex (exclude_pattern) prevents route from triggering even if pattern matches."""
+        router = ModelRouter()
+        router.update_from_dict({
+            "default_route": {
+                "name": "Default Upstream",
+                "upstream_url": "https://default.com/v1",
+            },
+            "routes": [
+                {
+                    "id": "token_glm",
+                    "name": "TokenRouter GLM",
+                    "pattern": r"glm-5\.3",
+                    "exclude_pattern": r"free|preview",
+                    "upstream_url": "https://api.tokenrouter.com/v1",
+                    "priority": 100,
+                },
+                {
+                    "id": "token_all",
+                    "name": "TokenRouter Generic",
+                    "pattern": r"glm-5\.3-free",
+                    "upstream_url": "https://api.tokenrouter-free.com/v1",
+                    "priority": 90,
+                }
+            ]
+        })
+
+        # glm-5.3 paid matches token_glm (not excluded)
+        res1 = router.resolve("z-ai/glm-5.3")
+        self.assertEqual(res1.route_name, "TokenRouter GLM")
+
+        # glm-5.3-free matches pattern "glm-5.3" but is EXCLUDED by "free|preview", falls through to token_all
+        res2 = router.resolve("z-ai/glm-5.3-free")
+        self.assertEqual(res2.route_name, "TokenRouter Generic")
+
+        # glm-5.3-preview matches pattern "glm-5.3" but is EXCLUDED by "free|preview", falls through to default
+        res3 = router.resolve("z-ai/glm-5.3-preview")
+        self.assertTrue(res3.is_default)
+        self.assertEqual(res3.upstream_url, "https://default.com/v1")
+
+    def test_default_route_non_removable_and_editable(self):
+        """Verify default route cannot be deleted via update_from_dict and is fully editable."""
+        router = ModelRouter()
+        initial_def = router.default_rule
+
+        # Attempt to delete all routes by passing an empty list
+        router.update_from_dict({
+            "routes": []
+        })
+        self.assertIsNotNone(router.default_rule)
+        self.assertEqual(router.default_rule.id, "default")
+        self.assertTrue(router.default_rule.is_default)
+
+        # Edit default route directly via routes array
+        router.update_from_dict({
+            "routes": [
+                {
+                    "id": "default",
+                    "name": "Customized Default Upstream",
+                    "upstream_url": "https://new-default.infra.org/v1",
+                    "max_concurrent": 12,
+                    "slot_cooldown_ms": 150,
+                    "exclude_pattern": r"^private-.*",
+                    "is_default": True,
+                },
+                {
+                    "id": "custom_1",
+                    "name": "Custom 1",
+                    "pattern": "custom/.*",
+                    "upstream_url": "https://custom.com/v1",
+                    "priority": 100,
+                }
+            ]
+        })
+
+        self.assertEqual(router.default_rule.name, "Customized Default Upstream")
+        self.assertEqual(router.default_upstream_url, "https://new-default.infra.org/v1")
+        self.assertEqual(router.default_max_concurrent, 12)
+        self.assertEqual(router.default_slot_cooldown_ms, 150)
+        self.assertEqual(router.default_rule.exclude_pattern, "^private-.*")
+
+        # Verify exclusion on default route
+        res_allowed = router.resolve("standard-model")
+        self.assertIsNotNone(res_allowed)
+        self.assertTrue(res_allowed.is_default)
+
+        # Private model is excluded from default route, and no custom route matches -> None
+        res_excluded = router.resolve("private-model-123")
+        self.assertIsNone(res_excluded)
+
+    def test_default_route_freezing_disables_fallback(self):
+        """Verify freezing (disabling) the default route prevents it from matching or serving traffic."""
+        router = ModelRouter()
+        self.assertTrue(router.default_rule.enabled)
+
+        # Freeze default route
+        router.update_from_dict({
+            "default_route": {
+                "enabled": False,
+            },
+            "routes": [
+                {
+                    "id": "active_rule",
+                    "name": "Active Custom Rule",
+                    "pattern": "active/.*",
+                    "upstream_url": "https://active.com/v1",
+                    "priority": 100,
+                }
+            ]
+        })
+        self.assertFalse(router.default_rule.enabled)
+
+        # Active rule matches
+        res_active = router.resolve("active/sample")
+        self.assertIsNotNone(res_active)
+        self.assertEqual(res_active.route_name, "Active Custom Rule")
+
+        # Unmatched model falls through to frozen default route -> empty chain / None
+        chain_unmatched = router.resolve_chain("unknown-model")
+        self.assertEqual(len(chain_unmatched), 0)
+        self.assertIsNone(router.resolve("unknown-model"))
+
+    async def test_proxy_dispatch_when_default_frozen_returns_503(self):
+        """End-to-end: When default route is frozen and no custom route matches, proxy returns 503 no_active_route."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "enabled": False
+            },
+            "routes": [
+                {
+                    "id": "openrouter_route",
+                    "name": "OpenRouter Stealth",
+                    "pattern": r"stealth/ox-alpha.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/api/v1")),
+                    "priority": 10,
+                    "max_concurrent": 10
+                }
+            ]
+        })
+        payload = {"model": "unmatched-model-name", "messages": [{"role": "user", "content": "Hi"}]}
+        resp = await self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(resp.status, 503)
+        data = await resp.json()
+        self.assertEqual(data["error"]["code"], "no_active_route")
+
+    async def test_routes_api_rejects_invalid_regex(self):
+        """POST /v1/routes rejects config with invalid regular expression in pattern or exclude_pattern."""
+        # Invalid positive pattern
+        resp1 = await self.client.post("/v1/routes", json={
+            "default_route": {"name": "Default", "upstream_url": "https://default.com/v1"},
+            "routes": [
+                {
+                    "id": "bad_regex_1",
+                    "name": "Bad Regex",
+                    "pattern": "[unclosed",
+                    "upstream_url": "https://example.com/v1"
+                }
+            ]
+        })
+        self.assertEqual(resp1.status, 400)
+        data1 = await resp1.json()
+        self.assertIn("Invalid regex pattern", data1["error"])
+
+        # Invalid negative exclude_pattern
+        resp2 = await self.client.post("/v1/routes", json={
+            "default_route": {
+                "name": "Default",
+                "upstream_url": "https://default.com/v1",
+                "exclude_pattern": "(unclosed-group"
+            },
+            "routes": []
+        })
+        self.assertEqual(resp2.status, 400)
+        data2 = await resp2.json()
+        self.assertIn("Invalid exclude regex pattern", data2["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -284,6 +284,11 @@ def _ensure_optional_columns(conn, table: str):
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if DB_PATH.exists() and DB_PATH.stat().st_size == 0:
+        try:
+            DB_PATH.unlink()
+        except OSError:
+            pass
     conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     _configure_db_pragmas(conn)
     conn.execute("""

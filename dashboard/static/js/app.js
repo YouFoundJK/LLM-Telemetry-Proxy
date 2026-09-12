@@ -1956,74 +1956,167 @@ const App = (() => {
 
       // Active routes count badge
       const activeBadge = document.getElementById('activeRoutesCountBadge');
-      const activeCount = routes.filter(r => r.enabled).length;
+      const isDefEnabled = defRoute.enabled !== false;
+      const customActiveCount = routes.filter(r => r.enabled).length;
+      const totalActive = customActiveCount + (isDefEnabled ? 1 : 0);
+      const totalRules = routes.length + 1;
       if (activeBadge) {
-        activeBadge.textContent = `${activeCount} / ${routes.length} active rule${routes.length === 1 ? '' : 's'}`;
+        activeBadge.textContent = `${totalActive} / ${totalRules} active rule${totalRules === 1 ? '' : 's'}${!isDefEnabled ? ' (Default Frozen)' : ''}`;
       }
 
       // Render table rows
       const tbody = document.getElementById('modelRoutesTableBody');
       if (!tbody) return;
 
+      // Pinned Row #1: System Default Upstream Router
+      const defStatusBadge = isDefEnabled
+        ? '<span class="badge-status-active">Active</span>'
+        : '<span class="badge-status-inactive" style="color:var(--red); background:rgba(248,81,73,0.15);">Frozen</span>';
+      const defMaxConcVal = defRoute.max_concurrent ?? parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10);
+      const defStats = defRoute.limiter_stats || {};
+      const defActiveRunning = defStats.active || 0;
+      const defWaitingQueued = defStats.queued || defStats.waiting || 0;
+      const defRp = defRoute.retry_policy;
+      const defRetriesDisabled = (defRp && (defRp.enabled === false || defRp.max_retries === 0));
+      const defRetryBadge = defRetriesDisabled
+        ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
+        : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${defRp?.max_retries ?? 3} retries (${defRp?.mode || 'immediate'})">🔄 ${defRp?.max_retries ?? 3} (${defRp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
+      const defExcludeBadge = defRoute.exclude_pattern
+        ? `<div style="margin-top:3px;"><span class="badge-tag" style="background:rgba(248,81,73,0.15); color:var(--red); font-size:10px;" title="Negative regex: models matching this pattern will NEVER trigger fallback to default upstream">🚫 Exclude: <code>${UI.escapeHtml(defRoute.exclude_pattern)}</code></span></div>`
+        : '';
+      const defUpstreamVal = defRoute.upstream_url || document.getElementById('proxyConfigUpstream')?.value?.trim() || 'https://openrouter.ai/api/v1';
+
+      const defaultRowHtml = `
+        <tr data-route-id="default" style="${isDefEnabled ? 'background: rgba(59,130,246,0.04);' : 'opacity: 0.6; background: rgba(248,81,73,0.04);'} border-bottom: 2px solid var(--border);">
+          <td><span class="badge-tag" style="background:rgba(139,92,246,0.18); color:var(--purple); font-weight:700; font-size:10px;" title="Pinned System Default Base Route (Fallback for all unmatched models)">🛡️ DEFAULT</span></td>
+          <td style="font-weight: 600;">
+            ${UI.escapeHtml(defRoute.name || 'Default Upstream')}
+            <span class="badge-tag" style="background:rgba(59,130,246,0.12); color:var(--accent); font-size:9px; margin-left:4px;">Base Fallback</span>
+          </td>
+          <td>
+            <code class="code-tag">.* (Fallback)</code>
+            ${defExcludeBadge}
+          </td>
+          <td class="monospace-input" style="color: var(--accent); font-size: 11px;">
+            ${UI.escapeHtml(defUpstreamVal)}
+            ${(defRoute.has_api_key || defRoute.api_key) ? '<span class="badge-tag" style="background:rgba(46,160,67,0.15); color:var(--green); margin-left:6px; font-size:10px;" title="Upstream API key stored — replaces client key">🔑 Key Stored</span>' : '<span class="badge-tag" style="opacity:0.5; margin-left:6px; font-size:10px;" title="No API key stored — client Authorization key passes through">Passthrough</span>'}
+          </td>
+          <td>
+            <span class="concurrency-pill ${defActiveRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${defRoute.slot_cooldown_ms ?? 50}ms)">${defActiveRunning > 0 ? `${defActiveRunning}/` : ''}${defMaxConcVal}</span>
+            ${defWaitingQueued > 0 ? `<span class="concurrency-pill queued" title="${defWaitingQueued} queued in FIFO">Q:${defWaitingQueued}</span>` : ''}
+          </td>
+          <td>${defRetryBadge}</td>
+          <td>${defStatusBadge}</td>
+          <td style="text-align: right; white-space: nowrap;">
+            <button class="btn-icon-action" disabled style="opacity:0.25; cursor:not-allowed;" title="Default route is pinned at top">▲</button>
+            <button class="btn-icon-action" disabled style="opacity:0.25; cursor:not-allowed;" title="Default route is pinned at top">▼</button>
+            <button class="btn-icon-action toggle-default-enable-btn" title="${isDefEnabled ? 'Freeze / Disable Default Upstream Fallback' : 'Unfreeze / Enable Default Upstream Fallback'}" style="${isDefEnabled ? '' : 'color:var(--accent);'}">⚡</button>
+            <button class="btn-icon-action edit-default-route-btn" title="Edit Default Upstream Rule">✏️</button>
+            <button class="btn-icon-action danger" disabled style="opacity:0.25; cursor:not-allowed;" title="System default route cannot be deleted">🗑️</button>
+          </td>
+        </tr>
+      `;
+
+      let customRowsHtml = '';
       if (!routes || routes.length === 0) {
-        tbody.innerHTML = `
+        customRowsHtml = `
           <tr>
-            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 16px;">
-              No custom routing rules configured. All models route to the default upstream.
+            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 12px; font-size: 12px;">
+              No custom routing rules configured. All non-excluded models route to the default upstream above.
             </td>
           </tr>
         `;
-        return;
+      } else {
+        customRowsHtml = routes.map((r, idx) => {
+          const isEnabled = Boolean(r.enabled);
+          const statusBadge = isEnabled
+            ? '<span class="badge-status-active">Active</span>'
+            : '<span class="badge-status-inactive">Disabled</span>';
+          const maxConcVal = r.max_concurrent ?? 4;
+          const stats = r.limiter_stats || {};
+          const activeRunning = stats.active || 0;
+          const waitingQueued = stats.queued || stats.waiting || 0;
+          const rp = r.retry_policy;
+          const retriesDisabled = (rp && (rp.enabled === false || rp.max_retries === 0));
+          const retryBadge = retriesDisabled
+            ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
+            : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${rp?.max_retries ?? 3} retries (${rp?.mode || 'immediate'})">🔄 ${rp?.max_retries ?? 3} (${rp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
+
+          const sharedPrioCount = routes.filter(other => other.enabled && other.pattern === r.pattern && (other.priority ?? 10) === (r.priority ?? 10)).length;
+          const isBalanced = ((State.routesConfig?.routing_strategy === 'balanced') || r.strategy === 'balanced');
+          const poolBadge = (isBalanced && sharedPrioCount > 1)
+            ? `<span class="badge-tag" style="background:rgba(88,166,255,0.15); color:var(--accent); margin-left:4px; font-size:9px;" title="Equal-priority balanced pool (${sharedPrioCount} routes sharing traffic)">⚡ Pool (${sharedPrioCount})</span>`
+            : '';
+
+          const excludeBadge = r.exclude_pattern
+            ? `<div style="margin-top:3px;"><span class="badge-tag" style="background:rgba(248,81,73,0.15); color:var(--red); font-size:10px;" title="Negative regex: models matching this pattern will NEVER trigger this route">🚫 Exclude: <code>${UI.escapeHtml(r.exclude_pattern)}</code></span></div>`
+            : '';
+
+          return `
+            <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
+              <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}${poolBadge}</td>
+              <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
+              <td>
+                <code class="code-tag">${UI.escapeHtml(r.pattern)}</code>
+                ${excludeBadge}
+              </td>
+              <td class="monospace-input" style="color: var(--accent); font-size: 11px;">
+                ${UI.escapeHtml(r.upstream_url)}
+                ${(r.has_api_key || r.api_key) ? '<span class="badge-tag" style="background:rgba(46,160,67,0.15); color:var(--green); margin-left:6px; font-size:10px;" title="Upstream API key stored — replaces client key">🔑 Key Stored</span>' : '<span class="badge-tag" style="opacity:0.5; margin-left:6px; font-size:10px;" title="No API key stored — client Authorization key passes through">Passthrough</span>'}
+              </td>
+              <td>
+                <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
+                ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
+              </td>
+              <td>${retryBadge}</td>
+              <td>${statusBadge}</td>
+              <td style="text-align: right; white-space: nowrap;">
+                <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
+                <button class="btn-icon-action move-down-btn" title="Move Down" data-idx="${idx}" ${idx === routes.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>▼</button>
+                <button class="btn-icon-action toggle-enable-btn" title="${isEnabled ? 'Disable' : 'Enable'}" data-idx="${idx}">⚡</button>
+                <button class="btn-icon-action edit-route-btn" title="Edit Rule" data-idx="${idx}">✏️</button>
+                <button class="btn-icon-action danger delete-route-btn" title="Delete Rule" data-idx="${idx}">🗑️</button>
+              </td>
+            </tr>
+          `;
+        }).join('');
       }
 
-      tbody.innerHTML = routes.map((r, idx) => {
-        const isEnabled = Boolean(r.enabled);
-        const statusBadge = isEnabled
-          ? '<span class="badge-status-active">Active</span>'
-          : '<span class="badge-status-inactive">Disabled</span>';
-        const maxConcVal = r.max_concurrent ?? 4;
-        const stats = r.limiter_stats || {};
-        const activeRunning = stats.active || 0;
-        const waitingQueued = stats.queued || stats.waiting || 0;
-        const rp = r.retry_policy;
-        const retriesDisabled = (rp && (rp.enabled === false || rp.max_retries === 0));
-        const retryBadge = retriesDisabled
-          ? '<span class="badge-status-inactive" style="font-size:10px;" title="Retries disabled (Direct pass-through)">⛔ Off</span>'
-          : `<span class="badge-status-active" style="font-size:10px; background:rgba(56,139,253,0.15); color:var(--accent);" title="${rp?.max_retries ?? 3} retries (${rp?.mode || 'immediate'})">🔄 ${rp?.max_retries ?? 3} (${rp?.mode === 'exponential' ? 'exp' : 'fast'})</span>`;
+      tbody.innerHTML = defaultRowHtml + customRowsHtml;
 
-        const sharedPrioCount = routes.filter(other => other.enabled && other.pattern === r.pattern && (other.priority ?? 10) === (r.priority ?? 10)).length;
-        const isBalanced = ((State.routesConfig?.routing_strategy === 'balanced') || r.strategy === 'balanced');
-        const poolBadge = (isBalanced && sharedPrioCount > 1)
-          ? `<span class="badge-tag" style="background:rgba(88,166,255,0.15); color:var(--accent); margin-left:4px; font-size:9px;" title="Equal-priority balanced pool (${sharedPrioCount} routes sharing traffic)">⚡ Pool (${sharedPrioCount})</span>`
-          : '';
+      // Attach table action handlers for Default Route
+      tbody.querySelectorAll('.toggle-default-enable-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (!State.routesConfig.default_route) State.routesConfig.default_route = {};
+          const curr = State.routesConfig.default_route.enabled !== false;
+          State.routesConfig.default_route.enabled = !curr;
+          renderRoutesUI();
+          saveAllRoutesConfig(false);
+        });
+      });
 
-        return `
-          <tr data-route-id="${r.id}" style="${isEnabled ? '' : 'opacity: 0.6;'}">
-            <td style="color: var(--text-muted); font-size: 11px;">${r.priority ?? (idx + 1)}${poolBadge}</td>
-            <td style="font-weight: 500;">${UI.escapeHtml(r.name || 'Rule ' + (idx + 1))}</td>
-            <td><code class="code-tag">${UI.escapeHtml(r.pattern)}</code></td>
-            <td class="monospace-input" style="color: var(--accent); font-size: 11px;">
-              ${UI.escapeHtml(r.upstream_url)}
-              ${(r.has_api_key || r.api_key) ? '<span class="badge-tag" style="background:rgba(46,160,67,0.15); color:var(--green); margin-left:6px; font-size:10px;" title="Upstream API key stored — replaces client key">🔑 Key Stored</span>' : '<span class="badge-tag" style="opacity:0.5; margin-left:6px; font-size:10px;" title="No API key stored — client Authorization key passes through">Passthrough</span>'}
-            </td>
-            <td>
-              <span class="concurrency-pill ${activeRunning > 0 ? 'active' : ''}" title="Max concurrent slots (Cooldown: ${r.slot_cooldown_ms ?? 50}ms)">${activeRunning > 0 ? `${activeRunning}/` : ''}${maxConcVal}</span>
-              ${waitingQueued > 0 ? `<span class="concurrency-pill queued" title="${waitingQueued} queued in FIFO">Q:${waitingQueued}</span>` : ''}
-            </td>
-            <td>${retryBadge}</td>
-            <td>${statusBadge}</td>
-            <td style="text-align: right; white-space: nowrap;">
-              <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
-              <button class="btn-icon-action move-down-btn" title="Move Down" data-idx="${idx}" ${idx === routes.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>▼</button>
-              <button class="btn-icon-action toggle-enable-btn" title="${isEnabled ? 'Disable' : 'Enable'}" data-idx="${idx}">⚡</button>
-              <button class="btn-icon-action edit-route-btn" title="Edit Rule" data-idx="${idx}">✏️</button>
-              <button class="btn-icon-action danger delete-route-btn" title="Delete Rule" data-idx="${idx}">🗑️</button>
-            </td>
-          </tr>
-        `;
-      }).join('');
+      tbody.querySelectorAll('.edit-default-route-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const def = State.routesConfig.default_route || {};
+          openRouteModal({
+            id: 'default',
+            is_default: true,
+            name: def.name || 'Default Upstream',
+            pattern: '.*',
+            exclude_pattern: def.exclude_pattern || '',
+            upstream_url: def.upstream_url || document.getElementById('proxyConfigUpstream')?.value?.trim() || 'https://openrouter.ai/api/v1',
+            api_key: def.api_key || '',
+            priority: 0,
+            strategy: 'inherit',
+            max_concurrent: def.max_concurrent ?? parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10),
+            slot_cooldown_ms: def.slot_cooldown_ms ?? 50,
+            retry_policy: def.retry_policy,
+            enabled: def.enabled !== false
+          });
+        });
+      });
 
-      // Attach table action handlers
+      // Attach table action handlers for Custom Routes
       tbody.querySelectorAll('.move-up-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
           const idx = parseInt(btn.dataset.idx, 10);
@@ -2097,9 +2190,14 @@ const App = (() => {
     const modal = document.getElementById('routeModal');
     if (!modal) return;
     const titleEl = document.getElementById('routeModalTitle');
+    const defaultNoticeEl = document.getElementById('modalDefaultRouteNotice');
     const idInput = document.getElementById('modalRouteId');
     const nameInput = document.getElementById('modalRouteName');
     const patternInput = document.getElementById('modalRoutePattern');
+    const patternBadgeEl = document.getElementById('modalPatternValidityBadge');
+    const patternHelpEl = document.getElementById('modalRoutePatternHelp');
+    const excludePatternInput = document.getElementById('modalRouteExcludePattern');
+    const excludeBadgeEl = document.getElementById('modalExcludePatternValidityBadge');
     const upstreamInput = document.getElementById('modalRouteUpstream');
     const apiKeyInput = document.getElementById('modalRouteApiKey');
     const toggleApiKeyBtn = document.getElementById('toggleApiKeyVisibilityBtn');
@@ -2116,34 +2214,110 @@ const App = (() => {
       toggleApiKeyBtn.textContent = '👁️ Show';
     }
 
-    if (rule) {
+    const isDefault = Boolean(rule && (rule.is_default || rule.id === 'default'));
+
+    if (isDefault) {
+      if (defaultNoticeEl) defaultNoticeEl.style.display = 'block';
+      titleEl.textContent = '✏️ Edit Default Upstream Router';
+      idInput.value = 'default';
+      nameInput.value = rule.name || 'Default Upstream';
+      patternInput.value = '.*';
+      patternInput.disabled = true;
+      if (patternHelpEl) patternHelpEl.textContent = 'System default catches all models not matched by higher priority rules (or excluded).';
+      if (excludePatternInput) excludePatternInput.value = rule.exclude_pattern || '';
+      upstreamInput.value = rule.upstream_url || '';
+      if (apiKeyInput) apiKeyInput.value = rule.api_key || '';
+      priorityInput.value = 0;
+      priorityInput.disabled = true;
+      if (strategyInput) {
+        strategyInput.value = 'inherit';
+        strategyInput.disabled = true;
+      }
+      if (maxConcInput) maxConcInput.value = rule.max_concurrent ?? 4;
+      if (slotCdInput) slotCdInput.value = rule.slot_cooldown_ms ?? 50;
+      if (maxRetriesInput) maxRetriesInput.value = (rule.retry_policy?.enabled === false) ? 0 : (rule.retry_policy?.max_retries ?? 3);
+      if (retryModeInput) retryModeInput.value = rule.retry_policy?.mode || 'immediate';
+      enabledInput.checked = rule.enabled !== false;
+    } else if (rule) {
+      if (defaultNoticeEl) defaultNoticeEl.style.display = 'none';
       titleEl.textContent = '✏️ Edit Model Route Rule';
       idInput.value = rule.id || '';
       nameInput.value = rule.name || '';
       patternInput.value = rule.pattern || '';
+      patternInput.disabled = false;
+      if (patternHelpEl) patternHelpEl.textContent = 'Standard Python regular expression matched case-insensitively against the requested model string.';
+      if (excludePatternInput) excludePatternInput.value = rule.exclude_pattern || '';
       upstreamInput.value = rule.upstream_url || '';
       if (apiKeyInput) apiKeyInput.value = rule.api_key || '';
       priorityInput.value = rule.priority ?? 10;
-      if (strategyInput) strategyInput.value = rule.strategy || 'inherit';
+      priorityInput.disabled = false;
+      if (strategyInput) {
+        strategyInput.value = rule.strategy || 'inherit';
+        strategyInput.disabled = false;
+      }
       if (maxConcInput) maxConcInput.value = rule.max_concurrent ?? 4;
       if (slotCdInput) slotCdInput.value = rule.slot_cooldown_ms ?? 50;
       if (maxRetriesInput) maxRetriesInput.value = (rule.retry_policy?.enabled === false) ? 0 : (rule.retry_policy?.max_retries ?? 3);
       if (retryModeInput) retryModeInput.value = rule.retry_policy?.mode || 'immediate';
       enabledInput.checked = rule.enabled !== false;
     } else {
+      if (defaultNoticeEl) defaultNoticeEl.style.display = 'none';
       titleEl.textContent = '➕ Add Model Route Rule';
       idInput.value = '';
       nameInput.value = '';
       patternInput.value = '';
+      patternInput.disabled = false;
+      if (patternHelpEl) patternHelpEl.textContent = 'Standard Python regular expression matched case-insensitively against the requested model string.';
+      if (excludePatternInput) excludePatternInput.value = '';
       upstreamInput.value = document.getElementById('proxyConfigUpstream')?.value || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
       if (apiKeyInput) apiKeyInput.value = '';
       priorityInput.value = 100;
-      if (strategyInput) strategyInput.value = 'inherit';
+      priorityInput.disabled = false;
+      if (strategyInput) {
+        strategyInput.value = 'inherit';
+        strategyInput.disabled = false;
+      }
       if (maxConcInput) maxConcInput.value = 4;
       if (slotCdInput) slotCdInput.value = 50;
       if (maxRetriesInput) maxRetriesInput.value = 3;
       if (retryModeInput) retryModeInput.value = 'immediate';
       enabledInput.checked = true;
+    }
+
+    // Refresh pattern validity badge
+    if (patternBadgeEl) {
+      const pVal = patternInput.value.trim();
+      if (!pVal) {
+        patternBadgeEl.textContent = 'Required';
+        patternBadgeEl.style.color = 'var(--text-muted)';
+      } else {
+        try {
+          new RegExp(pVal);
+          patternBadgeEl.textContent = 'Valid Regex';
+          patternBadgeEl.style.color = 'var(--green)';
+        } catch {
+          patternBadgeEl.textContent = 'Invalid Regex';
+          patternBadgeEl.style.color = 'var(--red)';
+        }
+      }
+    }
+
+    // Refresh exclude pattern validity badge
+    if (excludeBadgeEl && excludePatternInput) {
+      const eVal = excludePatternInput.value.trim();
+      if (!eVal) {
+        excludeBadgeEl.textContent = 'Optional';
+        excludeBadgeEl.style.color = 'var(--text-muted)';
+      } else {
+        try {
+          new RegExp(eVal);
+          excludeBadgeEl.textContent = 'Valid Regex';
+          excludeBadgeEl.style.color = 'var(--green)';
+        } catch {
+          excludeBadgeEl.textContent = 'Invalid Regex';
+          excludeBadgeEl.style.color = 'var(--red)';
+        }
+      }
     }
 
     modal.classList.add('open');
@@ -2159,17 +2333,27 @@ const App = (() => {
     if (!State.routesConfig) {
       State.routesConfig = { default_route: {}, routes: [] };
     }
-    const defUpstream = document.getElementById('proxyConfigUpstream')?.value?.trim() || State.routesConfig?.default_route?.upstream_url || 'https://openrouter.ai/api/v1';
-    const defMaxConc = parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10);
     const stratVal = document.getElementById('routesRoutingStrategy')?.value || State.routesConfig?.routing_strategy || 'priority';
     State.routesConfig.routing_strategy = stratVal;
 
     const prevDef = State.routesConfig.default_route || {};
+    const defUpstream = (State.userEditingConfig && document.getElementById('proxyConfigUpstream')?.value?.trim())
+      ? document.getElementById('proxyConfigUpstream').value.trim()
+      : (prevDef.upstream_url || document.getElementById('proxyConfigUpstream')?.value?.trim() || 'https://openrouter.ai/api/v1');
+    const defMaxConc = parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || prevDef.max_concurrent || '4', 10);
+
     State.routesConfig.default_route = {
+      ...prevDef,
+      id: 'default',
       name: prevDef.name || 'Default Upstream',
+      pattern: '.*',
+      exclude_pattern: prevDef.exclude_pattern || null,
       upstream_url: defUpstream,
+      api_key: prevDef.api_key || null,
       max_concurrent: defMaxConc,
       slot_cooldown_ms: prevDef.slot_cooldown_ms ?? 50,
+      enabled: prevDef.enabled !== false,
+      is_default: true,
       retry_policy: prevDef.retry_policy || {
         enabled: true,
         max_retries: 3,
@@ -2245,8 +2429,10 @@ const App = (() => {
     if (saveRuleBtn) {
       saveRuleBtn.addEventListener('click', () => {
         const id = document.getElementById('modalRouteId')?.value;
+        const isDefault = (id === 'default');
         const name = document.getElementById('modalRouteName')?.value?.trim();
         const pattern = document.getElementById('modalRoutePattern')?.value?.trim();
+        const excludePattern = document.getElementById('modalRouteExcludePattern')?.value?.trim() || null;
         const upstream = document.getElementById('modalRouteUpstream')?.value?.trim();
         const apiKey = document.getElementById('modalRouteApiKey')?.value?.trim() || null;
         const priority = parseInt(document.getElementById('modalRoutePriority')?.value || '10', 10);
@@ -2261,15 +2447,25 @@ const App = (() => {
           alert('Please provide a rule name.');
           return;
         }
-        if (!pattern) {
-          alert('Please enter a valid regular expression pattern.');
-          return;
+        if (!isDefault) {
+          if (!pattern) {
+            alert('Please enter a valid regular expression pattern.');
+            return;
+          }
+          try {
+            new RegExp(pattern);
+          } catch (err) {
+            alert(`Invalid regular expression pattern: ${err.message}`);
+            return;
+          }
         }
-        try {
-          new RegExp(pattern);
-        } catch (err) {
-          alert(`Invalid regular expression pattern: ${err.message}`);
-          return;
+        if (excludePattern) {
+          try {
+            new RegExp(excludePattern);
+          } catch (err) {
+            alert(`Invalid negative exclude regex: ${err.message}`);
+            return;
+          }
         }
         if (!upstream) {
           alert('Please provide an upstream target URL.');
@@ -2292,39 +2488,68 @@ const App = (() => {
         if (!State.routesConfig) {
           State.routesConfig = { default_route: {}, routes: [] };
         }
-        if (!State.routesConfig.routes) {
-          State.routesConfig.routes = [];
-        }
 
-        if (id) {
-          const idx = State.routesConfig.routes.findIndex(r => r.id === id);
-          if (idx !== -1) {
-            State.routesConfig.routes[idx] = {
-              ...State.routesConfig.routes[idx],
-              name, pattern, upstream_url: upstream,
-              api_key: apiKey,
-              priority, strategy, max_concurrent: maxConcurrent, slot_cooldown_ms: slotCooldown,
-              retry_policy: retryPolicy, enabled
-            };
-          }
-        } else {
-          const newRule = {
-            id: 'route_' + Math.random().toString(36).substring(2, 9),
+        if (isDefault) {
+          State.routesConfig.default_route = {
+            ...State.routesConfig.default_route,
+            id: 'default',
             name,
-            pattern,
+            pattern: '.*',
+            exclude_pattern: excludePattern,
             upstream_url: upstream,
             api_key: apiKey,
-            priority,
-            strategy,
             max_concurrent: maxConcurrent,
             slot_cooldown_ms: slotCooldown,
             retry_policy: retryPolicy,
-            enabled
+            enabled: enabled,
+            is_default: true
           };
-          State.routesConfig.routes.push(newRule);
+          const upInput = document.getElementById('proxyConfigUpstream');
+          if (upInput && !State.userEditingConfig) upInput.value = upstream;
+          const mcInput = document.getElementById('defaultRouterMaxConcurrent');
+          if (mcInput) mcInput.value = maxConcurrent;
+        } else {
+          if (!State.routesConfig.routes) {
+            State.routesConfig.routes = [];
+          }
+          if (id) {
+            const idx = State.routesConfig.routes.findIndex(r => r.id === id);
+            if (idx !== -1) {
+              State.routesConfig.routes[idx] = {
+                ...State.routesConfig.routes[idx],
+                name,
+                pattern,
+                exclude_pattern: excludePattern,
+                upstream_url: upstream,
+                api_key: apiKey,
+                priority,
+                strategy,
+                max_concurrent: maxConcurrent,
+                slot_cooldown_ms: slotCooldown,
+                retry_policy: retryPolicy,
+                enabled
+              };
+            }
+          } else {
+            const newRule = {
+              id: 'route_' + Math.random().toString(36).substring(2, 9),
+              name,
+              pattern,
+              exclude_pattern: excludePattern,
+              upstream_url: upstream,
+              api_key: apiKey,
+              priority,
+              strategy,
+              max_concurrent: maxConcurrent,
+              slot_cooldown_ms: slotCooldown,
+              retry_policy: retryPolicy,
+              enabled
+            };
+            State.routesConfig.routes.push(newRule);
+          }
+          State.routesConfig.routes.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
         }
 
-        State.routesConfig.routes.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
         closeRouteModal();
         renderRoutesUI();
         saveAllRoutesConfig(true);
@@ -2366,6 +2591,27 @@ const App = (() => {
       });
     }
 
+    const excludeInput = document.getElementById('modalRouteExcludePattern');
+    const excludeBadge = document.getElementById('modalExcludePatternValidityBadge');
+    if (excludeInput && excludeBadge) {
+      excludeInput.addEventListener('input', () => {
+        const val = excludeInput.value.trim();
+        if (!val) {
+          excludeBadge.textContent = 'Optional';
+          excludeBadge.style.color = 'var(--text-muted)';
+          return;
+        }
+        try {
+          new RegExp(val);
+          excludeBadge.textContent = 'Valid Regex';
+          excludeBadge.style.color = 'var(--green)';
+        } catch (e) {
+          excludeBadge.textContent = 'Invalid Regex';
+          excludeBadge.style.color = 'var(--red)';
+        }
+      });
+    }
+
     const testInput = document.getElementById('liveRouteTestInput');
     const testResultEl = document.getElementById('liveRouteTestResult');
     let debounceTimer = null;
@@ -2386,21 +2632,31 @@ const App = (() => {
               : '<b>Passthrough</b>';
             let cascadeHtml = '';
             if (res.candidates && res.candidates.length > 1) {
-              const chainDesc = res.candidates.map((c, i) => `<span style="white-space:nowrap;"><b>#${i+1}</b> ${UI.escapeHtml(c.route_name)} (<code>${UI.escapeHtml(c.resolved_upstream)}</code>)</span>`).join(' <span style="color:var(--accent);">➔</span> ');
+              const chainDesc = res.candidates.map((c, i) => {
+                const isDefTag = c.is_default ? ' <span style="color:var(--purple); font-size:10px;">(Default)</span>' : '';
+                return `<span style="white-space:nowrap;"><b>#${i+1}</b> ${UI.escapeHtml(c.route_name)}${isDefTag} (<code>${UI.escapeHtml(c.resolved_upstream)}</code>)</span>`;
+              }).join(' <span style="color:var(--accent);">➔</span> ');
               cascadeHtml = `<div style="margin-top:5px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.15); font-size:0.85em;"><b style="color:var(--accent);">Multi-Priority Overspill Chain (${res.candidates.length} routes):</b> ${chainDesc}</div>`;
             }
 
-            if (!res.is_default) {
+            if (res.blocked || !res.route_id) {
+              testResultEl.className = 'route-test-result-banner match-blocked';
+              testResultEl.innerHTML = `
+                <div><b style="color:var(--red);">🚫 Traffic Blocked (HTTP 503):</b> No active route available for model "<code>${UI.escapeHtml(query)}</code>". All matching routes or default upstream are disabled, frozen, or excluded.</div>
+              `;
+            } else if (!res.is_default) {
+              const excludeTag = res.exclude_pattern ? ` &bull; <span style="color:var(--red);">Exclude: <code>${UI.escapeHtml(res.exclude_pattern)}</code></span>` : '';
               testResultEl.className = 'route-test-result-banner match-custom';
               testResultEl.innerHTML = `
-                <div><b style="color:var(--green);">✔ Matched Custom Route:</b> "${UI.escapeHtml(res.route_name)}" (Pattern: <code>${UI.escapeHtml(res.pattern_matched)}</code>)</div>
+                <div><b style="color:var(--green);">✔ Matched Custom Route:</b> "${UI.escapeHtml(res.route_name)}" (Pattern: <code>${UI.escapeHtml(res.pattern_matched)}</code>${excludeTag})</div>
                 <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: ${authDesc} &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
                 ${cascadeHtml}
               `;
             } else {
+              const excludeTag = res.exclude_pattern ? ` &bull; <span style="color:var(--red);">Exclude: <code>${UI.escapeHtml(res.exclude_pattern)}</code></span>` : '';
               testResultEl.className = 'route-test-result-banner match-default';
               testResultEl.innerHTML = `
-                <div><b style="color:var(--purple);">⚡ Fallback to Default Router:</b> "${UI.escapeHtml(res.route_name)}"</div>
+                <div><b style="color:var(--purple);">⚡ Fallback to Default Router:</b> "${UI.escapeHtml(res.route_name)}"${excludeTag}</div>
                 <div>Target URL: <b>${UI.escapeHtml(res.resolved_upstream)}</b> &bull; Client Auth: ${authDesc} &bull; Max Conc: <b>${res.max_concurrent || 4}</b></div>
                 ${cascadeHtml}
               `;

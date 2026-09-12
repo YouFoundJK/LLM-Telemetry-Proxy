@@ -5,6 +5,7 @@ Part of the LLM Telemetry Proxy.
 """
 
 import os
+import re
 import sys
 import json
 import asyncio
@@ -371,6 +372,29 @@ async def handle_routes_save(request: web.Request) -> web.Response:
         data = await request.json()
         if not isinstance(data, dict):
             return web.json_response({"error": "Invalid payload format, expected JSON object"}, status=400)
+
+        # Validate regex syntax for pattern and exclude_pattern
+        for r in data.get("routes", []):
+            pat = r.get("pattern")
+            if pat and pat != ".*":
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    return web.json_response({"error": f"Invalid regex pattern in rule '{r.get('name', 'Rule')}': {e}"}, status=400)
+            ex_pat = r.get("exclude_pattern")
+            if ex_pat:
+                try:
+                    re.compile(ex_pat)
+                except re.error as e:
+                    return web.json_response({"error": f"Invalid exclude regex pattern in rule '{r.get('name', 'Rule')}': {e}"}, status=400)
+
+        def_ex_pat = data.get("default_route", {}).get("exclude_pattern")
+        if def_ex_pat:
+            try:
+                re.compile(def_ex_pat)
+            except re.error as e:
+                return web.json_response({"error": f"Invalid exclude regex pattern in default route: {e}"}, status=400)
+
         _model_router.update_from_dict(data)
         success = _model_router.save()
         if not success:
@@ -392,7 +416,7 @@ async def handle_routes_test(request: web.Request) -> web.Response:
         data = await request.json() if request.can_read_body else {}
         model_name = data.get("model", "")
         chain = _model_router.resolve_chain(model_name)
-        res = chain[0] if chain else _model_router.resolve(model_name)
+        res = chain[0] if chain else None
         candidates_list = [
             {
                 "route_id": c.route_id,
@@ -400,6 +424,7 @@ async def handle_routes_test(request: web.Request) -> web.Response:
                 "resolved_upstream": c.upstream_url,
                 "is_default": c.is_default,
                 "pattern_matched": c.pattern_matched,
+                "exclude_pattern": c.exclude_pattern,
                 "priority": c.priority,
                 "strategy": c.strategy,
                 "max_concurrent": c.max_concurrent,
@@ -408,6 +433,30 @@ async def handle_routes_test(request: web.Request) -> web.Response:
             }
             for c in chain
         ]
+
+        if not res:
+            return web.json_response({
+                "model": model_name,
+                "routing_strategy": _model_router.routing_strategy,
+                "resolved_upstream": None,
+                "route_name": None,
+                "route_id": None,
+                "is_default": False,
+                "pattern_matched": None,
+                "exclude_pattern": None,
+                "priority": 0,
+                "strategy": "inherit",
+                "max_concurrent": 0,
+                "slot_cooldown_ms": 0,
+                "max_rpm": -1,
+                "timeout": None,
+                "fallback_upstream_url": None,
+                "has_api_key": False,
+                "matched_routes_count": 0,
+                "candidates": [],
+                "error": "No matching active route (default upstream is disabled or excluded)",
+            })
+
         return web.json_response({
             "model": model_name,
             "routing_strategy": _model_router.routing_strategy,
@@ -416,6 +465,7 @@ async def handle_routes_test(request: web.Request) -> web.Response:
             "route_id": res.route_id,
             "is_default": res.is_default,
             "pattern_matched": res.pattern_matched,
+            "exclude_pattern": res.exclude_pattern,
             "priority": res.priority,
             "strategy": res.strategy,
             "max_concurrent": res.max_concurrent,

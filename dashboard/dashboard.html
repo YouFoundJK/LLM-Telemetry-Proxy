@@ -886,6 +886,9 @@
           <span class="close-btn" id="closeRouteModalBtn">&times;</span>
         </div>
         <div class="modal-body">
+          <div id="modalDefaultRouteNotice" class="banner-notice" style="display: none; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; color: var(--text);">
+            🛡️ <strong>System Default Upstream</strong>: Acts as the base fallback route for all unmatched models. It cannot be deleted, but can be configured with model exclusions, custom concurrency limits, API keys, or frozen (disabled).
+          </div>
           <form id="routeForm" onsubmit="return false;" style="display: flex; flex-direction: column; gap: 14px;">
             <input type="hidden" id="modalRouteId" value="">
             
@@ -900,8 +903,19 @@
                 <span id="modalPatternValidityBadge" style="font-size: 11px; color: var(--green);">Valid Regex</span>
               </div>
               <input type="text" id="modalRoutePattern" class="proxy-input monospace-input" placeholder="e.g. stealth/ox-alpha.* or ^(gpt-4o|claude-3-5)" required>
-              <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">
+              <div id="modalRoutePatternHelp" style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">
                 Standard Python regular expression matched case-insensitively against the requested model string.
+              </div>
+            </div>
+
+            <div class="proxy-form-group">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <label for="modalRouteExcludePattern">Negative Exclude Regex <span style="font-size: 11px; color: var(--text-muted); font-weight: normal;">(Optional)</span></label>
+                <span id="modalExcludePatternValidityBadge" style="font-size: 11px; color: var(--text-muted);">Optional</span>
+              </div>
+              <input type="text" id="modalRouteExcludePattern" class="proxy-input monospace-input" placeholder="e.g. (glm-5\.3|kimi-k3) or test.*">
+              <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">
+                Models matching this pattern will <strong>never</strong> trigger this route, even if matched above.
               </div>
             </div>
 

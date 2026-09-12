@@ -138,13 +138,30 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     except Exception:
         pass
 
-    route_candidates = _model_router.resolve_chain(model)
-    admit_route, admit_limiter, admit_already_acquired = await _model_router.select_admission_route(route_candidates)
-    route_sequence = [admit_route] + [r for r in route_candidates if r.route_id != admit_route.route_id]
-
     req_id = f"req_{uuid.uuid4().hex[:12]}"
     req_seq = payload_inspector.next_raw_payload_seq()
     t_start = time.monotonic()
+
+    route_candidates = _model_router.resolve_chain(model)
+    if not route_candidates:
+        _tlog_fn(f"[telemetry] [ROUTE REJECTED] req_id={req_id} model={model} path={path} - no matching active routes (default upstream is disabled/frozen or excluded)")
+        return web.json_response({
+            "error": {
+                "message": f"No active route available for model '{model}'. Default upstream is disabled/frozen or excluded, and no candidate routes matched.",
+                "type": "no_active_route",
+                "code": "no_active_route"
+            }
+        }, status=503)
+
+    admit_route, admit_limiter, admit_already_acquired = await _model_router.select_admission_route(route_candidates)
+    if not admit_route:
+        return web.json_response({
+            "error": {
+                "message": f"No available route capacity for model '{model}'.",
+                "type": "no_capacity"
+            }
+        }, status=503)
+    route_sequence = [admit_route] + [r for r in route_candidates if r.route_id != admit_route.route_id]
     ttfb_ms, status_code, error, output_tokens, reasoning_tokens, tokens_per_s = None, None, None, None, None, None
     logged, headers_prepared, response = False, False, None
     is_stream_req = bool(payload.get("stream") if isinstance(payload, dict) else False)

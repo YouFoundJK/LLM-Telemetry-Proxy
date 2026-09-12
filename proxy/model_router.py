@@ -432,6 +432,7 @@ class RouteResolutionResult:
     api_key: Optional[str] = None
     priority: int = 10
     strategy: str = "inherit"
+    exclude_pattern: Optional[str] = None
 
 
 class ModelRouteRule:
@@ -452,10 +453,12 @@ class ModelRouteRule:
         retry_policy: Optional[Dict[str, Any]] = None,
         limiter: Optional[UpstreamConcurrencyLimiter] = None,
         strategy: str = "inherit",
+        exclude_pattern: Optional[str] = None,
+        is_default: bool = False,
     ):
         self.id = str(id) if id else f"route_{uuid.uuid4().hex[:8]}"
         self.name = str(name).strip() if name else "Custom Route"
-        self.pattern = str(pattern).strip()
+        self.pattern = str(pattern).strip() if pattern is not None else ".*"
         self.upstream_url = str(upstream_url).strip().rstrip("/")
         self.api_key = str(api_key).strip() if api_key and str(api_key).strip() else None
         self.enabled = bool(enabled)
@@ -467,6 +470,8 @@ class ModelRouteRule:
         self.timeout = normalize_timeout(timeout)
         self.fallback_upstream_url = str(fallback_upstream_url).strip().rstrip("/") if fallback_upstream_url else None
         self.retry_policy = normalize_retry_policy(retry_policy)
+        self.exclude_pattern = str(exclude_pattern).strip() if exclude_pattern and str(exclude_pattern).strip() else None
+        self.is_default = bool(is_default) or (self.id == "default")
         
         self.limiter = limiter or UpstreamConcurrencyLimiter(
             max_concurrent=self.max_concurrent,
@@ -478,22 +483,41 @@ class ModelRouteRule:
         self.limiter.max_rpm = self.max_rpm
 
         self._compiled: Optional[re.Pattern] = None
+        self._compiled_exclude: Optional[re.Pattern] = None
         self._compile_regex()
 
     def _compile_regex(self):
-        if not self.pattern:
+        if not self.pattern or self.pattern == ".*":
             self._compiled = None
-            return
-        try:
-            self._compiled = re.compile(self.pattern, re.IGNORECASE)
-        except re.error as e:
-            print(f"[ModelRouter] Invalid regex pattern '{self.pattern}' for rule '{self.name}': {e}", file=sys.stderr)
-            self._compiled = None
+        else:
+            try:
+                self._compiled = re.compile(self.pattern, re.IGNORECASE)
+            except re.error as e:
+                print(f"[ModelRouter] Invalid regex pattern '{self.pattern}' for rule '{self.name}': {e}", file=sys.stderr)
+                self._compiled = None
+
+        if not self.exclude_pattern:
+            self._compiled_exclude = None
+        else:
+            try:
+                self._compiled_exclude = re.compile(self.exclude_pattern, re.IGNORECASE)
+            except re.error as e:
+                print(f"[ModelRouter] Invalid exclude regex pattern '{self.exclude_pattern}' for rule '{self.name}': {e}", file=sys.stderr)
+                self._compiled_exclude = None
 
     def matches(self, model_name: str) -> bool:
-        if not self.enabled or not self._compiled or not model_name:
+        if not self.enabled or not model_name:
             return False
-        return bool(self._compiled.search(model_name))
+        clean_name = str(model_name).strip()
+        # 1. Negative / Exclude regex check: if matched, this route is immediately disqualified
+        if self._compiled_exclude and self._compiled_exclude.search(clean_name):
+            return False
+        # 2. Positive pattern check (catch-all if empty or '.*')
+        if not self.pattern or self.pattern == ".*":
+            return True
+        if not self._compiled:
+            return False
+        return bool(self._compiled.search(clean_name))
 
     def to_config_dict(self) -> Dict[str, Any]:
         """Clean dictionary suitable for persisting to JSON configuration file."""
@@ -512,6 +536,8 @@ class ModelRouteRule:
             "timeout": self.timeout,
             "fallback_upstream_url": self.fallback_upstream_url,
             "retry_policy": self.retry_policy,
+            "exclude_pattern": self.exclude_pattern,
+            "is_default": self.is_default,
         }
 
     def to_dict(self, mask_keys: bool = False) -> Dict[str, Any]:
@@ -532,6 +558,8 @@ class ModelRouteRule:
             "timeout": self.timeout,
             "fallback_upstream_url": self.fallback_upstream_url,
             "retry_policy": self.retry_policy,
+            "exclude_pattern": self.exclude_pattern,
+            "is_default": self.is_default,
             "limiter_stats": self.limiter.get_stats(),
         }
 
@@ -559,7 +587,25 @@ class ModelRouter:
             slot_cooldown_seconds=self.default_slot_cooldown_ms / 1000.0,
             max_rpm=self.default_max_rpm,
         )
-        self.rules: List[ModelRouteRule] = []
+        self.default_rule = ModelRouteRule(
+            id="default",
+            name=self.default_name,
+            pattern=".*",
+            upstream_url=self.default_upstream_url,
+            api_key=self.default_api_key,
+            enabled=True,
+            priority=0,
+            strategy="inherit",
+            max_concurrent=self.default_max_concurrent,
+            slot_cooldown_ms=self.default_slot_cooldown_ms,
+            max_rpm=self.default_max_rpm,
+            timeout=self.default_timeout,
+            fallback_upstream_url=self.default_fallback_upstream_url,
+            retry_policy=self.default_retry_policy,
+            limiter=self.default_limiter,
+            is_default=True,
+        )
+        self.rules: List[ModelRouteRule] = [self.default_rule]
 
         if self.config_path and self.config_path.exists():
             self.load()
@@ -575,23 +621,64 @@ class ModelRouter:
 
             self.routing_strategy = str(data.get("routing_strategy", "priority")).strip().lower()
             def_route = data.get("default_route", {})
-            self.default_upstream_url = def_route.get("upstream_url", DEFAULT_UPSTREAM_URL).rstrip("/")
-            self.default_name = def_route.get("name", "Default Upstream")
-            self.default_api_key = str(def_route["api_key"]).strip() if def_route.get("api_key") else None
-            self.default_max_concurrent = max(1, int(def_route.get("max_concurrent", 4)))
-            self.default_slot_cooldown_ms = max(0, int(def_route.get("slot_cooldown_ms", 50)))
-            self.default_max_rpm = int(def_route.get("max_rpm", -1)) if def_route.get("max_rpm") is not None else -1
-            self.default_timeout = normalize_timeout(def_route.get("timeout"))
-            self.default_fallback_upstream_url = def_route.get("fallback_upstream_url")
-            self.default_retry_policy = normalize_retry_policy(def_route.get("retry_policy"))
+
+            # Check if routes array contains an explicit default rule
+            routes_data = data.get("routes", [])
+            explicit_def_rule_data = None
+            for r in routes_data:
+                if r.get("is_default") or r.get("id") == "default":
+                    explicit_def_rule_data = r
+                    break
+
+            if explicit_def_rule_data:
+                def_source = dict(def_route)
+                def_source.update(explicit_def_rule_data)
+            else:
+                def_source = def_route
+
+            self.default_upstream_url = def_source.get("upstream_url", DEFAULT_UPSTREAM_URL).rstrip("/")
+            self.default_name = def_source.get("name", "Default Upstream")
+            self.default_api_key = str(def_source["api_key"]).strip() if def_source.get("api_key") else None
+            self.default_max_concurrent = max(1, int(def_source.get("max_concurrent", 4)))
+            self.default_slot_cooldown_ms = max(0, int(def_source.get("slot_cooldown_ms", 50)))
+            self.default_max_rpm = int(def_source.get("max_rpm", -1)) if def_source.get("max_rpm") is not None else -1
+            self.default_timeout = normalize_timeout(def_source.get("timeout"))
+            self.default_fallback_upstream_url = def_source.get("fallback_upstream_url")
+            self.default_retry_policy = normalize_retry_policy(def_source.get("retry_policy"))
+            def_enabled = bool(def_source.get("enabled", True))
+            def_exclude_pattern = def_source.get("exclude_pattern")
+            def_priority = int(def_source.get("priority", 0))
+
             self.default_limiter.max_concurrent = self.default_max_concurrent
             self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
             self.default_limiter.max_rpm = self.default_max_rpm
 
+            self.default_rule = ModelRouteRule(
+                id="default",
+                name=self.default_name,
+                pattern=def_source.get("pattern", ".*"),
+                upstream_url=self.default_upstream_url,
+                api_key=self.default_api_key,
+                enabled=def_enabled,
+                priority=def_priority,
+                strategy=def_source.get("strategy", "inherit"),
+                max_concurrent=self.default_max_concurrent,
+                slot_cooldown_ms=self.default_slot_cooldown_ms,
+                max_rpm=self.default_max_rpm,
+                timeout=self.default_timeout,
+                fallback_upstream_url=self.default_fallback_upstream_url,
+                retry_policy=self.default_retry_policy,
+                limiter=self.default_limiter,
+                exclude_pattern=def_exclude_pattern,
+                is_default=True,
+            )
+
             existing_rules_map = {r.id: r for r in self.rules}
             loaded_rules = []
-            for r in data.get("routes", []):
+            for r in routes_data:
                 r_id = r.get("id")
+                if r_id == "default" or r.get("is_default"):
+                    continue
                 existing = existing_rules_map.get(r_id) if r_id else None
                 rule = ModelRouteRule(
                     id=r_id,
@@ -608,7 +695,9 @@ class ModelRouter:
                     timeout=r.get("timeout"),
                     fallback_upstream_url=r.get("fallback_upstream_url"),
                     retry_policy=r.get("retry_policy"),
+                    exclude_pattern=r.get("exclude_pattern"),
                     limiter=existing.limiter if existing else None,
+                    is_default=False,
                 )
                 loaded_rules.append(rule)
 
@@ -624,20 +713,29 @@ class ModelRouter:
         if not target_path:
             return False
 
+        def_dict = self.default_rule.to_config_dict() if self.default_rule else {
+            "id": "default",
+            "name": self.default_name,
+            "pattern": ".*",
+            "upstream_url": self.default_upstream_url,
+            "api_key": self.default_api_key,
+            "enabled": True,
+            "priority": 0,
+            "strategy": "inherit",
+            "max_concurrent": self.default_max_concurrent,
+            "slot_cooldown_ms": self.default_slot_cooldown_ms,
+            "max_rpm": self.default_max_rpm,
+            "timeout": self.default_timeout,
+            "fallback_upstream_url": self.default_fallback_upstream_url,
+            "retry_policy": self.default_retry_policy,
+            "exclude_pattern": None,
+            "is_default": True,
+        }
+
         data = {
             "routing_strategy": self.routing_strategy,
-            "default_route": {
-                "name": self.default_name,
-                "upstream_url": self.default_upstream_url,
-                "api_key": self.default_api_key,
-                "max_concurrent": self.default_max_concurrent,
-                "slot_cooldown_ms": self.default_slot_cooldown_ms,
-                "max_rpm": self.default_max_rpm,
-                "timeout": self.default_timeout,
-                "fallback_upstream_url": self.default_fallback_upstream_url,
-                "retry_policy": self.default_retry_policy,
-            },
-            "routes": [r.to_config_dict() for r in self.rules],
+            "default_route": def_dict,
+            "routes": [r.to_config_dict() for r in self.rules if not r.is_default and r.id != "default"],
         }
 
         try:
@@ -674,67 +772,62 @@ class ModelRouter:
                 print(f"[ModelRouter] Direct fallback save also failed to {target_path}: {e2}", file=sys.stderr)
                 return False
 
+    def _rule_to_result(self, rule: ModelRouteRule) -> RouteResolutionResult:
+        return RouteResolutionResult(
+            route_id=rule.id,
+            route_name=rule.name,
+            upstream_url=rule.upstream_url,
+            is_default=rule.is_default,
+            pattern_matched=rule.pattern,
+            exclude_pattern=rule.exclude_pattern,
+            max_concurrent=rule.max_concurrent,
+            slot_cooldown_ms=rule.slot_cooldown_ms,
+            max_rpm=rule.max_rpm,
+            timeout=rule.timeout,
+            fallback_upstream_url=rule.fallback_upstream_url,
+            retry_policy=rule.retry_policy,
+            api_key=rule.api_key,
+            priority=rule.priority,
+            strategy=rule.strategy,
+        )
+
     def resolve_chain(self, model_name: Optional[str]) -> List[RouteResolutionResult]:
         """
         Resolve all matching candidate routes for the requested model name in priority order.
-        If no custom rules match, returns a single-item list containing the default route.
+        Custom rules matching the model are added in descending priority order.
+        If no custom rules match, the default rule is returned as fallback (if enabled and not excluded).
+        If default rule is disabled/frozen or excluded, returns an empty list.
         """
         matches: List[RouteResolutionResult] = []
-        if model_name:
-            clean_name = str(model_name).strip()
-            for rule in self.rules:
-                if rule.matches(clean_name):
-                    matches.append(
-                        RouteResolutionResult(
-                            route_id=rule.id,
-                            route_name=rule.name,
-                            upstream_url=rule.upstream_url,
-                            is_default=False,
-                            pattern_matched=rule.pattern,
-                            max_concurrent=rule.max_concurrent,
-                            slot_cooldown_ms=rule.slot_cooldown_ms,
-                            max_rpm=rule.max_rpm,
-                            timeout=rule.timeout,
-                            fallback_upstream_url=rule.fallback_upstream_url,
-                            retry_policy=rule.retry_policy,
-                            api_key=rule.api_key,
-                            priority=rule.priority,
-                            strategy=rule.strategy,
-                        )
-                    )
+        clean_name = str(model_name).strip() if model_name else ""
 
+        # 1. Custom rules matching clean_name
+        custom_rules = [r for r in self.rules if not r.is_default and r.id != "default"]
+        custom_rules.sort(key=lambda x: x.priority, reverse=True)
+
+        for rule in custom_rules:
+            if rule.matches(clean_name):
+                matches.append(self._rule_to_result(rule))
+
+        # 2. If no custom rules matched, fall back to default rule if enabled and not excluded
         if not matches:
-            matches.append(
-                RouteResolutionResult(
-                    route_id=None,
-                    route_name=self.default_name,
-                    upstream_url=self.default_upstream_url,
-                    is_default=True,
-                    pattern_matched=None,
-                    max_concurrent=self.default_max_concurrent,
-                    slot_cooldown_ms=self.default_slot_cooldown_ms,
-                    max_rpm=self.default_max_rpm,
-                    timeout=self.default_timeout,
-                    fallback_upstream_url=self.default_fallback_upstream_url,
-                    retry_policy=self.default_retry_policy,
-                    api_key=self.default_api_key,
-                    priority=0,
-                    strategy="inherit",
-                )
-            )
+            def_rule = self.default_rule
+            if def_rule and def_rule.enabled and def_rule.matches(clean_name):
+                matches.append(self._rule_to_result(def_rule))
 
         return matches
 
-    def resolve(self, model_name: Optional[str]) -> RouteResolutionResult:
+    def resolve(self, model_name: Optional[str]) -> Optional[RouteResolutionResult]:
         """
         Resolve highest-priority target upstream for the requested model name.
         Executes in microsecond time.
         """
-        return self.resolve_chain(model_name)[0]
+        chain = self.resolve_chain(model_name)
+        return chain[0] if chain else None
 
     async def select_admission_route(
         self, candidates: List[RouteResolutionResult]
-    ) -> Tuple[RouteResolutionResult, UpstreamConcurrencyLimiter, bool]:
+    ) -> Tuple[Optional[RouteResolutionResult], Optional[UpstreamConcurrencyLimiter], bool]:
         """
         Select an admission route following priority precedence:
         - If strategy is 'priority' (default):
@@ -752,10 +845,7 @@ class ModelRouter:
              with the shortest wait queue, breaking ties with round-robin among equal-priority candidates.
         """
         if not candidates:
-            def_route = self.resolve(None)
-            limiter = self.get_limiter(def_route.route_id)
-            acquired = await limiter.try_acquire()
-            return def_route, limiter, acquired
+            return None, None, False
 
         if len(candidates) == 1:
             limiter = self.get_limiter(candidates[0].route_id)
@@ -769,13 +859,11 @@ class ModelRouter:
 
         if not is_balanced:
             # ── Default Priority Spillover ──────────────────────────────────
-            # 1. Zero-wait overspill down the priority chain
             for cand in candidates:
                 limiter = self.get_limiter(cand.route_id)
                 if await limiter.try_acquire():
                     return cand, limiter, True
 
-            # 2. All routes are saturated: pick shortest queue (break ties by priority, which is original list order)
             best_candidate = candidates[0]
             best_limiter = self.get_limiter(best_candidate.route_id)
             min_queued = best_limiter.queued
@@ -803,10 +891,6 @@ class ModelRouter:
             self._rr_counter += 1
             cur_rr = self._rr_counter
 
-            # Sort candidate order by:
-            # 1. Has any existing queue waiters? (prefer routes with 0 queued waiters)
-            # 2. Least active connections (lowest active slots)
-            # 3. Round-robin rotational offset for tie breaking
             def tier_sort_key(item: Tuple[int, RouteResolutionResult]):
                 idx, c = item
                 lim = self.get_limiter(c.route_id)
@@ -820,10 +904,6 @@ class ModelRouter:
                 if await limiter.try_acquire():
                     return cand, limiter, True
 
-        # All routes across all tiers are saturated: pick candidate with shortest queue.
-        # Break ties:
-        # 1. Higher priority first
-        # 2. Round-robin among equal-priority candidates with identical min queue
         all_limiters = [(c, self.get_limiter(c.route_id)) for c in candidates]
         min_queued = min(lim.queued for _, lim in all_limiters)
         min_q_candidates = [c for c, lim in all_limiters if lim.queued == min_queued]
@@ -839,11 +919,12 @@ class ModelRouter:
         """
         Get the concurrency limiter for a specific route, or the default limiter.
         """
-        if route_id:
-            for rule in self.rules:
-                if rule.id == route_id and rule.enabled:
-                    return rule.limiter
-        return self.default_limiter
+        if not route_id or route_id == "default" or (self.default_rule and self.default_rule.id == route_id):
+            return self.default_rule.limiter if self.default_rule else self.default_limiter
+        for rule in self.rules:
+            if rule.id == route_id and rule.enabled:
+                return rule.limiter
+        return self.default_rule.limiter if self.default_rule else self.default_limiter
 
     def get_all_limiters_stats(self) -> Dict[str, Any]:
         """
@@ -851,13 +932,17 @@ class ModelRouter:
         """
         routes_stats = []
         for r in self.rules:
+            if r.is_default or r.id == "default":
+                continue
             routes_stats.append({
                 "id": r.id,
                 "name": r.name,
                 "pattern": r.pattern,
+                "exclude_pattern": r.exclude_pattern,
                 "upstream_url": r.upstream_url,
                 "has_api_key": bool(r.api_key),
                 "enabled": r.enabled,
+                "is_default": False,
                 "max_rpm": r.max_rpm,
                 "timeout": r.timeout,
                 "fallback_upstream_url": r.fallback_upstream_url,
@@ -865,85 +950,139 @@ class ModelRouter:
                 "stats": r.limiter.get_stats(),
             })
 
+        def_rule = self.default_rule
+        def_stats = def_rule.limiter.get_stats() if def_rule else self.default_limiter.get_stats()
         return {
             "default": {
-                "name": self.default_name,
-                "upstream_url": self.default_upstream_url,
-                "has_api_key": bool(self.default_api_key),
-                "max_rpm": self.default_max_rpm,
-                "timeout": self.default_timeout,
-                "fallback_upstream_url": self.default_fallback_upstream_url,
-                "retry_policy": self.default_retry_policy,
-                "stats": self.default_limiter.get_stats(),
+                "id": "default",
+                "name": def_rule.name if def_rule else self.default_name,
+                "pattern": def_rule.pattern if def_rule else ".*",
+                "exclude_pattern": def_rule.exclude_pattern if def_rule else None,
+                "upstream_url": def_rule.upstream_url if def_rule else self.default_upstream_url,
+                "has_api_key": bool(def_rule.api_key if def_rule else self.default_api_key),
+                "enabled": def_rule.enabled if def_rule else True,
+                "is_default": True,
+                "max_rpm": def_rule.max_rpm if def_rule else self.default_max_rpm,
+                "timeout": def_rule.timeout if def_rule else self.default_timeout,
+                "fallback_upstream_url": def_rule.fallback_upstream_url if def_rule else self.default_fallback_upstream_url,
+                "retry_policy": def_rule.retry_policy if def_rule else self.default_retry_policy,
+                "stats": def_stats,
             },
             "routes": routes_stats,
         }
 
     def to_dict(self, mask_keys: bool = False) -> Dict[str, Any]:
+        def_dict = self.default_rule.to_dict(mask_keys=mask_keys) if self.default_rule else {
+            "id": "default",
+            "name": self.default_name,
+            "pattern": ".*",
+            "upstream_url": self.default_upstream_url,
+            "api_key": mask_api_key(self.default_api_key) if mask_keys else self.default_api_key,
+            "has_api_key": bool(self.default_api_key),
+            "enabled": True,
+            "priority": 0,
+            "strategy": "inherit",
+            "max_concurrent": self.default_max_concurrent,
+            "slot_cooldown_ms": self.default_slot_cooldown_ms,
+            "max_rpm": self.default_max_rpm,
+            "timeout": self.default_timeout,
+            "fallback_upstream_url": self.default_fallback_upstream_url,
+            "retry_policy": self.default_retry_policy,
+            "exclude_pattern": None,
+            "is_default": True,
+            "limiter_stats": self.default_limiter.get_stats(),
+        }
+        custom_dicts = [r.to_dict(mask_keys=mask_keys) for r in self.rules if not r.is_default and r.id != "default"]
         return {
             "routing_strategy": self.routing_strategy,
-            "default_route": {
-                "name": self.default_name,
-                "upstream_url": self.default_upstream_url,
-                "api_key": mask_api_key(self.default_api_key) if mask_keys else self.default_api_key,
-                "has_api_key": bool(self.default_api_key),
-                "max_concurrent": self.default_max_concurrent,
-                "slot_cooldown_ms": self.default_slot_cooldown_ms,
-                "max_rpm": self.default_max_rpm,
-                "timeout": self.default_timeout,
-                "fallback_upstream_url": self.default_fallback_upstream_url,
-                "retry_policy": self.default_retry_policy,
-                "limiter_stats": self.default_limiter.get_stats(),
-            },
-            "routes": [r.to_dict(mask_keys=mask_keys) for r in self.rules],
+            "default_route": def_dict,
+            "routes": custom_dicts,
             "limiters_summary": self.get_all_limiters_stats(),
         }
 
     def update_from_dict(self, data: Dict[str, Any]) -> None:
         """
         Update router state from a dict, preserving live limiter instances.
+        The default rule is preserved and cannot be removed.
         """
         if "routing_strategy" in data:
             self.routing_strategy = str(data["routing_strategy"]).strip().lower()
 
-        def_route = data.get("default_route", {})
-        if "upstream_url" in def_route:
-            self.default_upstream_url = def_route["upstream_url"].rstrip("/")
-        if "name" in def_route:
-            self.default_name = def_route["name"]
-        if "api_key" in def_route:
-            incoming_def_key = def_route["api_key"]
-            if incoming_def_key is not None:
-                incoming_def_str = str(incoming_def_key).strip()
-                if not incoming_def_str:
-                    self.default_api_key = None
-                elif self.default_api_key and incoming_def_str == mask_api_key(self.default_api_key):
-                    pass
+        routes_data = data.get("routes", [])
+        def_rule_data = None
+        for r in routes_data:
+            if r.get("id") == "default" or r.get("is_default"):
+                def_rule_data = r
+                break
+        if not def_rule_data and "default_route" in data:
+            def_rule_data = data["default_route"]
+
+        if def_rule_data:
+            if "upstream_url" in def_rule_data:
+                self.default_upstream_url = str(def_rule_data["upstream_url"]).strip().rstrip("/")
+                self.default_rule.upstream_url = self.default_upstream_url
+            if "name" in def_rule_data:
+                self.default_name = str(def_rule_data["name"]).strip()
+                self.default_rule.name = self.default_name
+            if "pattern" in def_rule_data:
+                self.default_rule.pattern = str(def_rule_data["pattern"]).strip() or ".*"
+            if "exclude_pattern" in def_rule_data:
+                self.default_rule.exclude_pattern = str(def_rule_data["exclude_pattern"]).strip() if def_rule_data["exclude_pattern"] else None
+            if "enabled" in def_rule_data:
+                self.default_rule.enabled = bool(def_rule_data["enabled"])
+            if "priority" in def_rule_data:
+                self.default_rule.priority = int(def_rule_data["priority"])
+            if "strategy" in def_rule_data:
+                self.default_rule.strategy = str(def_rule_data["strategy"]).strip().lower()
+            if "api_key" in def_rule_data:
+                incoming_def_key = def_rule_data["api_key"]
+                if incoming_def_key is not None:
+                    incoming_def_str = str(incoming_def_key).strip()
+                    if not incoming_def_str:
+                        self.default_api_key = None
+                    elif self.default_api_key and incoming_def_str == mask_api_key(self.default_api_key):
+                        pass
+                    else:
+                        self.default_api_key = incoming_def_str
                 else:
-                    self.default_api_key = incoming_def_str
-            else:
-                self.default_api_key = None
-        if "max_concurrent" in def_route:
-            self.default_max_concurrent = max(1, int(def_route["max_concurrent"]))
-            self.default_limiter.max_concurrent = self.default_max_concurrent
-        if "slot_cooldown_ms" in def_route:
-            self.default_slot_cooldown_ms = max(0, int(def_route["slot_cooldown_ms"]))
-            self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
-        if "max_rpm" in def_route:
-            self.default_max_rpm = int(def_route["max_rpm"]) if def_route["max_rpm"] is not None else -1
-            self.default_limiter.max_rpm = self.default_max_rpm
-        if "timeout" in def_route:
-            self.default_timeout = normalize_timeout(def_route["timeout"])
-        if "fallback_upstream_url" in def_route:
-            self.default_fallback_upstream_url = def_route["fallback_upstream_url"]
-        if "retry_policy" in def_route:
-            self.default_retry_policy = normalize_retry_policy(def_route["retry_policy"])
+                    self.default_api_key = None
+                self.default_rule.api_key = self.default_api_key
+            if "max_concurrent" in def_rule_data:
+                self.default_max_concurrent = max(1, int(def_rule_data["max_concurrent"]))
+                self.default_rule.max_concurrent = self.default_max_concurrent
+                self.default_limiter.max_concurrent = self.default_max_concurrent
+                self.default_rule.limiter.max_concurrent = self.default_max_concurrent
+            if "slot_cooldown_ms" in def_rule_data:
+                self.default_slot_cooldown_ms = max(0, int(def_rule_data["slot_cooldown_ms"]))
+                self.default_rule.slot_cooldown_ms = self.default_slot_cooldown_ms
+                self.default_limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
+                self.default_rule.limiter.slot_cooldown_seconds = self.default_slot_cooldown_ms / 1000.0
+            if "max_rpm" in def_rule_data:
+                self.default_max_rpm = int(def_rule_data["max_rpm"]) if def_rule_data["max_rpm"] is not None else -1
+                self.default_rule.max_rpm = self.default_max_rpm
+                self.default_limiter.max_rpm = self.default_max_rpm
+                self.default_rule.limiter.max_rpm = self.default_max_rpm
+            if "timeout" in def_rule_data:
+                self.default_timeout = normalize_timeout(def_rule_data["timeout"])
+                self.default_rule.timeout = self.default_timeout
+            if "fallback_upstream_url" in def_rule_data:
+                self.default_fallback_upstream_url = def_rule_data["fallback_upstream_url"]
+                self.default_rule.fallback_upstream_url = self.default_fallback_upstream_url
+            if "retry_policy" in def_rule_data:
+                self.default_retry_policy = normalize_retry_policy(def_rule_data["retry_policy"])
+                self.default_rule.retry_policy = self.default_retry_policy
+
+            self.default_rule._compile_regex()
 
         existing_rules_map = {r.id: r for r in self.rules}
 
-        new_rules = []
-        for i, r in enumerate(data.get("routes", [])):
-            r_id = r.get("id") or f"route_{uuid.uuid4().hex[:8]}"
+        new_custom_rules = []
+        for i, r in enumerate(routes_data):
+            r_id = r.get("id")
+            if r_id == "default" or r.get("is_default"):
+                continue
+
+            r_id = r_id or f"route_{uuid.uuid4().hex[:8]}"
             existing = existing_rules_map.get(r_id)
 
             priority_val = r.get("priority", 100 - i * 10)
@@ -981,10 +1120,12 @@ class ModelRouter:
                 timeout=to_val,
                 fallback_upstream_url=fb_val,
                 retry_policy=r_policy,
+                exclude_pattern=r.get("exclude_pattern"),
                 limiter=existing.limiter if existing else None,
+                is_default=False,
             )
-            new_rules.append(rule)
+            new_custom_rules.append(rule)
 
-        new_rules.sort(key=lambda x: x.priority, reverse=True)
-        self.rules = new_rules
+        new_custom_rules.sort(key=lambda x: x.priority, reverse=True)
+        self.rules = new_custom_rules
 
