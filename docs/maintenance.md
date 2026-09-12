@@ -91,15 +91,15 @@ Use `dashboard/dashboard.sh` or `start.sh` for reliable service control:
 
 ---
 
-## ⚡ 24/7 High-Performance Server Deployment & Native Binary Pre-Compilation
+## ⚡ 24/7 High-Performance Server Deployment
 
-For servers running the proxy permanently, maximum throughput, minimal CPU usage, and zero memory creep are achieved via native machine-code compilation (`Nuitka`) and anti-fragmentation memory allocators (`jemalloc`).
+For servers running the proxy permanently, maximum throughput, minimal CPU usage, and stable memory are achieved via runtime accelerators and anti-fragmentation memory allocators.
 
 ### 1. Server Prerequisites (Debian/Ubuntu)
 
 ```bash
-# Install GCC compiler, Python C-headers, jemalloc, patchelf, and ccache (one-time sudo)
-sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patchelf ccache
+# Install jemalloc for anti-fragmentation memory allocation (one-time sudo)
+sudo apt-get update && sudo apt-get install -y libjemalloc2
 ```
 
 ### 2. Install Accelerators
@@ -107,50 +107,49 @@ sudo apt-get update && sudo apt-get install -y gcc python3-dev libjemalloc2 patc
 In your Python virtual environment on the server:
 
 ```bash
-pip install -r requirements.txt
+pip install aiohttp orjson uvloop
+# or: pip install -r requirements.txt
 ```
 
-This installs `orjson` (SIMD Rust JSON parser), `uvloop` (C/libuv event loop), and `nuitka` (native C compiler).
+This installs `orjson` (SIMD Rust JSON parser) and `uvloop` (C/libuv event loop). Both are auto-detected at startup.
 
-### 3. Compile Standalone Native Binary
-
-Compile the proxy directly on the server to ensure exact matching with the host's `glibc` and CPU architecture:
-
-```bash
-./dashboard.sh build
-# or: python scripts/build_binaries.py --target proxy
-```
-
-The compiled binary will be placed at `dist/llm_telemetry_proxy.bin` (standalone ELF executable with Link-Time Optimization).
-
-### 4. Start & Supervise
+### 3. Start & Supervise
 
 ```bash
 ./dashboard.sh start --with-proxy
 ```
 
-`dashboard.sh` and `ProxyManager` automatically:
-- Detect the pre-compiled binary in `dist/` and launch it directly.
-- Detect `libjemalloc.so.2` and preload it via `LD_PRELOAD` to permanently prevent heap memory fragmentation.
-- Activate `gc.freeze()` at startup to eliminate cyclic garbage collector overhead.
-- Fall back gracefully to the Python script with runtime accelerators if the binary is absent.
+`dashboard.sh` automatically:
+- Detects `libjemalloc.so.2` and preloads it via `LD_PRELOAD` to permanently prevent heap memory fragmentation.
+- Activates `gc.freeze()` at startup to eliminate cyclic garbage collector overhead.
+- Falls back gracefully if accelerators are not installed.
 
-### 5. Resource Profiling & Comparison Tool (`benchmark_monitor.py`)
+### 4. Resource Profiling Tool (`benchmark_monitor.py`)
 
-A standalone profiler is available in `scripts/benchmark_monitor.py` to measure and compare real-world performance:
+A standalone profiler is available in `scripts/benchmark_monitor.py` to measure real-world performance:
 
 ```bash
-# 1. Profile current running proxy for 30 minutes (1800s)
-python scripts/benchmark_monitor.py record --output python_run.csv --duration 1800
-
-# 2. Restart proxy with native binary
-./dashboard.sh proxy restart
-
-# 3. Profile native binary for 30 minutes
-python scripts/benchmark_monitor.py record --output native_run.csv --duration 1800
-
-# 4. Generate side-by-side comparison report
-python scripts/benchmark_monitor.py compare python_run.csv native_run.csv
+# Profile current running proxy for 30 minutes (1800s)
+python scripts/benchmark_monitor.py record --output baseline.csv --duration 1800
 ```
+
+### 5. Experimental: Native Binary Compilation (Nuitka)
+
+An experimental Nuitka compilation pipeline is available for environments that require distributing a single binary without a Python interpreter.
+
+> **⚠️ Not recommended for memory-sensitive deployments.** Benchmarking shows the compiled binary uses
+> significantly more RAM (~85–145 MB vs ~70 MB) and exhibits higher memory creep (~128 MB/hour vs ~5 MB/hour)
+> than the Python script with accelerators. The proxy is I/O-bound; its CPU-intensive hot paths (`orjson`,
+> `uvloop`) are already native C/Rust extensions, so compilation provides no measurable speed benefit.
+
+```bash
+# Prerequisites for building
+sudo apt-get install -y gcc python3-dev patchelf ccache
+pip install nuitka
+
+# Build (optional)
+./dashboard.sh build
+```
+
 
 

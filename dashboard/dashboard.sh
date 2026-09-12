@@ -249,22 +249,24 @@ start_dashboard() {
         fi
     done
 
-    # 2. Check for pre-compiled native binary
+    # 2. Check for pre-compiled native binary (opt-in only via USE_NATIVE_BINARY=1)
     local dash_bin=""
-    for candidate in \
-        "$REPO_ROOT/dist/dashboard_server.bin" \
-        "$REPO_ROOT/dist/dashboard_server" \
-        "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server.bin" \
-        "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server" \
-        "$REPO_ROOT/dist/server.dist/dashboard_server.bin" \
-        "$REPO_ROOT/dist/server.dist/dashboard_server" \
-        "$REPO_ROOT/bin/dashboard_server.bin" \
-        "$REPO_ROOT/bin/dashboard_server"; do
-        if [[ -x "$candidate" ]]; then
-            dash_bin="$candidate"
-            break
-        fi
-    done
+    if [[ "${USE_NATIVE_BINARY:-0}" == "1" ]]; then
+        for candidate in \
+            "$REPO_ROOT/dist/dashboard_server.bin" \
+            "$REPO_ROOT/dist/dashboard_server" \
+            "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server.bin" \
+            "$REPO_ROOT/dist/dashboard_server.dist/dashboard_server" \
+            "$REPO_ROOT/dist/server.dist/dashboard_server.bin" \
+            "$REPO_ROOT/dist/server.dist/dashboard_server" \
+            "$REPO_ROOT/bin/dashboard_server.bin" \
+            "$REPO_ROOT/bin/dashboard_server"; do
+            if [[ -x "$candidate" ]]; then
+                dash_bin="$candidate"
+                break
+            fi
+        done
+    fi
 
     mkdir -p "$DATA_DIR"
     cd "$SCRIPT_DIR"
@@ -392,26 +394,30 @@ start_proxy() {
         fi
     done
 
-    # 2. Check for pre-compiled native binary
+    # 2. Check for pre-compiled native binary (opt-in only via USE_NATIVE_BINARY=1)
+    #    Python script with uvloop + orjson is the recommended production configuration.
     local proxy_bin=""
-    for candidate in \
-        "$REPO_ROOT/dist/llm_telemetry_proxy.bin" \
-        "$REPO_ROOT/dist/llm_telemetry_proxy" \
-        "$REPO_ROOT/dist/llm_telemetry_proxy.dist/llm_telemetry_proxy.bin" \
-        "$REPO_ROOT/dist/llm_telemetry_proxy.dist/llm_telemetry_proxy" \
-        "$REPO_ROOT/bin/llm_telemetry_proxy.bin" \
-        "$REPO_ROOT/bin/llm_telemetry_proxy"; do
-        if [[ -x "$candidate" ]]; then
-            proxy_bin="$candidate"
-            break
-        fi
-    done
+    if [[ "${USE_NATIVE_BINARY:-0}" == "1" ]]; then
+        for candidate in \
+            "$REPO_ROOT/dist/llm_telemetry_proxy.bin" \
+            "$REPO_ROOT/dist/llm_telemetry_proxy" \
+            "$REPO_ROOT/dist/llm_telemetry_proxy.dist/llm_telemetry_proxy.bin" \
+            "$REPO_ROOT/dist/llm_telemetry_proxy.dist/llm_telemetry_proxy" \
+            "$REPO_ROOT/bin/llm_telemetry_proxy.bin" \
+            "$REPO_ROOT/bin/llm_telemetry_proxy"; do
+            if [[ -x "$candidate" ]]; then
+                proxy_bin="$candidate"
+                break
+            fi
+        done
+    fi
 
     mkdir -p "$REPO_ROOT/data"
     cd "$REPO_ROOT"
 
     if [[ -n "$proxy_bin" ]]; then
         echo "Starting pre-compiled native proxy ($proxy_bin) on port $pport..."
+        echo "⚠️  Note: Native binary uses more RAM than Python script. Set USE_NATIVE_BINARY=0 to use Python."
         nohup "$proxy_bin" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
     else
         echo "Starting LLM telemetry proxy on port $pport..."

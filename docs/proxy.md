@@ -77,30 +77,32 @@ The proxy offers a Server-Sent Events (SSE) feed at `/v1/raw-log/stream` that tr
 
 ---
 
-### 5. 24/7 Production Engine & Native Binary Execution
+### 5. 24/7 Production Engine
 
-To support permanent, uninterrupted execution on servers with minimal CPU and RAM footprints:
+For permanent server deployments with minimal CPU and RAM footprints, the proxy integrates native C/Rust runtime accelerators that run directly within CPython — no compilation step needed:
 
-#### Execution Modes
+#### Production Accelerators
 
-| Feature | Standard Python Script | Pre-Compiled Native Binary (Nuitka) |
+| Accelerator | Impact | How |
 | :--- | :--- | :--- |
-| **Execution Path** | CPython bytecode interpreter loop | Standalone compiled C/C++ machine code (`ELF`) |
-| **Event Loop** | `uvloop` (C / `libuv`) | `uvloop` (compiled into binary) |
-| **JSON Serialization** | `orjson` (Rust SIMD) | `orjson` (Rust SIMD compiled into binary) |
-| **Memory Allocator** | `jemalloc` (`LD_PRELOAD`) | `jemalloc` (`LD_PRELOAD`) |
-| **GC Overhead** | `gc.freeze()` permanent gen | Native AST + `gc.freeze()` |
-| **Idle RAM Footprint** | ~35–45 MB | **~18–25 MB** |
+| **`uvloop`** (C / `libuv`) | 2x–3x async I/O throughput | `pip install uvloop` — auto-detected at startup |
+| **`orjson`** (Rust SIMD) | 5x–10x faster JSON parsing | `pip install orjson` — auto-detected at startup |
+| **`jemalloc`** | Zero heap fragmentation over months | `sudo apt install libjemalloc2` — auto-preloaded by `start.sh` |
+| **`gc.freeze()`** | Eliminates GC sweep pauses | Built-in — freezes static objects post-boot |
 
-#### Pre-compiling to Native Binary
+#### Measured Production Footprint
 
-```bash
-# Compile via control script
-./start.sh build
+| Metric | Value |
+| :--- | :--- |
+| **Idle RAM (RSS)** | ~69 MB |
+| **Peak RAM (under load)** | ~72 MB |
+| **Memory Creep** | < 5 MB/hour |
+| **CPU (idle)** | < 0.6% |
 
-# Restart proxy (prioritizes native binary automatically)
-./start.sh proxy restart
-```
+> **Note on Nuitka native binary compilation:** An experimental compilation pipeline is available via `./start.sh build`.
+> Benchmarking shows the compiled binary uses **more memory** (85–145 MB) with a **higher memory creep rate** (128 MB/hour)
+> compared to the Python script. Since the proxy is I/O-bound and its CPU-intensive paths (`orjson`, `uvloop`) are already
+> native extensions, compilation provides no measurable benefit for this workload.
 
 #### Benchmarking & Profiling Tool (`benchmark_monitor.py`)
 

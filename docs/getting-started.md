@@ -52,8 +52,8 @@ The repository includes a control script `start.sh` (which proxies to `dashboard
 # Start both Dashboard (:9118) and Proxy Gateway (:9090)
 ./start.sh start --with-proxy
 
-# Build pre-compiled native binary via Nuitka (optional, for maximum speed/RAM efficiency)
-./start.sh build
+# Optional: Build experimental Nuitka binary (not recommended — see Maintenance docs)
+# ./start.sh build
 
 # View service health and listening PIDs
 ./start.sh status

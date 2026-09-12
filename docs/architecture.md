@@ -165,7 +165,7 @@ flowchart LR
     MemCache --> FastSync
 ```
 
-1. **Native Pre-Compilation**: Compiles Python AST directly into optimized C machine code with GCC and Link-Time Optimization (`--lto=yes`), eliminating CPython bytecode evaluation overhead.
+1. **Native Pre-Compilation** _(experimental)_: Optional Nuitka compilation available, but benchmarking shows the Python script with `uvloop` + `orjson` achieves equivalent performance with lower memory usage since the proxy is I/O-bound.
 2. **C-Based Async Event Loop (`uvloop`)**: Replaces standard Python asyncio with `libuv`, yielding 2x–3x higher request throughput.
 3. **Rust SIMD Serialization (`fast_json` / `orjson`)**: Bypasses UTF-8 string allocations by parsing directly from incoming raw network bytes.
 4. **Anti-Fragmentation Memory Management (`jemalloc`)**: Preloaded via `LD_PRELOAD` to prevent Linux `glibc malloc` heap fragmentation during months of continuous streaming allocations.
