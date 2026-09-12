@@ -194,6 +194,10 @@ def create_app():
         session = application.get(UPSTREAM_SESSION_KEY)
         if session and not session.closed:
             await session.close()
+        try:
+            await telemetry_db.close_status_session()
+        except Exception:
+            pass
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
@@ -298,14 +302,6 @@ def main():
 
     init_db()
 
-    # Freezing Python GC permanent generation for static objects (routes, mappings, configs)
-    import gc
-    if hasattr(gc, "freeze"):
-        try:
-            gc.freeze()
-        except Exception:
-            pass
-
     # Detect high-performance accelerators for status banner
     try:
         from proxy.fast_json import HAS_ORJSON
@@ -322,7 +318,19 @@ def main():
         accel.append("orjson")
     accel_str = f" [Accelerators: {' + '.join(accel)}]" if accel else ""
 
-    print(f"[telemetry] Proxy starting on {LISTEN_HOST}:{LISTEN_PORT}{accel_str}", file=sys.stderr)
+    # Detect Native C-Extension Modules (.so / .pyd)
+    native_mods = []
+    checked_mods = ("model_router", "proxy_forwarder", "proxy_stream", "fast_json", "telemetry_db", "payload_inspector")
+    for mod_name in checked_mods:
+        m = sys.modules.get(f"proxy.{mod_name}") or sys.modules.get(mod_name)
+        if m is not None:
+            m_file = str(getattr(m, "__file__", "") or "")
+            if m_file.endswith((".so", ".pyd")) or hasattr(m, "__compiled__"):
+                native_mods.append(mod_name)
+
+    modules_str = f" [Native C-Modules: {len(native_mods)}/{len(checked_mods)} active]" if native_mods else " [Native C-Modules: 0 active (pure Python)]"
+
+    print(f"[telemetry] Proxy starting on {LISTEN_HOST}:{LISTEN_PORT}{accel_str}{modules_str}", file=sys.stderr)
     print(f"[telemetry] Upstream: {proxy_forwarder.UPSTREAM}", file=sys.stderr)
     print(f"[telemetry] Max Concurrent: {MAX_CONCURRENT} (Slot Cooldown: {SLOT_COOLDOWN_MS}ms, 429 Retries: {RETRY_429_MAX})", file=sys.stderr)
     print(f"[telemetry] DB: {telemetry_db.DB_PATH}", file=sys.stderr)

@@ -15,6 +15,9 @@ Usage:
 
     # 3. Compare the two benchmarks side-by-side:
     python scripts/benchmark_monitor.py compare python_baseline.csv native_binary.csv
+
+Example:
+- python3 scripts/benchmark_monitor.py record --output python_run.csv --duration 1800
 """
 
 import argparse
@@ -53,17 +56,43 @@ def get_proxy_pid(pid_file: Path) -> Optional[int]:
 
 
 def get_process_mode(pid: int) -> str:
-    """Determine whether process is running as a Python script or pre-compiled native binary."""
+    """Determine whether process is running as a Python script, native C-modules, or standalone binary."""
     try:
-        if sys.platform != "win32" and os.path.exists(f"/proc/{pid}/cmdline"):
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                raw = f.read().replace(b"\0", b" ").decode("utf-8", errors="ignore").strip()
-            if ".bin" in raw or "llm_telemetry_proxy.dist" in raw or ("llm_telemetry_proxy" in raw and "python" not in raw):
-                return "Native Binary (Nuitka)"
+        if sys.platform != "win32":
+            cmdline_path = f"/proc/{pid}/cmdline"
+            if os.path.exists(cmdline_path):
+                with open(cmdline_path, "rb") as f:
+                    raw = f.read().replace(b"\0", b" ").decode("utf-8", errors="ignore").strip()
+                if ".bin" in raw or "llm_telemetry_proxy.dist" in raw or ("llm_telemetry_proxy" in raw and "python" not in raw):
+                    return "Standalone ELF Binary"
+
+            # Check memory maps for loaded native C-extension modules (.so)
+            maps_path = f"/proc/{pid}/maps"
+            if os.path.exists(maps_path):
+                with open(maps_path, "r", encoding="utf-8", errors="ignore") as f:
+                    maps_content = f.read()
+
+                proxy_so_matches = set()
+                for line in maps_content.splitlines():
+                    if "/proxy/" in line and (".so" in line or ".pyd" in line):
+                        parts = line.split()
+                        if len(parts) >= 6:
+                            so_path = parts[-1]
+                            base = os.path.basename(so_path).split(".")[0]
+                            proxy_so_matches.add(base)
+
+                if proxy_so_matches:
+                    return f"Native C-Modules ({len(proxy_so_matches)}/6)"
+
             return "Python Script (CPython)"
     except Exception:
         pass
-    return "Unknown / Python"
+
+    # Windows / fallback detection
+    so_count = len(list((REPO_ROOT / "proxy").glob("*.pyd"))) + len(list((REPO_ROOT / "proxy").glob("*.so")))
+    if so_count > 0:
+        return f"Native C-Modules ({so_count}/6)"
+    return "Python Script (CPython)"
 
 
 class ProcessSampler:
@@ -257,7 +286,7 @@ def cmd_record(args):
         print("Ensure the proxy is running (`bash dashboard.sh proxy status`) or pass --pid <PID> manually.")
         sys.exit(1)
 
-    mode = get_process_mode(pid)
+    mode = args.mode or get_process_mode(pid)
     out_file = Path(args.output)
     duration_s = int(args.duration)
     interval_s = max(1.0, float(args.interval))
@@ -437,31 +466,34 @@ def cmd_compare(args):
     s1 = parse_csv(file1)
     s2 = parse_csv(file2)
 
-    print("=" * 80)
+    col1_title = s1['mode'][:26]
+    col2_title = s2['mode'][:26]
+
+    print("=" * 86)
     print("           LLM Telemetry Proxy — Benchmark Comparison Report")
-    print("=" * 80)
-    print(f"{'Metric':<30} | {s1['mode'][:22]:<22} | {s2['mode'][:22]:<22}")
-    print("-" * 80)
-    print(f"{'Source File':<30} | {s1['path']:<22} | {s2['path']:<22}")
-    print(f"{'Sample Duration':<30} | {int(s1['duration_s'])}s ({s1['samples']} samples)  | {int(s2['duration_s'])}s ({s2['samples']} samples)")
-    print(f"{'Total Requests Processed':<30} | {s1['total_calls']:<22} | {s2['total_calls']:<22}")
-    print("-" * 80)
-    print(f"{'Initial RAM (RSS)':<30} | {s1['init_rss']} MB{'':<14} | {s2['init_rss']} MB")
-    print(f"{'Peak RAM (RSS)':<30} | {s1['peak_rss']} MB{'':<14} | {s2['peak_rss']} MB")
-    print(f"{'Average RAM (RSS)':<30} | {s1['avg_rss']} MB{'':<14} | {s2['avg_rss']} MB")
+    print("=" * 86)
+    print(f"{'Metric':<28} | {col1_title:<26} | {col2_title:<26}")
+    print("-" * 86)
+    print(f"{'Source File':<28} | {s1['path']:<26} | {s2['path']:<26}")
+    print(f"{'Sample Duration':<28} | {int(s1['duration_s'])}s ({s1['samples']} samples){'':<5} | {int(s2['duration_s'])}s ({s2['samples']} samples)")
+    print(f"{'Total Requests Processed':<28} | {s1['total_calls']:<26} | {s2['total_calls']:<26}")
+    print("-" * 86)
+    print(f"{'Initial RAM (RSS)':<28} | {s1['init_rss']} MB{'':<18} | {s2['init_rss']} MB")
+    print(f"{'Peak RAM (RSS)':<28} | {s1['peak_rss']} MB{'':<18} | {s2['peak_rss']} MB")
+    print(f"{'Average RAM (RSS)':<28} | {s1['avg_rss']} MB{'':<18} | {s2['avg_rss']} MB")
 
     growth_col1 = f"+{s1['growth_mb']} MB" if s1['growth_mb'] >= 0 else f"{s1['growth_mb']} MB"
     growth_col2 = f"+{s2['growth_mb']} MB" if s2['growth_mb'] >= 0 else f"{s2['growth_mb']} MB"
-    print(f"{'Memory Growth (Delta)':<30} | {growth_col1:<22} | {growth_col2:<22}")
-    print(f"{'Estimated Creep Rate':<30} | {s1['growth_per_hr']} MB/hour{'':<10} | {s2['growth_per_hr']} MB/hour")
-    print("-" * 80)
-    print(f"{'Average CPU %':<30} | {s1['avg_cpu']}%{'':<17} | {s2['avg_cpu']}%")
-    print(f"{'Peak CPU %':<30} | {s1['peak_cpu']}%{'':<17} | {s2['peak_cpu']}%")
-    print(f"{'Average TTFB Latency':<30} | {s1['avg_ttfb']} ms{'':<14} | {s2['avg_ttfb']} ms")
-    print(f"{'Average Total RTT':<30} | {s1['avg_rtt']} ms{'':<14} | {s2['avg_rtt']} ms")
-    print(f"{'Active OS Threads':<30} | {s1['threads']:<22} | {s2['threads']:<22}")
-    print(f"{'Open File Descriptors':<30} | {s1['fds']:<22} | {s2['fds']:<22}")
-    print("=" * 80)
+    print(f"{'Memory Growth (Delta)':<28} | {growth_col1:<26} | {growth_col2:<26}")
+    print(f"{'Estimated Creep Rate':<28} | {s1['growth_per_hr']} MB/hour{'':<14} | {s2['growth_per_hr']} MB/hour")
+    print("-" * 86)
+    print(f"{'Average CPU %':<28} | {s1['avg_cpu']}%{'':<21} | {s2['avg_cpu']}%")
+    print(f"{'Peak CPU %':<28} | {s1['peak_cpu']}%{'':<21} | {s2['peak_cpu']}%")
+    print(f"{'Average TTFB Latency':<28} | {s1['avg_ttfb']} ms{'':<18} | {s2['avg_ttfb']} ms")
+    print(f"{'Average Total RTT':<28} | {s1['avg_rtt']} ms{'':<18} | {s2['avg_rtt']} ms")
+    print(f"{'Active OS Threads':<28} | {s1['threads']:<26} | {s2['threads']:<26}")
+    print(f"{'Open File Descriptors':<28} | {s1['fds']:<26} | {s2['fds']:<26}")
+    print("=" * 86)
 
     # Efficiency calculation
     if s1["avg_rss"] > 0 and s2["avg_rss"] > 0:
@@ -496,6 +528,7 @@ def main():
     rec.add_argument("--pid", type=int, default=None, help="Explicit PID (defaults to reading data/.proxy.pid)")
     rec.add_argument("--pid-file", type=str, default=str(DEFAULT_PID_FILE), help="Path to .proxy.pid file")
     rec.add_argument("--db", type=str, default=str(DEFAULT_DB_FILE), help="Path to SQLite database")
+    rec.add_argument("--mode", "-m", type=str, default=None, help="Explicit execution mode label (e.g. 'Native C-Modules (Nuitka)')")
 
     # Compare Subcommand
     cmp = subparsers.add_parser("compare", help="Compare two benchmark CSV files side-by-side")

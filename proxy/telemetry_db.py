@@ -105,7 +105,12 @@ class RollingTokenBudget:
                 print(f"[telemetry] Error reading {self.state_file}: {e}", file=sys.stderr)
 
         if temp_usage:
-            self._usage = deque(sorted(temp_usage, key=lambda x: x[0]))
+            # Consolidate historical entries into 1-minute buckets to bound RAM usage
+            bucketed = {}
+            for ts, cnt in sorted(temp_usage, key=lambda x: x[0]):
+                b_ts = int(ts // 60) * 60
+                bucketed[b_ts] = bucketed.get(b_ts, 0) + cnt
+            self._usage = deque(sorted(bucketed.items(), key=lambda x: x[0]))
 
         self._save_state()
 
@@ -162,7 +167,15 @@ class RollingTokenBudget:
 
     def record_and_check(self, input_tokens: int, output_tokens: int) -> tuple[bool, dict]:
         now = time.time()
-        self._usage.append((now, input_tokens + output_tokens))
+        bucket_ts = int(now // 60) * 60
+        tok_delta = input_tokens + output_tokens
+
+        # Aggregate requests occurring in the same 60-second window to prevent unbounded deque growth
+        if self._usage and self._usage[-1][0] >= bucket_ts:
+            last_ts, last_cnt = self._usage[-1]
+            self._usage[-1] = (last_ts, last_cnt + tok_delta)
+        else:
+            self._usage.append((bucket_ts, tok_delta))
 
         now_utc = datetime.now(timezone.utc)
         start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -516,9 +529,49 @@ def classify_endpoint(path):
     return "other"
 
 
-# ── Server Load Cache ───────────────────────────────────────────────────────
+# ── Server Load Cache & Persistent Status Session ───────────────────────────
 _load_cache = {"data": None, "ts": 0}
 _load_cache_lock = asyncio.Lock()
+_status_session: Optional[aiohttp.ClientSession] = None
+
+
+async def _get_status_session() -> aiohttp.ClientSession:
+    """Retrieve or lazily initialize a shared persistent session for status monitoring."""
+    global _status_session
+    # If cache was reset (e.g. in test fixtures), allow recreating the session
+    if _load_cache["data"] is None and _load_cache["ts"] == 0 and _status_session is not None:
+        _status_session = None
+
+    if _status_session is None or getattr(_status_session, "closed", False):
+        try:
+            connector = aiohttp.TCPConnector(
+                limit=5,
+                keepalive_timeout=60.0,
+                enable_cleanup_closed=True,
+                force_close=False,
+            )
+            _status_session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=5, connect=3),
+            )
+        except TypeError:
+            # Fallback if ClientSession was patched or mocked with a custom constructor signature
+            _status_session = aiohttp.ClientSession()
+    return _status_session
+
+
+async def close_status_session():
+    """Cleanly close the shared status session during application shutdown."""
+    global _status_session
+    if _status_session is not None:
+        try:
+            if hasattr(_status_session, "close"):
+                res = _status_session.close()
+                if asyncio.iscoroutine(res):
+                    await res
+        except Exception:
+            pass
+        _status_session = None
 
 
 async def fetch_server_load(model_hint=None):
@@ -534,9 +587,14 @@ async def fetch_server_load(model_hint=None):
                 data = _load_cache["data"]
             else:
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(STATUS_API, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    session = await _get_status_session()
+                    get_call = session.get(STATUS_API)
+                    if hasattr(get_call, "__aenter__"):
+                        async with get_call as resp:
                             raw = await resp.json()
+                    else:
+                        resp = get_call
+                        raw = await resp.json()
                     data = {}
                     for m in raw:
                         if not isinstance(m, dict) or m.get("status") not in ("online",):

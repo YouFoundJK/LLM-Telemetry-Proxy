@@ -91,64 +91,59 @@ Use `dashboard/dashboard.sh` or `start.sh` for reliable service control:
 
 ---
 
-## ⚡ 24/7 High-Performance Server Deployment
+## ⚡ 24/7 High-Performance Server Deployment & Native C-Extension Compilation
 
-For servers running the proxy permanently, maximum throughput, minimal CPU usage, and stable memory are achieved via runtime accelerators and anti-fragmentation memory allocators.
+For servers running the proxy permanently, maximum throughput, minimal CPU usage, and zero memory creep are achieved via Native C-Extension compilation (`Nuitka --module`), async accelerators (`uvloop`, `orjson`), and anti-fragmentation memory allocators (`jemalloc`).
 
 ### 1. Server Prerequisites (Debian/Ubuntu)
 
 ```bash
-# Install jemalloc for anti-fragmentation memory allocation (one-time sudo)
-sudo apt-get update && sudo apt-get install -y libjemalloc2
+# Install GCC compiler, Python C-headers, and jemalloc (one-time sudo)
+sudo apt-get update && sudo apt-get install -y gcc g++ python3-dev libjemalloc2 ccache
 ```
 
-### 2. Install Accelerators
+### 2. Install Accelerators & Compiler
 
 In your Python virtual environment on the server:
 
 ```bash
-pip install aiohttp orjson uvloop
-# or: pip install -r requirements.txt
+pip install -r requirements.txt
+# Installs: aiohttp, orjson (SIMD Rust JSON), uvloop (libuv), nuitka (C compiler)
 ```
 
-This installs `orjson` (SIMD Rust JSON parser) and `uvloop` (C/libuv event loop). Both are auto-detected at startup.
+### 3. Compile Native C-Extension Modules
 
-### 3. Start & Supervise
+Compile the performance-critical proxy modules (`model_router`, `proxy_forwarder`, `proxy_stream`, `fast_json`, `telemetry_db`, `payload_inspector`) into native `.so` shared libraries:
 
 ```bash
-./dashboard.sh start --with-proxy
+./start.sh build
+# or: python scripts/build_binaries.py --mode modules
+```
+
+The compiled native modules (`*.so`) are generated in `proxy/`. When the proxy starts, Python's `ExtensionFileLoader` automatically loads the compiled `.so` C-extensions over `.py` source files.
+
+### 4. Start & Supervise
+
+```bash
+./start.sh start --with-proxy
+# or: ./dashboard.sh proxy start
 ```
 
 `dashboard.sh` automatically:
+- Detects the compiled native `.so` modules and loads them with native C speed.
 - Detects `libjemalloc.so.2` and preloads it via `LD_PRELOAD` to permanently prevent heap memory fragmentation.
-- Activates `gc.freeze()` at startup to eliminate cyclic garbage collector overhead.
-- Falls back gracefully if accelerators are not installed.
+- Falls back gracefully to `.py` source files if `.so` modules are absent.
 
-### 4. Resource Profiling Tool (`benchmark_monitor.py`)
+### 5. Resource Profiling & Benchmark Comparison Tool (`benchmark_monitor.py`)
 
-A standalone profiler is available in `scripts/benchmark_monitor.py` to measure real-world performance:
-
-```bash
-# Profile current running proxy for 30 minutes (1800s)
-python scripts/benchmark_monitor.py record --output baseline.csv --duration 1800
-```
-
-### 5. Experimental: Native Binary Compilation (Nuitka)
-
-An experimental Nuitka compilation pipeline is available for environments that require distributing a single binary without a Python interpreter.
-
-> **⚠️ Not recommended for memory-sensitive deployments.** Benchmarking shows the compiled binary uses
-> significantly more RAM (~85–145 MB vs ~70 MB) and exhibits higher memory creep (~128 MB/hour vs ~5 MB/hour)
-> than the Python script with accelerators. The proxy is I/O-bound; its CPU-intensive hot paths (`orjson`,
-> `uvloop`) are already native C/Rust extensions, so compilation provides no measurable speed benefit.
+A standalone profiler is available in `scripts/benchmark_monitor.py` to measure and compare real-world performance:
 
 ```bash
-# Prerequisites for building
-sudo apt-get install -y gcc python3-dev patchelf ccache
-pip install nuitka
+# Profile running proxy for 30 minutes (1800s)
+python scripts/benchmark_monitor.py record --output native_modules_run.csv --duration 1800
 
-# Build (optional)
-./dashboard.sh build
+# Compare against a baseline recording
+python scripts/benchmark_monitor.py compare baseline.csv native_modules_run.csv
 ```
 
 

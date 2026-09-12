@@ -81,6 +81,26 @@ is_proxy_pid() {
     return 1
 }
 
+# Determine process execution mode (Native C-Modules, Standalone ELF, or Python Script)
+get_proc_mode() {
+    local pid="$1"
+    local cmd
+    cmd=$(get_proc_cmdline "$pid")
+    if [[ "$cmd" =~ \.bin ]] || [[ "$cmd" =~ llm_telemetry_proxy\.dist ]]; then
+        echo "(Standalone ELF Binary)"
+        return
+    fi
+    local so_count=0
+    for f in "$REPO_ROOT/proxy"/*.so "$REPO_ROOT/proxy"/*.pyd; do
+        [[ -f "$f" ]] && ((so_count++))
+    done
+    if (( so_count > 0 )); then
+        echo "(Native C-Extension Modules: $so_count loaded)"
+    else
+        echo "(Python Script)"
+    fi
+}
+
 # Get ONLY the PID that is actively LISTENING on a given port (never client sockets)
 get_listening_pid_on_port() {
     local port="$1"
@@ -394,8 +414,12 @@ start_proxy() {
         fi
     done
 
-    # 2. Check for pre-compiled native binary (opt-in only via USE_NATIVE_BINARY=1)
-    #    Python script with uvloop + orjson is the recommended production configuration.
+    # 2. Check for Native C-Extension Modules vs Standalone Binary
+    local so_count=0
+    for f in "$REPO_ROOT/proxy"/*.so "$REPO_ROOT/proxy"/*.pyd; do
+        [[ -f "$f" ]] && ((so_count++))
+    done
+
     local proxy_bin=""
     if [[ "${USE_NATIVE_BINARY:-0}" == "1" ]]; then
         for candidate in \
@@ -416,11 +440,14 @@ start_proxy() {
     cd "$REPO_ROOT"
 
     if [[ -n "$proxy_bin" ]]; then
-        echo "Starting pre-compiled native proxy ($proxy_bin) on port $pport..."
-        echo "⚠️  Note: Native binary uses more RAM than Python script. Set USE_NATIVE_BINARY=0 to use Python."
+        echo "Starting pre-compiled standalone native proxy ($proxy_bin) on port $pport..."
         nohup "$proxy_bin" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
     else
-        echo "Starting LLM telemetry proxy on port $pport..."
+        if (( so_count > 0 )); then
+            echo "Starting LLM telemetry proxy with $so_count native C-extension module(s) on port $pport..."
+        else
+            echo "Starting LLM telemetry proxy on port $pport..."
+        fi
         nohup "$PYTHON" "$REPO_ROOT/proxy/llm_telemetry_proxy.py" --port "$pport" > "$PROXY_LOG_FILE" 2>&1 &
     fi
     local new_pid=$!
@@ -577,7 +604,7 @@ case "$COMMAND" in
         ;;
 
     build)
-        echo "=== Building LLM Telemetry Native Binaries via Nuitka ==="
+        echo "=== Compiling LLM Telemetry Native C-Extensions via Nuitka ==="
         "$PYTHON" "$REPO_ROOT/scripts/build_binaries.py" "$@"
         ;;
 
