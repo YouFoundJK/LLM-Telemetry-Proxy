@@ -103,6 +103,101 @@ def normalize_retry_policy(policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
+DEFAULT_CIRCUIT_BREAKER: Dict[str, Any] = {
+    "enabled": True,
+    "consecutive_failures_threshold": 3,
+    "quota_cooldown_seconds": 1800.0,   # 30 minutes
+    "outage_cooldown_seconds": 300.0,    # 5 minutes
+    "backoff_multiplier": 1.5,
+    "max_cooldown_seconds": 7200.0,      # 2 hours max
+}
+
+
+def normalize_circuit_breaker(cb: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ensure circuit breaker configuration has valid schema, proper types, and sensible defaults."""
+    merged = dict(DEFAULT_CIRCUIT_BREAKER)
+    if not isinstance(cb, dict):
+        return merged
+    for k, v in cb.items():
+        merged[k] = v
+
+    merged["enabled"] = bool(merged.get("enabled", True))
+    try:
+        merged["consecutive_failures_threshold"] = max(1, int(merged.get("consecutive_failures_threshold", 3)))
+    except (ValueError, TypeError):
+        merged["consecutive_failures_threshold"] = 3
+
+    for sec_field in ("quota_cooldown_seconds", "outage_cooldown_seconds", "max_cooldown_seconds"):
+        try:
+            merged[sec_field] = max(1.0, float(merged.get(sec_field, DEFAULT_CIRCUIT_BREAKER[sec_field])))
+        except (ValueError, TypeError):
+            merged[sec_field] = DEFAULT_CIRCUIT_BREAKER[sec_field]
+
+    try:
+        merged["backoff_multiplier"] = max(1.0, float(merged.get("backoff_multiplier", 1.5)))
+    except (ValueError, TypeError):
+        merged["backoff_multiplier"] = 1.5
+
+    return merged
+
+
+QUOTA_ERROR_PATTERNS = (
+    "quota",
+    "free-models-per-day",
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "billing",
+    "credit balance",
+    "out of credits",
+    "zero balance",
+    "insufficient funds",
+    "monthly quota",
+    "daily quota",
+    "rate limit exceeded: free-models-per-day",
+)
+
+
+def is_quota_exhaustion(
+    status_code: Optional[int] = None,
+    body_text_or_json: Optional[Any] = None,
+    reason: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    Determine if an HTTP response, error message, or body indicates hard quota or free-tier exhaustion.
+    Returns (is_exhausted, detected_reason).
+    """
+    if status_code == 402:
+        return True, "HTTP 402 Payment Required: Quota or credits exhausted"
+
+    text_to_check = []
+    if reason:
+        text_to_check.append(str(reason))
+
+    if body_text_or_json:
+        if isinstance(body_text_or_json, dict):
+            err = body_text_or_json.get("error")
+            if isinstance(err, dict):
+                text_to_check.append(str(err.get("message", "")))
+                text_to_check.append(str(err.get("type", "")))
+                text_to_check.append(str(err.get("code", "")))
+            elif err:
+                text_to_check.append(str(err))
+            for k in ("message", "detail", "error_description"):
+                if k in body_text_or_json and body_text_or_json[k]:
+                    text_to_check.append(str(body_text_or_json[k]))
+        elif isinstance(body_text_or_json, (str, bytes)):
+            raw = body_text_or_json.decode("utf-8", errors="ignore") if isinstance(body_text_or_json, bytes) else body_text_or_json
+            text_to_check.append(raw)
+
+    combined = " ".join(text_to_check).lower()
+    for pattern in QUOTA_ERROR_PATTERNS:
+        if pattern in combined:
+            return True, f"Quota exhaustion detected ({pattern})"
+
+    return False, ""
+
+
 def build_upstream_url(upstream_base: str, path: str) -> str:
     """
     Assemble target upstream URL cleanly, avoiding duplicate '/v1' path segments.
@@ -429,12 +524,15 @@ class RouteResolutionResult:
     timeout: Optional[Dict[str, float]] = None
     fallback_upstream_url: Optional[str] = None
     retry_policy: Optional[Dict[str, Any]] = None
+    circuit_breaker: Optional[Dict[str, Any]] = None
     api_key: Optional[str] = None
     priority: int = 10
     strategy: str = "inherit"
     exclude_pattern: Optional[str] = None
     is_cooling_down: bool = False
     cooldown_remaining: float = 0.0
+    circuit_state: str = "CLOSED"
+    canary_probe: bool = False
 
 
 class ModelRouteRule:
@@ -453,6 +551,7 @@ class ModelRouteRule:
         timeout: Optional[Dict[str, Any]] = None,
         fallback_upstream_url: Optional[str] = None,
         retry_policy: Optional[Dict[str, Any]] = None,
+        circuit_breaker: Optional[Dict[str, Any]] = None,
         limiter: Optional[UpstreamConcurrencyLimiter] = None,
         strategy: str = "inherit",
         exclude_pattern: Optional[str] = None,
@@ -472,6 +571,7 @@ class ModelRouteRule:
         self.timeout = normalize_timeout(timeout)
         self.fallback_upstream_url = str(fallback_upstream_url).strip().rstrip("/") if fallback_upstream_url else None
         self.retry_policy = normalize_retry_policy(retry_policy)
+        self.circuit_breaker = normalize_circuit_breaker(circuit_breaker)
         self.exclude_pattern = str(exclude_pattern).strip() if exclude_pattern and str(exclude_pattern).strip() else None
         self.is_default = bool(is_default) or (self.id == "default")
         
@@ -484,33 +584,107 @@ class ModelRouteRule:
         self.limiter.slot_cooldown_seconds = self.slot_cooldown_ms / 1000.0
         self.limiter.max_rpm = self.max_rpm
 
+        self._circuit_state: str = "CLOSED"
         self._cooldown_until: float = 0.0
+        self._current_cooldown_duration: float = 0.0
         self._cooldown_reason: Optional[str] = None
         self._consecutive_failures: int = 0
+        self._canary_in_flight: bool = False
 
         self._compiled: Optional[re.Pattern] = None
         self._compiled_exclude: Optional[re.Pattern] = None
         self._compile_regex()
 
+    def get_circuit_state(self) -> str:
+        """Evaluate circuit breaker state with automatic transition from OPEN to HALF_OPEN upon cooldown expiration."""
+        if not self.circuit_breaker.get("enabled", True):
+            return "CLOSED"
+        if self._circuit_state == "OPEN":
+            if time.monotonic() >= self._cooldown_until:
+                self._circuit_state = "HALF_OPEN"
+                self._canary_in_flight = False
+        return self._circuit_state
+
+    def is_available_for_admission(self) -> bool:
+        """Check if route is eligible to receive requests (CLOSED, or HALF_OPEN with no canary in flight)."""
+        state = self.get_circuit_state()
+        if state == "CLOSED":
+            return True
+        if state == "HALF_OPEN":
+            return not self._canary_in_flight
+        return False
+
     def is_cooling_down(self) -> bool:
-        return time.monotonic() < self._cooldown_until
+        return self.get_circuit_state() == "OPEN"
 
     def cooldown_remaining(self) -> float:
-        return max(0.0, self._cooldown_until - time.monotonic())
-
-    def mark_cooldown(self, seconds: float = 60.0, reason: str = ""):
-        self._cooldown_until = time.monotonic() + max(0.5, float(seconds))
-        self._cooldown_reason = str(reason).strip() if reason else "Rate limit / upstream failure cooldown"
-
-    def mark_failure(self, reason: str = "", cooldown_seconds: float = 60.0):
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= 3:
-            self.mark_cooldown(cooldown_seconds, reason=reason or f"{self._consecutive_failures} consecutive failures")
+        if self.get_circuit_state() == "OPEN":
+            return max(0.0, self._cooldown_until - time.monotonic())
+        return 0.0
 
     def mark_success(self):
+        """Reset failures and restore circuit to healthy CLOSED state."""
         self._consecutive_failures = 0
+        self._circuit_state = "CLOSED"
         self._cooldown_until = 0.0
+        self._current_cooldown_duration = 0.0
         self._cooldown_reason = None
+        self._canary_in_flight = False
+
+    def mark_quota_exhaustion(self, reason: str = "Quota Exceeded"):
+        """Instant circuit breaker trip for hard quota limit (default 30m / 1800s)."""
+        if not self.circuit_breaker.get("enabled", True):
+            return
+        cooldown = float(self.circuit_breaker.get("quota_cooldown_seconds", 1800.0))
+        self._circuit_state = "OPEN"
+        self._current_cooldown_duration = cooldown
+        self._cooldown_until = time.monotonic() + cooldown
+        self._cooldown_reason = reason or "Hard quota limit exceeded"
+        self._canary_in_flight = False
+
+    def mark_outage_failure(self, reason: str = "Upstream failure"):
+        """Record outage failure (502/503/timeout/disconnect), tripping after threshold (default 3) or backing off if canary fails."""
+        if not self.circuit_breaker.get("enabled", True):
+            return
+        self._consecutive_failures += 1
+        state = self.get_circuit_state()
+
+        if state == "HALF_OPEN":
+            base_cd = self._current_cooldown_duration or float(self.circuit_breaker.get("outage_cooldown_seconds", 300.0))
+            mult = float(self.circuit_breaker.get("backoff_multiplier", 1.5))
+            max_cd = float(self.circuit_breaker.get("max_cooldown_seconds", 7200.0))
+            cooldown = min(max_cd, base_cd * mult)
+            self._circuit_state = "OPEN"
+            self._current_cooldown_duration = cooldown
+            self._cooldown_until = time.monotonic() + cooldown
+            self._cooldown_reason = f"Canary probe failed: {reason}"
+            self._canary_in_flight = False
+        else:
+            threshold = int(self.circuit_breaker.get("consecutive_failures_threshold", 3))
+            if self._consecutive_failures >= threshold:
+                cooldown = float(self.circuit_breaker.get("outage_cooldown_seconds", 300.0))
+                self._circuit_state = "OPEN"
+                self._current_cooldown_duration = cooldown
+                self._cooldown_until = time.monotonic() + cooldown
+                self._cooldown_reason = reason or f"{self._consecutive_failures} consecutive outage failures"
+                self._canary_in_flight = False
+
+    def mark_failure(self, reason: str = "", cooldown_seconds: float = 60.0):
+        self.mark_outage_failure(reason=reason)
+
+    def mark_cooldown(self, seconds: float = 60.0, reason: str = ""):
+        self._circuit_state = "OPEN"
+        self._current_cooldown_duration = max(0.001, float(seconds))
+        self._cooldown_until = time.monotonic() + self._current_cooldown_duration
+        self._cooldown_reason = str(reason).strip() if reason else "Manual cooldown"
+        self._canary_in_flight = False
+
+    def reset_circuit(self):
+        self.mark_success()
+
+    def release_canary(self):
+        """Release canary in-flight flag without changing circuit state."""
+        self._canary_in_flight = False
 
     def _compile_regex(self):
         if not self.pattern or self.pattern == ".*":
@@ -562,6 +736,7 @@ class ModelRouteRule:
             "timeout": self.timeout,
             "fallback_upstream_url": self.fallback_upstream_url,
             "retry_policy": self.retry_policy,
+            "circuit_breaker": self.circuit_breaker,
             "exclude_pattern": self.exclude_pattern,
             "is_default": self.is_default,
         }
@@ -584,11 +759,14 @@ class ModelRouteRule:
             "timeout": self.timeout,
             "fallback_upstream_url": self.fallback_upstream_url,
             "retry_policy": self.retry_policy,
+            "circuit_breaker": self.circuit_breaker,
             "exclude_pattern": self.exclude_pattern,
             "is_default": self.is_default,
+            "circuit_state": self.get_circuit_state(),
             "is_cooling_down": self.is_cooling_down(),
             "cooldown_remaining_seconds": round(self.cooldown_remaining(), 1),
             "cooldown_reason": self._cooldown_reason if self.is_cooling_down() else None,
+            "consecutive_failures": self._consecutive_failures,
             "limiter_stats": self.limiter.get_stats(),
         }
 
@@ -611,6 +789,7 @@ class ModelRouter:
         self.default_timeout = normalize_timeout(None)
         self.default_fallback_upstream_url = None
         self.default_retry_policy = normalize_retry_policy(None)
+        self.default_circuit_breaker = normalize_circuit_breaker(None)
         self.default_limiter = UpstreamConcurrencyLimiter(
             max_concurrent=self.default_max_concurrent,
             slot_cooldown_seconds=self.default_slot_cooldown_ms / 1000.0,
@@ -631,6 +810,7 @@ class ModelRouter:
             timeout=self.default_timeout,
             fallback_upstream_url=self.default_fallback_upstream_url,
             retry_policy=self.default_retry_policy,
+            circuit_breaker=self.default_circuit_breaker,
             limiter=self.default_limiter,
             is_default=True,
         )
@@ -697,6 +877,7 @@ class ModelRouter:
                 timeout=self.default_timeout,
                 fallback_upstream_url=self.default_fallback_upstream_url,
                 retry_policy=self.default_retry_policy,
+                circuit_breaker=def_source.get("circuit_breaker"),
                 limiter=self.default_limiter,
                 exclude_pattern=def_exclude_pattern,
                 is_default=True,
@@ -724,6 +905,7 @@ class ModelRouter:
                     timeout=r.get("timeout"),
                     fallback_upstream_url=r.get("fallback_upstream_url"),
                     retry_policy=r.get("retry_policy"),
+                    circuit_breaker=r.get("circuit_breaker"),
                     exclude_pattern=r.get("exclude_pattern"),
                     limiter=existing.limiter if existing else None,
                     is_default=False,
@@ -815,11 +997,14 @@ class ModelRouter:
             timeout=rule.timeout,
             fallback_upstream_url=rule.fallback_upstream_url,
             retry_policy=rule.retry_policy,
+            circuit_breaker=rule.circuit_breaker,
             api_key=rule.api_key,
             priority=rule.priority,
             strategy=rule.strategy,
             is_cooling_down=rule.is_cooling_down(),
             cooldown_remaining=rule.cooldown_remaining(),
+            circuit_state=rule.get_circuit_state(),
+            canary_probe=False,
         )
 
     def resolve_chain(self, model_name: Optional[str]) -> List[RouteResolutionResult]:
@@ -860,32 +1045,48 @@ class ModelRouter:
         self, candidates: List[RouteResolutionResult]
     ) -> Tuple[Optional[RouteResolutionResult], Optional[UpstreamConcurrencyLimiter], bool]:
         """
-        Select an admission route following priority precedence:
-        - If strategy is 'priority' (default):
-          1. Checks candidates in priority order; if a route has immediate capacity (no queue,
-             active < max_concurrent, and within max_rpm), atomically acquires it (already_acquired=True).
-          2. If all candidate routes are currently saturated / queued, selects the candidate
-             with the shortest wait queue (minimum limiter.queued, breaking ties by priority).
-             Returns (route, limiter, already_acquired=False).
-        - If strategy is 'balanced':
-          1. Groups candidates by priority tier (descending).
-          2. Within the highest available priority tier with capacity, distributes requests to the
-             candidate with minimum active concurrency (limiter.active), breaking ties with round-robin.
-          3. If all candidates in a tier are saturated, falls through to check the next priority tier.
-          4. If all candidate routes across all tiers are saturated / queued, selects the candidate
-             with the shortest wait queue, breaking ties with round-robin among equal-priority candidates.
+        Select an admission route following priority precedence and circuit breaker availability:
+        - Filters candidates based on circuit breaker availability (CLOSED or HALF_OPEN canary).
+        - If all routes are cooling down (OPEN or canary in flight), triggers Safety Valve to emergency
+          probe the candidate closest to cooldown expiration.
+        - Supports 'priority' spillover and 'balanced' (least-conn / round-robin) modes.
+        - Atomically marks canary probes in flight on selected HALF_OPEN or emergency candidate.
         """
         if not candidates:
             return None, None, False
 
-        # Filter out cooling down routes if there is at least one non-cooling-down candidate
-        active_candidates = [c for c in candidates if not c.is_cooling_down]
-        pool = active_candidates if active_candidates else candidates
+        # Refresh candidate circuit breaker states
+        for c in candidates:
+            r = self.get_rule(c.route_id)
+            if r:
+                c.circuit_state = r.get_circuit_state()
+                c.is_cooling_down = r.is_cooling_down()
+                c.cooldown_remaining = r.cooldown_remaining()
+
+        # Eligible candidates: CLOSED, or HALF_OPEN with no canary in flight
+        available_candidates = [
+            c for c in candidates
+            if (self.get_rule(c.route_id).is_available_for_admission() if self.get_rule(c.route_id) else not c.is_cooling_down)
+        ]
+
+        if available_candidates:
+            pool = available_candidates
+        else:
+            # Safety Valve: All routes are cooling down. Emergency probe the route closest to expiration!
+            min_remaining = min(c.cooldown_remaining for c in candidates)
+            pool = [c for c in candidates if c.cooldown_remaining == min_remaining]
+
+        def _finalize_picked(cand: RouteResolutionResult, lim: UpstreamConcurrencyLimiter, acquired: bool):
+            r = self.get_rule(cand.route_id)
+            if r and r.get_circuit_state() in ("HALF_OPEN", "OPEN"):
+                r._canary_in_flight = True
+                cand.canary_probe = True
+            return cand, lim, acquired
 
         if len(pool) == 1:
             limiter = self.get_limiter(pool[0].route_id)
             acquired = await limiter.try_acquire()
-            return pool[0], limiter, acquired
+            return _finalize_picked(pool[0], limiter, acquired)
 
         # Determine if balanced mode is active
         is_balanced = (self.routing_strategy in ("balanced", "least_conn", "round_robin"))
@@ -897,7 +1098,7 @@ class ModelRouter:
             for cand in pool:
                 limiter = self.get_limiter(cand.route_id)
                 if await limiter.try_acquire():
-                    return cand, limiter, True
+                    return _finalize_picked(cand, limiter, True)
 
             best_candidate = pool[0]
             best_limiter = self.get_limiter(best_candidate.route_id)
@@ -911,7 +1112,7 @@ class ModelRouter:
                     best_candidate = cand
                     best_limiter = lim
 
-            return best_candidate, best_limiter, False
+            return _finalize_picked(best_candidate, best_limiter, False)
 
         # ── Balanced Routing Strategy (Equal Priority Pool) ─────────────────
         prio_map: Dict[int, List[RouteResolutionResult]] = {}
@@ -937,7 +1138,7 @@ class ModelRouter:
             for _, cand in indexed_tier:
                 limiter = self.get_limiter(cand.route_id)
                 if await limiter.try_acquire():
-                    return cand, limiter, True
+                    return _finalize_picked(cand, limiter, True)
 
         all_limiters = [(c, self.get_limiter(c.route_id)) for c in pool]
         min_queued = min(lim.queued for _, lim in all_limiters)
@@ -948,7 +1149,7 @@ class ModelRouter:
 
         self._rr_counter += 1
         picked_cand = top_tier_tied[self._rr_counter % len(top_tier_tied)]
-        return picked_cand, self.get_limiter(picked_cand.route_id), False
+        return _finalize_picked(picked_cand, self.get_limiter(picked_cand.route_id), False)
 
     def get_rule(self, route_id: Optional[str] = None) -> Optional[ModelRouteRule]:
         """
@@ -962,10 +1163,22 @@ class ModelRouter:
         return self.default_rule if (self.default_rule and self.default_rule.id == route_id) else None
 
     def mark_route_success(self, route_id: Optional[str]):
-        """Mark route as successful, resetting consecutive failures and clearing cooldown."""
+        """Mark route as successful, resetting consecutive failures and restoring circuit to CLOSED."""
         rule = self.get_rule(route_id)
         if rule:
             rule.mark_success()
+
+    def mark_route_quota_exhaustion(self, route_id: Optional[str], reason: str = "Quota Exceeded"):
+        """Instant circuit breaker trip for hard quota limit (default 30m / 1800s)."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.mark_quota_exhaustion(reason=reason)
+
+    def mark_route_outage_failure(self, route_id: Optional[str], reason: str = "Upstream failure"):
+        """Record outage failure, tripping circuit after consecutive failure threshold or backing off canary."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.mark_outage_failure(reason=reason)
 
     def mark_route_failure(self, route_id: Optional[str], reason: str = "", cooldown_seconds: float = 60.0):
         """Record route failure, automatically entering cooldown if threshold is reached."""
@@ -978,6 +1191,18 @@ class ModelRouter:
         rule = self.get_rule(route_id)
         if rule:
             rule.mark_cooldown(seconds=seconds, reason=reason)
+
+    def reset_route_circuit(self, route_id: Optional[str]):
+        """Manually reset circuit breaker to healthy CLOSED state."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.reset_circuit()
+
+    def release_route_canary(self, route_id: Optional[str]):
+        """Release canary in-flight flag without changing circuit state."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.release_canary()
 
     def get_limiter(self, route_id: Optional[str] = None) -> UpstreamConcurrencyLimiter:
         """
@@ -992,7 +1217,7 @@ class ModelRouter:
 
     def get_all_limiters_stats(self) -> Dict[str, Any]:
         """
-        Return live concurrency and queue metrics across all active routes and the default router.
+        Return live concurrency, queue, and circuit breaker metrics across all active routes and the default router.
         """
         routes_stats = []
         for r in self.rules:
@@ -1011,6 +1236,12 @@ class ModelRouter:
                 "timeout": r.timeout,
                 "fallback_upstream_url": r.fallback_upstream_url,
                 "retry_policy": r.retry_policy,
+                "circuit_breaker": r.circuit_breaker,
+                "circuit_state": r.get_circuit_state(),
+                "is_cooling_down": r.is_cooling_down(),
+                "cooldown_remaining_seconds": round(r.cooldown_remaining(), 1),
+                "cooldown_reason": r._cooldown_reason if r.is_cooling_down() else None,
+                "consecutive_failures": r._consecutive_failures,
                 "stats": r.limiter.get_stats(),
             })
 
@@ -1030,6 +1261,12 @@ class ModelRouter:
                 "timeout": def_rule.timeout if def_rule else self.default_timeout,
                 "fallback_upstream_url": def_rule.fallback_upstream_url if def_rule else self.default_fallback_upstream_url,
                 "retry_policy": def_rule.retry_policy if def_rule else self.default_retry_policy,
+                "circuit_breaker": def_rule.circuit_breaker if def_rule else DEFAULT_CIRCUIT_BREAKER,
+                "circuit_state": def_rule.get_circuit_state() if def_rule else "CLOSED",
+                "is_cooling_down": def_rule.is_cooling_down() if def_rule else False,
+                "cooldown_remaining_seconds": round(def_rule.cooldown_remaining(), 1) if def_rule else 0.0,
+                "cooldown_reason": def_rule._cooldown_reason if (def_rule and def_rule.is_cooling_down()) else None,
+                "consecutive_failures": def_rule._consecutive_failures if def_rule else 0,
                 "stats": def_stats,
             },
             "routes": routes_stats,
@@ -1135,6 +1372,9 @@ class ModelRouter:
             if "retry_policy" in def_rule_data:
                 self.default_retry_policy = normalize_retry_policy(def_rule_data["retry_policy"])
                 self.default_rule.retry_policy = self.default_retry_policy
+            if "circuit_breaker" in def_rule_data:
+                self.default_circuit_breaker = normalize_circuit_breaker(def_rule_data["circuit_breaker"])
+                self.default_rule.circuit_breaker = self.default_circuit_breaker
 
             self.default_rule._compile_regex()
 
@@ -1156,6 +1396,7 @@ class ModelRouter:
             to_val = r.get("timeout")
             fb_val = r.get("fallback_upstream_url")
             r_policy = r.get("retry_policy")
+            cb_val = r.get("circuit_breaker")
 
             incoming_key = r.get("api_key")
             if incoming_key is not None:
@@ -1184,6 +1425,7 @@ class ModelRouter:
                 timeout=to_val,
                 fallback_upstream_url=fb_val,
                 retry_policy=r_policy,
+                circuit_breaker=cb_val,
                 exclude_pattern=r.get("exclude_pattern"),
                 limiter=existing.limiter if existing else None,
                 is_default=False,

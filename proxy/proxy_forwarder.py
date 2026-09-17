@@ -31,9 +31,9 @@ except ImportError:
     from fast_json import json_loads, json_dumps, json_dumps_bytes
 
 try:
-    from proxy.model_router import build_upstream_url, apply_upstream_api_key, AcquiredSlot
+    from proxy.model_router import build_upstream_url, apply_upstream_api_key, AcquiredSlot, is_quota_exhaustion
 except ImportError:
-    from model_router import build_upstream_url, apply_upstream_api_key, AcquiredSlot
+    from model_router import build_upstream_url, apply_upstream_api_key, AcquiredSlot, is_quota_exhaustion
 
 from proxy.telemetry_db import (
     classify_endpoint,
@@ -252,23 +252,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             content_type = upstream_resp.headers.get("Content-Type", "")
                             is_stream_candidate = "text/event-stream" in content_type and status_code == 200
 
-                            sniff_needed, sniff_delay, sniff_reason = evaluate_retry_condition(
-                                status_code=status_code, headers=upstream_resp.headers,
-                                body_text_or_json=None, attempt=attempt, retry_policy=retry_policy,
-                            )
-
-                            if sniff_needed and attempt < max_retries:
-                                target_limiter.record_retry_attempt()
-                                _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{sniff_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={sniff_delay:.2f}s...")
-                                retry_needed, retry_delay, retry_reason = True, sniff_delay, sniff_reason
-
-                            elif sniff_reason and attempt >= max_retries and has_more_candidates:
-                                target_limiter.record_retry_failed()
-                                cascade_to_next = True
-                                cascade_reason = sniff_reason
-                                break
-
-                            elif is_stream_candidate:
+                            if is_stream_candidate:
                                 s_resp, s_retry, s_delay, s_reason = await handle_streaming_upstream(
                                     request=request, upstream_resp=upstream_resp, attempt=attempt,
                                     max_retries=max_retries, retry_policy=retry_policy, target_limiter=target_limiter,
@@ -282,9 +266,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 if s_retry and attempt < max_retries:
                                     retry_needed, retry_delay, retry_reason = True, s_delay, s_reason
                                 elif s_retry and attempt >= max_retries:
+                                    is_quota, q_reason = is_quota_exhaustion(status_code=status_code, reason=s_reason)
+                                    if is_quota:
+                                        _model_router.mark_route_quota_exhaustion(route_res.route_id, reason=q_reason)
+                                    else:
+                                        _model_router.mark_route_outage_failure(route_res.route_id, reason=s_reason)
                                     if has_more_candidates:
                                         cascade_to_next = True
-                                        cascade_reason = s_reason
+                                        cascade_reason = q_reason if is_quota else s_reason
                                         break
                                     return s_resp
                                 else:
@@ -309,15 +298,31 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     attempt=attempt, retry_policy=retry_policy,
                                 )
 
-                                if b_needed and attempt < max_retries:
+                                is_quota, q_reason = is_quota_exhaustion(
+                                    status_code=status_code,
+                                    body_text_or_json=resp_data if resp_data else resp_body,
+                                    reason=b_reason,
+                                )
+
+                                if is_quota:
+                                    target_limiter.record_retry_failed()
+                                    _model_router.mark_route_quota_exhaustion(route_res.route_id, reason=q_reason)
+                                    _tlog_fn(f"[telemetry] [CIRCUIT TRIPPED - QUOTA] req_id={req_id} route='{route_name}' hard quota limit reached: '{q_reason}'. Initiating 30m cooldown.")
+                                    if has_more_candidates:
+                                        cascade_to_next = True
+                                        cascade_reason = q_reason
+                                        break
+                                elif b_needed and attempt < max_retries:
                                     target_limiter.record_retry_attempt()
                                     _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{b_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={b_delay:.2f}s...")
                                     retry_needed, retry_delay, retry_reason = True, b_delay, b_reason
-                                elif b_reason and attempt >= max_retries and has_more_candidates:
+                                elif b_reason and attempt >= max_retries:
                                     target_limiter.record_retry_failed()
-                                    cascade_to_next = True
-                                    cascade_reason = b_reason
-                                    break
+                                    _model_router.mark_route_outage_failure(route_res.route_id, reason=b_reason)
+                                    if has_more_candidates:
+                                        cascade_to_next = True
+                                        cascade_reason = b_reason
+                                        break
                                 else:
                                     if attempt > 0:
                                         if status_code and 200 <= status_code < 300:
@@ -415,7 +420,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         )
                                         return web.json_response({"error": {"message": error_msg, "type": "token_budget_exceeded"}}, status=429, headers=budget_headers)
 
-                                    _model_router.mark_route_success(route_res.route_id)
+                                    if status_code and 200 <= status_code < 300:
+                                        _model_router.mark_route_success(route_res.route_id)
+                                    elif status_code and status_code in (502, 503, 504, 529):
+                                        _model_router.mark_route_outage_failure(route_res.route_id, reason=f"HTTP {status_code}")
                                     try:
                                         return web.Response(status=upstream_resp.status, body=resp_body, headers=resp_headers)
                                     except Exception:
@@ -424,19 +432,22 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             asyncio.IncompleteReadError, asyncio.TimeoutError) as net_err:
                         is_timeout = isinstance(net_err, asyncio.TimeoutError)
                         can_retry = retry_policy.get("retry_on_timeout", False) if is_timeout else retry_policy.get("retry_on_disconnect", True)
+                        net_err_msg = f"{type(net_err).__name__}: {net_err}"
                         if attempt < max_retries and can_retry:
                             target_limiter.record_retry_attempt()
                             retry_needed = True
                             retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (min(float(retry_policy.get("max_retry_after_seconds", 10.0)), 0.5 * (2 ** attempt)) + random.uniform(0.1, 0.4))
-                            retry_reason = f"Upstream {'timeout' if is_timeout else 'disconnect/no response'}: {type(net_err).__name__} ({net_err})"
+                            retry_reason = f"Upstream {'timeout' if is_timeout else 'disconnect/no response'}: {net_err_msg}"
                             _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{retry_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={retry_delay:.2f}s...")
-                        elif has_more_candidates:
-                            target_limiter.record_retry_failed()
-                            cascade_to_next = True
-                            cascade_reason = f"{type(net_err).__name__}: {net_err}"
-                            break
                         else:
-                            raise
+                            _model_router.mark_route_outage_failure(route_res.route_id, reason=net_err_msg)
+                            if has_more_candidates:
+                                target_limiter.record_retry_failed()
+                                cascade_to_next = True
+                                cascade_reason = net_err_msg
+                                break
+                            else:
+                                raise
                     finally:
                         if owns_session and not req_session.closed:
                             await req_session.close()
@@ -450,11 +461,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     break
 
             if cascade_to_next:
-                # Check for quota exhaustion / hard failure to mark cooldown
-                if cascade_reason and any(k in str(cascade_reason).lower() for k in ("quota", "free-models-per-day", "billing", "insufficient", "rate limit exceeded")):
-                    _model_router.mark_route_cooldown(route_res.route_id, seconds=120.0, reason=cascade_reason)
-                else:
-                    _model_router.mark_route_failure(route_res.route_id, reason=cascade_reason or "retries exhausted")
+                # Ensure failure was recorded if not already done
+                r_rule = _model_router.get_rule(route_res.route_id)
+                if r_rule and r_rule.get_circuit_state() == "CLOSED":
+                    is_q, q_r = is_quota_exhaustion(status_code=status_code, reason=cascade_reason)
+                    if is_q:
+                        _model_router.mark_route_quota_exhaustion(route_res.route_id, reason=q_r)
+                    else:
+                        _model_router.mark_route_outage_failure(route_res.route_id, reason=cascade_reason or "retries exhausted")
 
                 remaining = [r for r in route_candidates if r.route_id not in attempted_route_ids]
                 if not remaining:
@@ -465,7 +479,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     break
 
                 cascade_count += 1
-                _tlog_fn(f"[telemetry] [ROUTE FAILOVER] req_id={req_id} route='{route_name}' exhausted retries ({cascade_reason}). Dynamically cascading to: '{next_route.route_name}' (priority={next_route.priority}, pre_acquired={next_acquired})")
+                _tlog_fn(f"[telemetry] [ROUTE FAILOVER] req_id={req_id} route='{route_name}' failed ({cascade_reason}). Dynamically cascading to: '{next_route.route_name}' (priority={next_route.priority}, state={next_route.circuit_state}, pre_acquired={next_acquired})")
                 current_res = next_route
                 current_limiter = next_limiter
                 current_already_acquired = next_acquired
@@ -494,6 +508,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": {"message": f"Upstream timeout: {error}", "type": "upstream_timeout"}}, status=504)
 
     except asyncio.CancelledError as cancel_err:
+        if current_res and current_res.canary_probe:
+            _model_router.release_route_canary(current_res.route_id)
         cancel_detail = str(cancel_err).strip() or "Client disconnected / request aborted"
         error = f"client_cancelled: {cancel_detail}"
         _log_forward_failure(model, path, method, call_type, input_tokens, output_tokens, reasoning_tokens,

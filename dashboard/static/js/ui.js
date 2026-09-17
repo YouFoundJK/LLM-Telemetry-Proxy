@@ -1798,6 +1798,8 @@ const UI = (() => {
               <div class="concurrency-item-pattern">${escapeHtml(def.upstream_url || '')}</div>
             </div>
             <div class="concurrency-item-right">
+              ${def.is_cooling_down ? `<span class="concurrency-pill" style="background:#dc2626; color:white;" title="${escapeHtml(def.cooldown_reason || 'Circuit open')}">⏳ ${Math.ceil((def.cooldown_remaining_seconds || 0) / 60)}m</span>` : ''}
+              ${def.circuit_state === 'HALF_OPEN' ? `<span class="concurrency-pill" style="background:#f59e0b; color:white;" title="Canary probe testing">🔬 Canary</span>` : ''}
               <span class="concurrency-pill ${defActive > 0 ? 'active' : ''}">${defActive} / ${defMax}</span>
               ${defQueued > 0 ? `<span class="concurrency-pill queued">Q: ${defQueued}</span>` : ''}
             </div>
@@ -1818,6 +1820,8 @@ const UI = (() => {
                   <div class="concurrency-item-pattern"><code>${escapeHtml(r.pattern || '')}</code> &bull; ${escapeHtml(r.upstream_url || '')}</div>
                 </div>
                 <div class="concurrency-item-right">
+                  ${r.is_cooling_down ? `<span class="concurrency-pill" style="background:#dc2626; color:white;" title="${escapeHtml(r.cooldown_reason || 'Circuit open')}">⏳ ${Math.ceil((r.cooldown_remaining_seconds || 0) / 60)}m</span>` : ''}
+                  ${r.circuit_state === 'HALF_OPEN' ? `<span class="concurrency-pill" style="background:#f59e0b; color:white;" title="Canary probe testing">🔬 Canary</span>` : ''}
                   <span class="concurrency-pill ${rActive > 0 ? 'active' : ''}">${rActive} / ${rMax}</span>
                   ${rQueued > 0 ? `<span class="concurrency-pill queued">Q: ${rQueued}</span>` : ''}
                 </div>

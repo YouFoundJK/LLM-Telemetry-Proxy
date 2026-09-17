@@ -481,6 +481,22 @@ async def handle_routes_test(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=400)
 
 
+async def handle_route_reset_cooldown(request: web.Request) -> web.Response:
+    """POST /v1/routes/{id}/reset-cooldown or /routes/{id}/reset-cooldown — manually resets circuit breaker cooldown."""
+    if not _model_router:
+        return web.json_response({"error": "Router not initialized"}, status=500)
+    route_id = request.match_info.get("id")
+    rule = _model_router.get_rule(route_id)
+    if not rule:
+        return web.json_response({"error": f"Route '{route_id}' not found"}, status=404)
+    _model_router.reset_route_circuit(route_id)
+    return web.json_response({
+        "success": True,
+        "message": f"Circuit breaker for route '{rule.name}' ({route_id}) has been reset.",
+        "route": rule.to_dict(),
+    })
+
+
 async def handle_raw_log_status(request: web.Request) -> web.Response:
     """GET /v1/raw-log/status or /raw-log/status"""
     file_size = LOGGER_FILE.stat().st_size if LOGGER_FILE.exists() else 0

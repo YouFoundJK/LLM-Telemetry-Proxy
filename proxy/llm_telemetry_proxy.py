@@ -96,6 +96,7 @@ from proxy.payload_inspector import (
     handle_routes_get,
     handle_routes_save,
     handle_routes_test,
+    handle_route_reset_cooldown,
     handle_raw_log_status,
     handle_raw_log_toggle,
     handle_raw_log_recent,
@@ -212,6 +213,8 @@ def create_app():
     app.router.add_post("/routes", handle_routes_save)
     app.router.add_post("/v1/routes/test", handle_routes_test)
     app.router.add_post("/routes/test", handle_routes_test)
+    app.router.add_post("/v1/routes/{id}/reset-cooldown", handle_route_reset_cooldown)
+    app.router.add_post("/routes/{id}/reset-cooldown", handle_route_reset_cooldown)
 
     # Raw payload management routes
     app.router.add_get("/v1/raw-log/status", handle_raw_log_status)

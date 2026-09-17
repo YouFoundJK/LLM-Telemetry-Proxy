@@ -1969,9 +1969,14 @@ const App = (() => {
       if (!tbody) return;
 
       // Pinned Row #1: System Default Upstream Router
-      const defStatusBadge = isDefEnabled
+      let defStatusBadge = isDefEnabled
         ? '<span class="badge-status-active">Active</span>'
         : '<span class="badge-status-inactive" style="color:var(--red); background:rgba(248,81,73,0.15);">Frozen</span>';
+      if (defRoute.is_cooling_down) {
+        defStatusBadge = `<span class="badge-status-inactive" style="background:rgba(248,81,73,0.2); color:var(--red); border:1px solid rgba(248,81,73,0.4);" title="${UI.escapeHtml(defRoute.cooldown_reason || 'Circuit Open')}">⏳ Cooldown (${Math.ceil((defRoute.cooldown_remaining_seconds || 0) / 60)}m)</span>`;
+      } else if (defRoute.circuit_state === 'HALF_OPEN') {
+        defStatusBadge = '<span class="badge-status-active" style="background:rgba(210,153,34,0.2); color:#d29922; border:1px solid rgba(210,153,34,0.4);" title="Testing route with canary request">🔬 Canary Probe</span>';
+      }
       const defMaxConcVal = defRoute.max_concurrent ?? parseInt(document.getElementById('defaultRouterMaxConcurrent')?.value || '4', 10);
       const defStats = defRoute.limiter_stats || {};
       const defActiveRunning = defStats.active || 0;
@@ -2008,6 +2013,7 @@ const App = (() => {
           <td>${defRetryBadge}</td>
           <td>${defStatusBadge}</td>
           <td style="text-align: right; white-space: nowrap;">
+            ${defRoute.is_cooling_down ? '<button class="btn-icon-action reset-cooldown-btn" title="Reset Cooldown (Restore Route)" data-route-id="default" style="color:var(--accent);">🔄</button>' : ''}
             <button class="btn-icon-action" disabled style="opacity:0.25; cursor:not-allowed;" title="Default route is pinned at top">▲</button>
             <button class="btn-icon-action" disabled style="opacity:0.25; cursor:not-allowed;" title="Default route is pinned at top">▼</button>
             <button class="btn-icon-action toggle-default-enable-btn" title="${isDefEnabled ? 'Freeze / Disable Default Upstream Fallback' : 'Unfreeze / Enable Default Upstream Fallback'}" style="${isDefEnabled ? '' : 'color:var(--accent);'}">⚡</button>
@@ -2029,9 +2035,14 @@ const App = (() => {
       } else {
         customRowsHtml = routes.map((r, idx) => {
           const isEnabled = Boolean(r.enabled);
-          const statusBadge = isEnabled
+          let statusBadge = isEnabled
             ? '<span class="badge-status-active">Active</span>'
             : '<span class="badge-status-inactive">Disabled</span>';
+          if (r.is_cooling_down) {
+            statusBadge = `<span class="badge-status-inactive" style="background:rgba(248,81,73,0.2); color:var(--red); border:1px solid rgba(248,81,73,0.4);" title="${UI.escapeHtml(r.cooldown_reason || 'Circuit Open')}">⏳ Cooldown (${Math.ceil((r.cooldown_remaining_seconds || 0) / 60)}m)</span>`;
+          } else if (r.circuit_state === 'HALF_OPEN') {
+            statusBadge = '<span class="badge-status-active" style="background:rgba(210,153,34,0.2); color:#d29922; border:1px solid rgba(210,153,34,0.4);" title="Testing route with canary request">🔬 Canary Probe</span>';
+          }
           const maxConcVal = r.max_concurrent ?? 4;
           const stats = r.limiter_stats || {};
           const activeRunning = stats.active || 0;
@@ -2071,6 +2082,7 @@ const App = (() => {
               <td>${retryBadge}</td>
               <td>${statusBadge}</td>
               <td style="text-align: right; white-space: nowrap;">
+                ${r.is_cooling_down ? `<button class="btn-icon-action reset-cooldown-btn" title="Reset Cooldown (Restore Route)" data-route-id="${r.id}" style="color:var(--accent);">🔄</button>` : ''}
                 <button class="btn-icon-action move-up-btn" title="Move Up" data-idx="${idx}" ${idx === 0 ? 'disabled style="opacity:0.3;"' : ''}>▲</button>
                 <button class="btn-icon-action move-down-btn" title="Move Down" data-idx="${idx}" ${idx === routes.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>▼</button>
                 <button class="btn-icon-action toggle-enable-btn" title="${isEnabled ? 'Disable' : 'Enable'}" data-idx="${idx}">⚡</button>
@@ -2083,6 +2095,25 @@ const App = (() => {
       }
 
       tbody.innerHTML = defaultRowHtml + customRowsHtml;
+
+      // Attach reset cooldown button listeners
+      tbody.querySelectorAll('.reset-cooldown-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const routeId = btn.dataset.routeId;
+          try {
+            const resp = await fetch(`/v1/routes/${routeId}/reset-cooldown`, { method: 'POST' });
+            const data = await resp.json();
+            if (data.success) {
+              UI.showToast(`Circuit breaker reset: ${data.message || routeId}`);
+              await loadRoutesConfig();
+            } else {
+              UI.showToast(`Failed to reset: ${data.error || 'Unknown error'}`, true);
+            }
+          } catch (e) {
+            UI.showToast(`Error resetting route: ${e.message}`, true);
+          }
+        });
+      });
 
       // Attach table action handlers for Default Route
       tbody.querySelectorAll('.toggle-default-enable-btn').forEach(btn => {
