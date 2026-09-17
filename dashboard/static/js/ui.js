@@ -1737,9 +1737,10 @@ const UI = (() => {
       const sum = status.health.limiters_summary;
       const def = sum.default || {};
       const defStats = def.stats || {};
-      activeCount = defStats.active || 0;
-      maxCount = defStats.max_concurrent || 4;
-      queuedCount = defStats.queued || 0;
+      const defEnabled = def.enabled !== false;
+      activeCount = defEnabled ? (defStats.active || 0) : 0;
+      maxCount = defEnabled ? (defStats.max_concurrent || 4) : 0;
+      queuedCount = defEnabled ? (defStats.queued || 0) : 0;
 
       const customRoutes = sum.routes || [];
       for (const r of customRoutes) {
@@ -1791,22 +1792,25 @@ const UI = (() => {
         const defMax = defStats.max_concurrent || 4;
         const defQueued = defStats.queued || 0;
 
-        let rowsHtml = `
-          <div class="concurrency-item-row ${defQueued > 0 ? 'is-queued' : (defActive > 0 ? 'is-active' : '')}">
-            <div class="concurrency-item-left">
-              <div class="concurrency-item-name">${escapeHtml(def.name || 'Default Upstream')}</div>
-              <div class="concurrency-item-pattern">${escapeHtml(def.upstream_url || '')}</div>
+        let rowsHtml = '';
+        if (def.enabled !== false) {
+          rowsHtml += `
+            <div class="concurrency-item-row ${defQueued > 0 ? 'is-queued' : (defActive > 0 ? 'is-active' : '')}">
+              <div class="concurrency-item-left">
+                <div class="concurrency-item-name">${escapeHtml(def.name || 'Default Upstream')}</div>
+                <div class="concurrency-item-pattern">${escapeHtml(def.upstream_url || '')}</div>
+              </div>
+              <div class="concurrency-item-right">
+                ${def.is_cooling_down ? `<span class="concurrency-pill" style="background:#dc2626; color:white;" title="${escapeHtml(def.cooldown_reason || 'Circuit open')}">⏳ ${Math.ceil((def.cooldown_remaining_seconds || 0) / 60)}m</span>` : ''}
+                ${def.circuit_state === 'HALF_OPEN' ? `<span class="concurrency-pill" style="background:#f59e0b; color:white;" title="Canary probe testing">🔬 Canary</span>` : ''}
+                <span class="concurrency-pill ${defActive > 0 ? 'active' : ''}">${defActive} / ${defMax}</span>
+                ${defQueued > 0 ? `<span class="concurrency-pill queued">Q: ${defQueued}</span>` : ''}
+              </div>
             </div>
-            <div class="concurrency-item-right">
-              ${def.is_cooling_down ? `<span class="concurrency-pill" style="background:#dc2626; color:white;" title="${escapeHtml(def.cooldown_reason || 'Circuit open')}">⏳ ${Math.ceil((def.cooldown_remaining_seconds || 0) / 60)}m</span>` : ''}
-              ${def.circuit_state === 'HALF_OPEN' ? `<span class="concurrency-pill" style="background:#f59e0b; color:white;" title="Canary probe testing">🔬 Canary</span>` : ''}
-              <span class="concurrency-pill ${defActive > 0 ? 'active' : ''}">${defActive} / ${defMax}</span>
-              ${defQueued > 0 ? `<span class="concurrency-pill queued">Q: ${defQueued}</span>` : ''}
-            </div>
-          </div>
-        `;
+          `;
+        }
 
-        const customRoutes = sum.routes || [];
+        const customRoutes = (sum.routes || []).filter(r => r.enabled !== false);
         if (customRoutes.length > 0) {
           rowsHtml += customRoutes.map(r => {
             const st = r.stats || {};
@@ -1814,9 +1818,9 @@ const UI = (() => {
             const rMax = st.max_concurrent || 4;
             const rQueued = st.queued || 0;
             return `
-              <div class="concurrency-item-row ${rQueued > 0 ? 'is-queued' : (rActive > 0 ? 'is-active' : '')}" style="${r.enabled ? '' : 'opacity: 0.5;'}">
+              <div class="concurrency-item-row ${rQueued > 0 ? 'is-queued' : (rActive > 0 ? 'is-active' : '')}">
                 <div class="concurrency-item-left">
-                  <div class="concurrency-item-name">${escapeHtml(r.name || 'Rule')} ${!r.enabled ? '<span style="font-size:10px; color:var(--red);">(Disabled)</span>' : ''}</div>
+                  <div class="concurrency-item-name">${escapeHtml(r.name || 'Rule')}</div>
                   <div class="concurrency-item-pattern"><code>${escapeHtml(r.pattern || '')}</code> &bull; ${escapeHtml(r.upstream_url || '')}</div>
                 </div>
                 <div class="concurrency-item-right">
@@ -1828,6 +1832,10 @@ const UI = (() => {
               </div>
             `;
           }).join('');
+        }
+
+        if (!rowsHtml) {
+          rowsHtml = '<div class="concurrency-dropdown-empty">No active upstream routes enabled.</div>';
         }
 
         targetHtml = rowsHtml;
