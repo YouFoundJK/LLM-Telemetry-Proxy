@@ -752,7 +752,7 @@ td.num {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 380px;
+  max-width: 480px;
   cursor: help;
 }
 

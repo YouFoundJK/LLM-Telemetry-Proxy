@@ -473,6 +473,39 @@ const App = (() => {
     return resultList;
   }
 
+  function resolveRouteForModel(modelName, routesConfig) {
+    if (!modelName || !routesConfig) return null;
+    const cleanName = String(modelName).trim();
+    const routes = routesConfig.routes || [];
+    const sortedRoutes = [...routes].filter(r => r && r.enabled !== false).sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+    for (const r of sortedRoutes) {
+      if (r.exclude_pattern) {
+        try {
+          if (new RegExp(r.exclude_pattern, 'i').test(cleanName)) continue;
+        } catch(e) {}
+      }
+      if (!r.pattern || r.pattern === '.*') {
+        return r.name || 'Custom Route';
+      }
+      try {
+        if (new RegExp(r.pattern, 'i').test(cleanName)) {
+          return r.name || 'Custom Route';
+        }
+      } catch(e) {}
+    }
+    const def = routesConfig.default_route;
+    if (def && def.enabled !== false) {
+      if (def.exclude_pattern) {
+        try {
+          if (new RegExp(def.exclude_pattern, 'i').test(cleanName)) return null;
+        } catch(e) {}
+      }
+      return def.name || 'Default Upstream';
+    }
+    return null;
+  }
+  window.resolveRouteForModel = resolveRouteForModel;
+
   function renderTelemetry(data) {
     if (!data) return;
 
@@ -488,6 +521,12 @@ const App = (() => {
         const canonical = resolveCanonicalModel(c.model, c.timestamp, State.modelMapping);
         if (canonical && canonical !== c.model) {
           c.model = canonical;
+        }
+      }
+      if (!c.route_name && c.model && State.routesConfig) {
+        const resolvedName = resolveRouteForModel(c.model, State.routesConfig);
+        if (resolvedName) {
+          c.route_name = resolvedName;
         }
       }
       return c;

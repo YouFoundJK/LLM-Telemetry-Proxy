@@ -9,7 +9,7 @@
  */
 
 const TelemetryStore = (() => {
-  const DB_NAME = 'LLM_Telemetry_Lake_v1';
+  const DB_NAME = 'LLM_Telemetry_Lake_v2';
   const DB_VERSION = 1;
   const STORE_CALLS = 'api_calls';
   const STORE_META = 'meta';
@@ -33,6 +33,13 @@ const TelemetryStore = (() => {
         resolve(null);
         return;
       }
+
+      // Proactively clear legacy v1 cache missing route telemetry
+      try {
+        if (window.indexedDB.deleteDatabase) {
+          indexedDB.deleteDatabase('LLM_Telemetry_Lake_v1');
+        }
+      } catch (e) {}
 
       const req = indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -201,6 +208,9 @@ const TelemetryStore = (() => {
           if (r.error) item.error = r.error;
           if (r.call_type && r.call_type !== 'chat') item.call_type = r.call_type;
           if (r.calls_count && r.calls_count > 1) item.calls_count = r.calls_count;
+          if (r.route_name) item.route_name = r.route_name;
+          if (r.retries_attempted !== undefined && r.retries_attempted !== null) item.retries_attempted = r.retries_attempted;
+          if (r.absorbed_429) item.absorbed_429 = r.absorbed_429;
 
           callsStore.put(item);
 

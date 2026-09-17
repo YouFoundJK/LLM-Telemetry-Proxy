@@ -1149,6 +1149,45 @@ class TestModelRouterEndToEnd(AioHTTPTestCase):
         data2 = await resp2.json()
         self.assertIn("Invalid exclude regex pattern", data2["error"])
 
+    async def test_route_failure_logs_exact_route_name(self):
+        """When an upstream route returns an error, the logged call records the exact route name, not default."""
+        proxy_mod._model_router.update_from_dict({
+            "default_route": {
+                "name": "Default Mock Upstream",
+                "upstream_url": str(self.mock_default_server.make_url("/v1")),
+                "enabled": True
+            },
+            "routes": [
+                {
+                    "id": "failing_route",
+                    "name": "Failing OpenRouter Route",
+                    "pattern": r"stealth/fail.*",
+                    "upstream_url": str(self.mock_openrouter_server.make_url("/nonexistent")),
+                    "priority": 100,
+                    "max_concurrent": 5,
+                    "retry_policy": {"enabled": False, "max_retries": 0}
+                }
+            ]
+        })
+
+        from proxy import proxy_forwarder
+        logged_calls = []
+        orig_log_call = proxy_forwarder.log_call
+        def mock_log_call(*args, **kwargs):
+            logged_calls.append(kwargs)
+            return orig_log_call(*args, **kwargs)
+
+        proxy_forwarder.log_call = mock_log_call
+        try:
+            payload = {"model": "stealth/fail-test", "messages": [{"role": "user", "content": "Hello"}]}
+            resp = await self.client.post("/v1/chat/completions", json=payload)
+            self.assertGreaterEqual(resp.status, 400)
+            self.assertTrue(len(logged_calls) > 0)
+            self.assertEqual(logged_calls[-1].get("route_name"), "Failing OpenRouter Route")
+            self.assertNotEqual(logged_calls[-1].get("route_name"), "Default Mock Upstream")
+        finally:
+            proxy_forwarder.log_call = orig_log_call
+
 
 if __name__ == "__main__":
     unittest.main()

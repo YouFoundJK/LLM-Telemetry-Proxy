@@ -776,8 +776,8 @@ class ModelRouter:
     Thread-safe, microsecond-latency model router and per-upstream concurrency limiter.
     """
 
-    def __init__(self, config_path: Optional[Path] = None):
-        self.config_path = config_path
+    def __init__(self, config_path: Optional[Any] = None):
+        self.config_path = Path(config_path) if config_path else None
         self.routing_strategy = "priority"
         self._rr_counter = 0
         self.default_upstream_url = DEFAULT_UPSTREAM_URL
@@ -819,8 +819,8 @@ class ModelRouter:
         if self.config_path and self.config_path.exists():
             self.load()
 
-    def load(self, path: Optional[Path] = None) -> bool:
-        target_path = path or self.config_path
+    def load(self, path: Optional[Any] = None) -> bool:
+        target_path = Path(path) if path else self.config_path
         if not target_path or not target_path.exists():
             return False
 

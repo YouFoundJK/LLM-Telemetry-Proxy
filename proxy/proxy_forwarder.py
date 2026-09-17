@@ -168,6 +168,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     cascade_count = 0
     total_timeout = 600.0
 
+    route_name = admit_route.route_name if admit_route else None
+    resolved_base = UPSTREAM if (admit_route and admit_route.is_default and UPSTREAM != DEFAULT_UPSTREAM) else (admit_route.upstream_url if admit_route else UPSTREAM)
+    upstream_url = build_upstream_url(resolved_base, path)
+    active_upstream_url = upstream_url
+
     ttfb_ms, status_code, error, output_tokens, reasoning_tokens, tokens_per_s = None, None, None, None, None, None
     logged, headers_prepared, response = False, False, None
     is_stream_req = bool(payload.get("stream") if isinstance(payload, dict) else False)
@@ -487,8 +492,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             else:
                 break
 
+        exhausted_err = f"all_routes_exhausted: All candidate routes exhausted without response (last route: {route_name})"
+        _log_forward_failure(
+            model, path, method, call_type, input_tokens, output_tokens, reasoning_tokens,
+            ttfb_ms, t_start, status_code or 502, exhausted_err, route_name,
+            active_upstream_url if 'active_upstream_url' in locals() else upstream_url,
+            server_running, server_tok_s, server_model, req_id, request.headers, payload, is_stream_req, req_seq, request.remote, logged
+        )
         return web.json_response(
-            {"error": {"message": "Upstream route exhausted with no response", "type": "proxy_error"}},
+            {"error": {"message": f"Upstream route exhausted with no response (last attempted route: '{route_name}')", "type": "proxy_error"}},
             status=status_code or 502,
         )
 
@@ -681,18 +693,20 @@ async def _simple_forward(request, path, method):
     except asyncio.TimeoutError as to_err:
         to_msg = str(to_err).strip()
         error = f"upstream_timeout: {to_msg}" if to_msg else "upstream_timeout"
+        active_route_name = route_res.route_name if ('route_res' in locals() and route_res) else (admit_route.route_name if ('admit_route' in locals() and admit_route) else _model_router.default_name)
         try:
             log_proxy_call(path, method, classify_endpoint(path), None, 504, error, 0, None, (time.monotonic() - t_start) * 1000,
-                           route_name=_model_router.default_name, upstream_url=last_upstream_url)
+                           route_name=active_route_name, upstream_url=last_upstream_url)
         except Exception:
             pass
-        return web.json_response({"error": {"message": f"Upstream timeout: {error}", "type": "upstream_timeout"}}, status=504)
+        return web.json_response({"error": {"message": f"Upstream timeout on route '{active_route_name}': {error}", "type": "upstream_timeout"}}, status=504)
     except asyncio.CancelledError as cancel_err:
         cancel_detail = str(cancel_err).strip() or "Client disconnected / request aborted"
         error = f"client_cancelled: {cancel_detail}"
+        active_route_name = route_res.route_name if ('route_res' in locals() and route_res) else (admit_route.route_name if ('admit_route' in locals() and admit_route) else _model_router.default_name)
         try:
             log_proxy_call(path, method, classify_endpoint(path), None, 499, error, 0, None, (time.monotonic() - t_start) * 1000,
-                           route_name=_model_router.default_name, upstream_url=last_upstream_url)
+                           route_name=active_route_name, upstream_url=last_upstream_url)
         except Exception:
             pass
         raise
@@ -701,9 +715,10 @@ async def _simple_forward(request, path, method):
         detail = str(e).strip() or type(e).__name__
         error = (f"upstream_network_error: {detail}" if is_net else f"proxy_internal_error: {detail}")[:200]
         err_type = "upstream_network_error" if is_net else "proxy_internal_error"
+        active_route_name = route_res.route_name if ('route_res' in locals() and route_res) else (admit_route.route_name if ('admit_route' in locals() and admit_route) else _model_router.default_name)
         try:
             log_proxy_call(path, method, classify_endpoint(path), None, None, error, 0, None, (time.monotonic() - t_start) * 1000,
-                           route_name=_model_router.default_name, upstream_url=last_upstream_url)
+                           route_name=active_route_name, upstream_url=last_upstream_url)
         except Exception:
             pass
-        return web.json_response({"error": {"message": error, "type": err_type}}, status=502)
+        return web.json_response({"error": {"message": error, "type": err_type, "route": active_route_name}}, status=502)
