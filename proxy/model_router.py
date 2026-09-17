@@ -433,6 +433,8 @@ class RouteResolutionResult:
     priority: int = 10
     strategy: str = "inherit"
     exclude_pattern: Optional[str] = None
+    is_cooling_down: bool = False
+    cooldown_remaining: float = 0.0
 
 
 class ModelRouteRule:
@@ -482,9 +484,33 @@ class ModelRouteRule:
         self.limiter.slot_cooldown_seconds = self.slot_cooldown_ms / 1000.0
         self.limiter.max_rpm = self.max_rpm
 
+        self._cooldown_until: float = 0.0
+        self._cooldown_reason: Optional[str] = None
+        self._consecutive_failures: int = 0
+
         self._compiled: Optional[re.Pattern] = None
         self._compiled_exclude: Optional[re.Pattern] = None
         self._compile_regex()
+
+    def is_cooling_down(self) -> bool:
+        return time.monotonic() < self._cooldown_until
+
+    def cooldown_remaining(self) -> float:
+        return max(0.0, self._cooldown_until - time.monotonic())
+
+    def mark_cooldown(self, seconds: float = 60.0, reason: str = ""):
+        self._cooldown_until = time.monotonic() + max(0.5, float(seconds))
+        self._cooldown_reason = str(reason).strip() if reason else "Rate limit / upstream failure cooldown"
+
+    def mark_failure(self, reason: str = "", cooldown_seconds: float = 60.0):
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= 3:
+            self.mark_cooldown(cooldown_seconds, reason=reason or f"{self._consecutive_failures} consecutive failures")
+
+    def mark_success(self):
+        self._consecutive_failures = 0
+        self._cooldown_until = 0.0
+        self._cooldown_reason = None
 
     def _compile_regex(self):
         if not self.pattern or self.pattern == ".*":
@@ -560,6 +586,9 @@ class ModelRouteRule:
             "retry_policy": self.retry_policy,
             "exclude_pattern": self.exclude_pattern,
             "is_default": self.is_default,
+            "is_cooling_down": self.is_cooling_down(),
+            "cooldown_remaining_seconds": round(self.cooldown_remaining(), 1),
+            "cooldown_reason": self._cooldown_reason if self.is_cooling_down() else None,
             "limiter_stats": self.limiter.get_stats(),
         }
 
@@ -789,6 +818,8 @@ class ModelRouter:
             api_key=rule.api_key,
             priority=rule.priority,
             strategy=rule.strategy,
+            is_cooling_down=rule.is_cooling_down(),
+            cooldown_remaining=rule.cooldown_remaining(),
         )
 
     def resolve_chain(self, model_name: Optional[str]) -> List[RouteResolutionResult]:
@@ -847,28 +878,32 @@ class ModelRouter:
         if not candidates:
             return None, None, False
 
-        if len(candidates) == 1:
-            limiter = self.get_limiter(candidates[0].route_id)
+        # Filter out cooling down routes if there is at least one non-cooling-down candidate
+        active_candidates = [c for c in candidates if not c.is_cooling_down]
+        pool = active_candidates if active_candidates else candidates
+
+        if len(pool) == 1:
+            limiter = self.get_limiter(pool[0].route_id)
             acquired = await limiter.try_acquire()
-            return candidates[0], limiter, acquired
+            return pool[0], limiter, acquired
 
         # Determine if balanced mode is active
         is_balanced = (self.routing_strategy in ("balanced", "least_conn", "round_robin"))
         if not is_balanced:
-            is_balanced = any(c.strategy in ("balanced", "least_conn", "round_robin") for c in candidates)
+            is_balanced = any(c.strategy in ("balanced", "least_conn", "round_robin") for c in pool)
 
         if not is_balanced:
             # ── Default Priority Spillover ──────────────────────────────────
-            for cand in candidates:
+            for cand in pool:
                 limiter = self.get_limiter(cand.route_id)
                 if await limiter.try_acquire():
                     return cand, limiter, True
 
-            best_candidate = candidates[0]
+            best_candidate = pool[0]
             best_limiter = self.get_limiter(best_candidate.route_id)
             min_queued = best_limiter.queued
 
-            for cand in candidates[1:]:
+            for cand in pool[1:]:
                 lim = self.get_limiter(cand.route_id)
                 q_depth = lim.queued
                 if q_depth < min_queued:
@@ -880,7 +915,7 @@ class ModelRouter:
 
         # ── Balanced Routing Strategy (Equal Priority Pool) ─────────────────
         prio_map: Dict[int, List[RouteResolutionResult]] = {}
-        for cand in candidates:
+        for cand in pool:
             prio_map.setdefault(cand.priority, []).append(cand)
 
         sorted_prios = sorted(prio_map.keys(), reverse=True)
@@ -904,7 +939,7 @@ class ModelRouter:
                 if await limiter.try_acquire():
                     return cand, limiter, True
 
-        all_limiters = [(c, self.get_limiter(c.route_id)) for c in candidates]
+        all_limiters = [(c, self.get_limiter(c.route_id)) for c in pool]
         min_queued = min(lim.queued for _, lim in all_limiters)
         min_q_candidates = [c for c, lim in all_limiters if lim.queued == min_queued]
 
@@ -914,6 +949,35 @@ class ModelRouter:
         self._rr_counter += 1
         picked_cand = top_tier_tied[self._rr_counter % len(top_tier_tied)]
         return picked_cand, self.get_limiter(picked_cand.route_id), False
+
+    def get_rule(self, route_id: Optional[str] = None) -> Optional[ModelRouteRule]:
+        """
+        Get the ModelRouteRule instance for a specific route ID.
+        """
+        if not route_id or route_id == "default" or (self.default_rule and self.default_rule.id == route_id):
+            return self.default_rule
+        for r in self.rules:
+            if r.id == route_id:
+                return r
+        return self.default_rule if (self.default_rule and self.default_rule.id == route_id) else None
+
+    def mark_route_success(self, route_id: Optional[str]):
+        """Mark route as successful, resetting consecutive failures and clearing cooldown."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.mark_success()
+
+    def mark_route_failure(self, route_id: Optional[str], reason: str = "", cooldown_seconds: float = 60.0):
+        """Record route failure, automatically entering cooldown if threshold is reached."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.mark_failure(reason=reason, cooldown_seconds=cooldown_seconds)
+
+    def mark_route_cooldown(self, route_id: Optional[str], seconds: float = 60.0, reason: str = ""):
+        """Immediately place route in cooldown."""
+        rule = self.get_rule(route_id)
+        if rule:
+            rule.mark_cooldown(seconds=seconds, reason=reason)
 
     def get_limiter(self, route_id: Optional[str] = None) -> UpstreamConcurrencyLimiter:
         """

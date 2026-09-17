@@ -161,7 +161,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 "type": "no_capacity"
             }
         }, status=503)
-    route_sequence = [admit_route] + [r for r in route_candidates if r.route_id != admit_route.route_id]
+    attempted_route_ids = set()
+    current_res = admit_route
+    current_limiter = admit_limiter
+    current_already_acquired = admit_already_acquired
+    cascade_count = 0
+    total_timeout = 600.0
+
     ttfb_ms, status_code, error, output_tokens, reasoning_tokens, tokens_per_s = None, None, None, None, None, None
     logged, headers_prepared, response = False, False, None
     is_stream_req = bool(payload.get("stream") if isinstance(payload, dict) else False)
@@ -175,8 +181,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         asyncio.create_task(payload_inspector.broadcast_raw_payload(start_record))
 
     try:
-        for route_idx, route_res in enumerate(route_sequence):
+        while current_res is not None:
+            route_res = current_res
             route_name = route_res.route_name
+            target_limiter = current_limiter or _model_router.get_limiter(route_res.route_id)
+            attempted_route_ids.add(route_res.route_id)
+            has_more_candidates = any(r.route_id not in attempted_route_ids for r in route_candidates)
+
             resolved_base = UPSTREAM if (route_res.is_default and UPSTREAM != DEFAULT_UPSTREAM) else route_res.upstream_url
             upstream_url = build_upstream_url(resolved_base, path)
 
@@ -200,7 +211,6 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             total_timeout = float(route_timeout.get("total", 600.0))
             req_timeout = aiohttp.ClientTimeout(connect=connect_timeout, sock_read=sock_read_timeout, total=total_timeout)
 
-            target_limiter = _model_router.get_limiter(route_res.route_id)
             retry_policy = dict(route_res.retry_policy or _model_router.default_retry_policy)
             if route_res.is_default:
                 if _retry_429_max == 0:
@@ -223,7 +233,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     active_upstream_url = build_upstream_url(route_res.fallback_upstream_url, path)
                     _tlog_fn(f"[telemetry] [FALLBACK ROUTING] req_id={req_id} attempt {attempt+1} directed to fallback: {active_upstream_url}")
 
-                is_initial_acquired = (route_idx == 0 and attempt == 0 and admit_already_acquired)
+                is_initial_acquired = (attempt == 0 and current_already_acquired)
                 slot_context = AcquiredSlot(target_limiter, already_acquired=is_initial_acquired)
 
                 async with slot_context:
@@ -252,7 +262,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{sniff_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={sniff_delay:.2f}s...")
                                 retry_needed, retry_delay, retry_reason = True, sniff_delay, sniff_reason
 
-                            elif sniff_reason and attempt >= max_retries and route_idx < len(route_sequence) - 1:
+                            elif sniff_reason and attempt >= max_retries and has_more_candidates:
                                 target_limiter.record_retry_failed()
                                 cascade_to_next = True
                                 cascade_reason = sniff_reason
@@ -272,12 +282,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                 if s_retry and attempt < max_retries:
                                     retry_needed, retry_delay, retry_reason = True, s_delay, s_reason
                                 elif s_retry and attempt >= max_retries:
-                                    if route_idx < len(route_sequence) - 1:
+                                    if has_more_candidates:
                                         cascade_to_next = True
                                         cascade_reason = s_reason
                                         break
                                     return s_resp
                                 else:
+                                    _model_router.mark_route_success(route_res.route_id)
                                     return s_resp
 
                             else:
@@ -302,7 +313,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                     target_limiter.record_retry_attempt()
                                     _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{b_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={b_delay:.2f}s...")
                                     retry_needed, retry_delay, retry_reason = True, b_delay, b_reason
-                                elif b_reason and attempt >= max_retries and route_idx < len(route_sequence) - 1:
+                                elif b_reason and attempt >= max_retries and has_more_candidates:
                                     target_limiter.record_retry_failed()
                                     cascade_to_next = True
                                     cascade_reason = b_reason
@@ -404,6 +415,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                                         )
                                         return web.json_response({"error": {"message": error_msg, "type": "token_budget_exceeded"}}, status=429, headers=budget_headers)
 
+                                    _model_router.mark_route_success(route_res.route_id)
                                     try:
                                         return web.Response(status=upstream_resp.status, body=resp_body, headers=resp_headers)
                                     except Exception:
@@ -418,7 +430,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             retry_delay = 0.0 if str(retry_policy.get("mode", "immediate")).lower() == "immediate" else (min(float(retry_policy.get("max_retry_after_seconds", 10.0)), 0.5 * (2 ** attempt)) + random.uniform(0.1, 0.4))
                             retry_reason = f"Upstream {'timeout' if is_timeout else 'disconnect/no response'}: {type(net_err).__name__} ({net_err})"
                             _tlog_fn(f"[telemetry] [RETRY TRIGGERED] req_id={req_id} model={model} path={path} reason='{retry_reason}' attempt={attempt+1}/{max_retries+1}. Re-dispatching with delay={retry_delay:.2f}s...")
-                        elif route_idx < len(route_sequence) - 1:
+                        elif has_more_candidates:
                             target_limiter.record_retry_failed()
                             cascade_to_next = True
                             cascade_reason = f"{type(net_err).__name__}: {net_err}"
@@ -438,8 +450,25 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     break
 
             if cascade_to_next:
-                next_route_name = route_sequence[route_idx + 1].route_name
-                _tlog_fn(f"[telemetry] [ROUTE FAILOVER] req_id={req_id} route='{route_name}' exhausted retries ({cascade_reason}). Cascading to next priority route: '{next_route_name}'")
+                # Check for quota exhaustion / hard failure to mark cooldown
+                if cascade_reason and any(k in str(cascade_reason).lower() for k in ("quota", "free-models-per-day", "billing", "insufficient", "rate limit exceeded")):
+                    _model_router.mark_route_cooldown(route_res.route_id, seconds=120.0, reason=cascade_reason)
+                else:
+                    _model_router.mark_route_failure(route_res.route_id, reason=cascade_reason or "retries exhausted")
+
+                remaining = [r for r in route_candidates if r.route_id not in attempted_route_ids]
+                if not remaining:
+                    break
+
+                next_route, next_limiter, next_acquired = await _model_router.select_admission_route(remaining)
+                if not next_route:
+                    break
+
+                cascade_count += 1
+                _tlog_fn(f"[telemetry] [ROUTE FAILOVER] req_id={req_id} route='{route_name}' exhausted retries ({cascade_reason}). Dynamically cascading to: '{next_route.route_name}' (priority={next_route.priority}, pre_acquired={next_acquired})")
+                current_res = next_route
+                current_limiter = next_limiter
+                current_already_acquired = next_acquired
                 continue
             else:
                 break
