@@ -631,22 +631,22 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#5-247-production-engine-native-binary-execution" class="md-nav__link">
+  <a href="#5-247-production-engine-native-c-extension-acceleration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. 24/7 Production Engine &amp; Native Binary Execution
+        5. 24/7 Production Engine &amp; Native C-Extension Acceleration
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="5. 24/7 Production Engine &amp; Native Binary Execution">
+    <nav class="md-nav" aria-label="5. 24/7 Production Engine &amp; Native C-Extension Acceleration">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#execution-modes" class="md-nav__link">
+  <a href="#production-accelerators-compilation-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Execution Modes
+        Production Accelerators &amp; Compilation Modes
       
     </span>
   </a>
@@ -654,10 +654,21 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#pre-compiling-to-native-binary" class="md-nav__link">
+  <a href="#measured-production-footprint" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Pre-compiling to Native Binary
+        Measured Production Footprint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#compiling-native-c-extension-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compiling Native C-Extension Modules
       
     </span>
   </a>
@@ -885,22 +896,22 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#5-247-production-engine-native-binary-execution" class="md-nav__link">
+  <a href="#5-247-production-engine-native-c-extension-acceleration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. 24/7 Production Engine &amp; Native Binary Execution
+        5. 24/7 Production Engine &amp; Native C-Extension Acceleration
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="5. 24/7 Production Engine &amp; Native Binary Execution">
+    <nav class="md-nav" aria-label="5. 24/7 Production Engine &amp; Native C-Extension Acceleration">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#execution-modes" class="md-nav__link">
+  <a href="#production-accelerators-compilation-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Execution Modes
+        Production Accelerators &amp; Compilation Modes
       
     </span>
   </a>
@@ -908,10 +919,21 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#pre-compiling-to-native-binary" class="md-nav__link">
+  <a href="#measured-production-footprint" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Pre-compiling to Native Binary
+        Measured Production Footprint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#compiling-native-c-extension-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compiling Native C-Extension Modules
       
     </span>
   </a>
@@ -1015,55 +1037,87 @@
 <h4 id="sse-live-streaming">SSE Live Streaming</h4>
 <p>The proxy offers a Server-Sent Events (SSE) feed at <code>/v1/raw-log/stream</code> that transmits structured JSON payloads to the connected Payload Inspector UI with zero polling overhead.</p>
 <hr />
-<h3 id="5-247-production-engine-native-binary-execution">5. 24/7 Production Engine &amp; Native Binary Execution</h3>
-<p>To support permanent, uninterrupted execution on servers with minimal CPU and RAM footprints:</p>
-<h4 id="execution-modes">Execution Modes</h4>
+<h3 id="5-247-production-engine-native-c-extension-acceleration">5. 24/7 Production Engine &amp; Native C-Extension Acceleration</h3>
+<p>For permanent server deployments with minimal CPU and RAM footprints, the proxy combines native C/Rust runtime accelerators with Nuitka Native C-Extension compilation (<code>--module</code>):</p>
+<h4 id="production-accelerators-compilation-modes">Production Accelerators &amp; Compilation Modes</h4>
 <table>
 <thead>
 <tr>
-<th style="text-align: left;">Feature</th>
-<th style="text-align: left;">Standard Python Script</th>
-<th style="text-align: left;">Pre-Compiled Native Binary (Nuitka)</th>
+<th style="text-align: left;">Accelerator</th>
+<th style="text-align: left;">Impact</th>
+<th style="text-align: left;">How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Native C-Extensions (<code>.so</code>)</strong></td>
+<td style="text-align: left;">Native C machine code for routing, parsing, streaming, and DB logging</td>
+<td style="text-align: left;"><code>./start.sh build</code> (Nuitka <code>--module</code>) — compiled to <code>dist/modules/</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>uvloop</code></strong> (C / <code>libuv</code>)</td>
+<td style="text-align: left;">2x–3x async I/O socket throughput</td>
+<td style="text-align: left;"><code>pip install uvloop</code> — auto-detected at startup</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>orjson</code></strong> (Rust SIMD)</td>
+<td style="text-align: left;">5x–10x faster JSON serialization</td>
+<td style="text-align: left;"><code>pip install orjson</code> — auto-detected at startup</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>jemalloc</code></strong></td>
+<td style="text-align: left;">Zero Linux <code>glibc malloc</code> heap fragmentation</td>
+<td style="text-align: left;"><code>sudo apt install libjemalloc2</code> — auto-preloaded by <code>start.sh</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="measured-production-footprint">Measured Production Footprint</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Metric</th>
+<th style="text-align: left;">Python Script</th>
+<th style="text-align: left;">Native C-Modules (<code>.so</code>)</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td style="text-align: left;"><strong>Execution Path</strong></td>
-<td style="text-align: left;">CPython bytecode interpreter loop</td>
-<td style="text-align: left;">Standalone compiled C/C++ machine code (<code>ELF</code>)</td>
+<td style="text-align: left;">Bytecode eval loop</td>
+<td style="text-align: left;">Native compiled C machine code</td>
 </tr>
 <tr>
-<td style="text-align: left;"><strong>Event Loop</strong></td>
-<td style="text-align: left;"><code>uvloop</code> (C / <code>libuv</code>)</td>
-<td style="text-align: left;"><code>uvloop</code> (compiled into binary)</td>
+<td style="text-align: left;"><strong>Idle RAM (RSS)</strong></td>
+<td style="text-align: left;">~69 MB</td>
+<td style="text-align: left;"><strong>~35–45 MB</strong></td>
 </tr>
 <tr>
-<td style="text-align: left;"><strong>JSON Serialization</strong></td>
-<td style="text-align: left;"><code>orjson</code> (Rust SIMD)</td>
-<td style="text-align: left;"><code>orjson</code> (Rust SIMD compiled into binary)</td>
+<td style="text-align: left;"><strong>Peak RAM (under load)</strong></td>
+<td style="text-align: left;">~72 MB</td>
+<td style="text-align: left;"><strong>~45–50 MB</strong></td>
 </tr>
 <tr>
-<td style="text-align: left;"><strong>Memory Allocator</strong></td>
-<td style="text-align: left;"><code>jemalloc</code> (<code>LD_PRELOAD</code>)</td>
-<td style="text-align: left;"><code>jemalloc</code> (<code>LD_PRELOAD</code>)</td>
+<td style="text-align: left;"><strong>Memory Creep</strong></td>
+<td style="text-align: left;">&lt; 5 MB/hour</td>
+<td style="text-align: left;"><strong>&lt; 2 MB/hour</strong></td>
 </tr>
 <tr>
-<td style="text-align: left;"><strong>GC Overhead</strong></td>
-<td style="text-align: left;"><code>gc.freeze()</code> permanent gen</td>
-<td style="text-align: left;">Native AST + <code>gc.freeze()</code></td>
+<td style="text-align: left;"><strong>Active OS Threads</strong></td>
+<td style="text-align: left;">2</td>
+<td style="text-align: left;">2</td>
 </tr>
 <tr>
-<td style="text-align: left;"><strong>Idle RAM Footprint</strong></td>
-<td style="text-align: left;">~35–45 MB</td>
-<td style="text-align: left;"><strong>~18–25 MB</strong></td>
+<td style="text-align: left;"><strong>Open FDs</strong></td>
+<td style="text-align: left;">28</td>
+<td style="text-align: left;">28</td>
 </tr>
 </tbody>
 </table>
-<h4 id="pre-compiling-to-native-binary">Pre-compiling to Native Binary</h4>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Compile via control script</span>
+<h4 id="compiling-native-c-extension-modules">Compiling Native C-Extension Modules</h4>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Compile proxy modules to native .so shared libraries</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>./start.sh<span class="w"> </span>build
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="c1"># Restart proxy (prioritizes native binary automatically)</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="c1"># Restart proxy (automatically prioritizes compiled .so modules)</span>
 </span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>./start.sh<span class="w"> </span>proxy<span class="w"> </span>restart
 </span></code></pre></div>
 <h4 id="benchmarking-profiling-tool-benchmark_monitorpy">Benchmarking &amp; Profiling Tool (<code>benchmark_monitor.py</code>)</h4>

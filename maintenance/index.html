@@ -726,15 +726,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#247-high-performance-server-deployment-native-binary-pre-compilation" class="md-nav__link">
+  <a href="#247-high-performance-server-deployment-native-c-extension-compilation" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ⚡ 24/7 High-Performance Server Deployment &amp; Native Binary Pre-Compilation
+        ⚡ 24/7 High-Performance Server Deployment &amp; Native C-Extension Compilation
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="⚡ 24/7 High-Performance Server Deployment &amp; Native Binary Pre-Compilation">
+    <nav class="md-nav" aria-label="⚡ 24/7 High-Performance Server Deployment &amp; Native C-Extension Compilation">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -749,10 +749,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#2-install-accelerators" class="md-nav__link">
+  <a href="#2-install-accelerators-compiler" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2. Install Accelerators
+        2. Install Accelerators &amp; Compiler
       
     </span>
   </a>
@@ -760,10 +760,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#3-compile-standalone-native-binary" class="md-nav__link">
+  <a href="#3-compile-native-c-extension-modules" class="md-nav__link">
     <span class="md-ellipsis">
       
-        3. Compile Standalone Native Binary
+        3. Compile Native C-Extension Modules
       
     </span>
   </a>
@@ -782,10 +782,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#5-resource-profiling-comparison-tool-benchmark_monitorpy" class="md-nav__link">
+  <a href="#5-resource-profiling-benchmark-comparison-tool-benchmark_monitorpy" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. Resource Profiling &amp; Comparison Tool (benchmark_monitor.py)
+        5. Resource Profiling &amp; Benchmark Comparison Tool (benchmark_monitor.py)
       
     </span>
   </a>
@@ -932,15 +932,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#247-high-performance-server-deployment-native-binary-pre-compilation" class="md-nav__link">
+  <a href="#247-high-performance-server-deployment-native-c-extension-compilation" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ⚡ 24/7 High-Performance Server Deployment &amp; Native Binary Pre-Compilation
+        ⚡ 24/7 High-Performance Server Deployment &amp; Native C-Extension Compilation
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="⚡ 24/7 High-Performance Server Deployment &amp; Native Binary Pre-Compilation">
+    <nav class="md-nav" aria-label="⚡ 24/7 High-Performance Server Deployment &amp; Native C-Extension Compilation">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -955,10 +955,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#2-install-accelerators" class="md-nav__link">
+  <a href="#2-install-accelerators-compiler" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2. Install Accelerators
+        2. Install Accelerators &amp; Compiler
       
     </span>
   </a>
@@ -966,10 +966,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#3-compile-standalone-native-binary" class="md-nav__link">
+  <a href="#3-compile-native-c-extension-modules" class="md-nav__link">
     <span class="md-ellipsis">
       
-        3. Compile Standalone Native Binary
+        3. Compile Native C-Extension Modules
       
     </span>
   </a>
@@ -988,10 +988,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#5-resource-profiling-comparison-tool-benchmark_monitorpy" class="md-nav__link">
+  <a href="#5-resource-profiling-benchmark-comparison-tool-benchmark_monitorpy" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. Resource Profiling &amp; Comparison Tool (benchmark_monitor.py)
+        5. Resource Profiling &amp; Benchmark Comparison Tool (benchmark_monitor.py)
       
     </span>
   </a>
@@ -1105,44 +1105,38 @@
 </span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>./start.sh<span class="w"> </span>stop<span class="w"> </span>--all
 </span></code></pre></div>
 <hr />
-<h2 id="247-high-performance-server-deployment-native-binary-pre-compilation">⚡ 24/7 High-Performance Server Deployment &amp; Native Binary Pre-Compilation</h2>
-<p>For servers running the proxy permanently, maximum throughput, minimal CPU usage, and zero memory creep are achieved via native machine-code compilation (<code>Nuitka</code>) and anti-fragmentation memory allocators (<code>jemalloc</code>).</p>
+<h2 id="247-high-performance-server-deployment-native-c-extension-compilation">⚡ 24/7 High-Performance Server Deployment &amp; Native C-Extension Compilation</h2>
+<p>For servers running the proxy permanently, maximum throughput, minimal CPU usage, and zero memory creep are achieved via Native C-Extension compilation (<code>Nuitka --module</code>), async accelerators (<code>uvloop</code>, <code>orjson</code>), and anti-fragmentation memory allocators (<code>jemalloc</code>).</p>
 <h3 id="1-server-prerequisites-debianubuntu">1. Server Prerequisites (Debian/Ubuntu)</h3>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Install GCC compiler, Python C-headers, jemalloc, patchelf, and ccache (one-time sudo)</span>
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>sudo<span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>gcc<span class="w"> </span>python3-dev<span class="w"> </span>libjemalloc2<span class="w"> </span>patchelf<span class="w"> </span>ccache
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Install GCC compiler, Python C-headers, and jemalloc (one-time sudo)</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>sudo<span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>gcc<span class="w"> </span>g++<span class="w"> </span>python3-dev<span class="w"> </span>libjemalloc2<span class="w"> </span>ccache
 </span></code></pre></div>
-<h3 id="2-install-accelerators">2. Install Accelerators</h3>
+<h3 id="2-install-accelerators-compiler">2. Install Accelerators &amp; Compiler</h3>
 <p>In your Python virtual environment on the server:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="c1"># Installs: aiohttp, orjson (SIMD Rust JSON), uvloop (libuv), nuitka (C compiler)</span>
 </span></code></pre></div>
-<p>This installs <code>orjson</code> (SIMD Rust JSON parser), <code>uvloop</code> (C/libuv event loop), and <code>nuitka</code> (native C compiler).</p>
-<h3 id="3-compile-standalone-native-binary">3. Compile Standalone Native Binary</h3>
-<p>Compile the proxy directly on the server to ensure exact matching with the host's <code>glibc</code> and CPU architecture:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>./dashboard.sh<span class="w"> </span>build
-</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="c1"># or: python scripts/build_binaries.py --target proxy</span>
+<h3 id="3-compile-native-c-extension-modules">3. Compile Native C-Extension Modules</h3>
+<p>Compile the performance-critical proxy modules (<code>model_router</code>, <code>proxy_forwarder</code>, <code>proxy_stream</code>, <code>fast_json</code>, <code>telemetry_db</code>, <code>payload_inspector</code>) into native <code>.so</code> shared libraries:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>./start.sh<span class="w"> </span>build
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="c1"># or: python scripts/build_binaries.py --mode modules</span>
 </span></code></pre></div>
-<p>The compiled binary will be placed at <code>dist/llm_telemetry_proxy.bin</code> (standalone ELF executable with Link-Time Optimization).</p>
+<p>The compiled native modules (<code>*.so</code>) are generated exclusively in <code>dist/modules/</code>, keeping the source tree 100% pure <code>.py</code>. When the proxy starts in accelerated mode, <code>setup_native_modules_path()</code> loads the compiled <code>.so</code> C-extensions from <code>dist/modules/</code>.</p>
 <h3 id="4-start-supervise">4. Start &amp; Supervise</h3>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>./dashboard.sh<span class="w"> </span>start<span class="w"> </span>--with-proxy
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>./start.sh<span class="w"> </span>start<span class="w"> </span>--with-proxy
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1"># or: ./dashboard.sh proxy start</span>
 </span></code></pre></div>
-<p><code>dashboard.sh</code> and <code>ProxyManager</code> automatically:
-- Detect the pre-compiled binary in <code>dist/</code> and launch it directly.
-- Detect <code>libjemalloc.so.2</code> and preload it via <code>LD_PRELOAD</code> to permanently prevent heap memory fragmentation.
-- Activate <code>gc.freeze()</code> at startup to eliminate cyclic garbage collector overhead.
-- Fall back gracefully to the Python script with runtime accelerators if the binary is absent.</p>
-<h3 id="5-resource-profiling-comparison-tool-benchmark_monitorpy">5. Resource Profiling &amp; Comparison Tool (<code>benchmark_monitor.py</code>)</h3>
+<p><code>dashboard.sh</code> automatically:
+- Detects the compiled native <code>.so</code> modules and loads them with native C speed.
+- Detects <code>libjemalloc.so.2</code> and preloads it via <code>LD_PRELOAD</code> to permanently prevent heap memory fragmentation.
+- Falls back gracefully to <code>.py</code> source files if <code>.so</code> modules are absent.</p>
+<h3 id="5-resource-profiling-benchmark-comparison-tool-benchmark_monitorpy">5. Resource Profiling &amp; Benchmark Comparison Tool (<code>benchmark_monitor.py</code>)</h3>
 <p>A standalone profiler is available in <code>scripts/benchmark_monitor.py</code> to measure and compare real-world performance:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># 1. Profile current running proxy for 30 minutes (1800s)</span>
-</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>record<span class="w"> </span>--output<span class="w"> </span>python_run.csv<span class="w"> </span>--duration<span class="w"> </span><span class="m">1800</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># Profile running proxy for 30 minutes (1800s)</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>record<span class="w"> </span>--output<span class="w"> </span>native_modules_run.csv<span class="w"> </span>--duration<span class="w"> </span><span class="m">1800</span>
 </span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
-</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="c1"># 2. Restart proxy with native binary</span>
-</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>./dashboard.sh<span class="w"> </span>proxy<span class="w"> </span>restart
-</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>
-</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="c1"># 3. Profile native binary for 30 minutes</span>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>record<span class="w"> </span>--output<span class="w"> </span>native_run.csv<span class="w"> </span>--duration<span class="w"> </span><span class="m">1800</span>
-</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>
-</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="c1"># 4. Generate side-by-side comparison report</span>
-</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>compare<span class="w"> </span>python_run.csv<span class="w"> </span>native_run.csv
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="c1"># Compare against a baseline recording</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>python<span class="w"> </span>scripts/benchmark_monitor.py<span class="w"> </span>compare<span class="w"> </span>baseline.csv<span class="w"> </span>native_modules_run.csv
 </span></code></pre></div>
 
 
