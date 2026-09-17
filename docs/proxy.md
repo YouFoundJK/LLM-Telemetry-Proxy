@@ -85,7 +85,7 @@ For permanent server deployments with minimal CPU and RAM footprints, the proxy 
 
 | Accelerator | Impact | How |
 | :--- | :--- | :--- |
-| **Native C-Extensions (`.so`)** | Native C machine code for routing, parsing, streaming, and DB logging | `./start.sh build` (Nuitka `--module`) — auto-loaded by Python |
+| **Native C-Extensions (`.so`)** | Native C machine code for routing, parsing, streaming, and DB logging | `./start.sh build` (Nuitka `--module`) — compiled to `dist/modules/` |
 | **`uvloop`** (C / `libuv`) | 2x–3x async I/O socket throughput | `pip install uvloop` — auto-detected at startup |
 | **`orjson`** (Rust SIMD) | 5x–10x faster JSON serialization | `pip install orjson` — auto-detected at startup |
 | **`jemalloc`** | Zero Linux `glibc malloc` heap fragmentation | `sudo apt install libjemalloc2` — auto-preloaded by `start.sh` |

@@ -65,6 +65,12 @@ def resolve_repo_root(start_file: Optional[Path] = None) -> Path:
 REPO_ROOT = resolve_repo_root(Path(__file__))
 DASHBOARD_DIR = REPO_ROOT / "dashboard"
 
+try:
+    from proxy.repo_paths import setup_native_modules_path
+    setup_native_modules_path()
+except Exception:
+    pass
+
 # Ensure proxy module can be imported
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

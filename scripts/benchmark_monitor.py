@@ -74,7 +74,7 @@ def get_process_mode(pid: int) -> str:
 
                 proxy_so_matches = set()
                 for line in maps_content.splitlines():
-                    if "/proxy/" in line and (".so" in line or ".pyd" in line):
+                    if ("/dist/modules/" in line or "/proxy/" in line) and (".so" in line or ".pyd" in line):
                         parts = line.split()
                         if len(parts) >= 6:
                             so_path = parts[-1]
@@ -89,7 +89,12 @@ def get_process_mode(pid: int) -> str:
         pass
 
     # Windows / fallback detection
-    so_count = len(list((REPO_ROOT / "proxy").glob("*.pyd"))) + len(list((REPO_ROOT / "proxy").glob("*.so")))
+    dist_mods = REPO_ROOT / "dist" / "modules"
+    so_count = 0
+    if dist_mods.is_dir():
+        so_count += len(list(dist_mods.glob("*.pyd"))) + len(list(dist_mods.glob("*.so")))
+    if so_count == 0:
+        so_count = len(list((REPO_ROOT / "proxy").glob("*.pyd"))) + len(list((REPO_ROOT / "proxy").glob("*.so")))
     if so_count > 0:
         return f"Native C-Modules ({so_count}/6)"
     return "Python Script (CPython)"

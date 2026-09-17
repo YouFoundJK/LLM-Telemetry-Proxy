@@ -36,9 +36,12 @@ import aiohttp
 from aiohttp import web
 
 try:
-    from proxy.repo_paths import resolve_repo_root, REPO_ROOT
+    from proxy.repo_paths import resolve_repo_root, REPO_ROOT, setup_native_modules_path
 except ImportError:
-    from repo_paths import resolve_repo_root, REPO_ROOT
+    from repo_paths import resolve_repo_root, REPO_ROOT, setup_native_modules_path
+
+# Load accelerated native C-extensions from dist/modules/ if present and not disabled
+setup_native_modules_path()
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

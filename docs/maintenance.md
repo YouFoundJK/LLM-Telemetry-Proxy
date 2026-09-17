@@ -120,7 +120,7 @@ Compile the performance-critical proxy modules (`model_router`, `proxy_forwarder
 # or: python scripts/build_binaries.py --mode modules
 ```
 
-The compiled native modules (`*.so`) are generated in `proxy/`. When the proxy starts, Python's `ExtensionFileLoader` automatically loads the compiled `.so` C-extensions over `.py` source files.
+The compiled native modules (`*.so`) are generated exclusively in `dist/modules/`, keeping the source tree 100% pure `.py`. When the proxy starts in accelerated mode, `setup_native_modules_path()` loads the compiled `.so` C-extensions from `dist/modules/`.
 
 ### 4. Start & Supervise
 

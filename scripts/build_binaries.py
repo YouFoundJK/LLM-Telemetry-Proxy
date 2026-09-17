@@ -30,9 +30,11 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = REPO_ROOT / "dist"
+DIST_MODULES_DIR = DIST_DIR / "modules"
 _print_lock = threading.Lock()
 
 PROXY_MODULES = [
@@ -80,6 +82,7 @@ def clean_artifacts():
         log(f"Removed {DIST_DIR}")
         cleaned_count += 1
 
+    # Also clean any legacy .so / .pyd / .build accidentally deposited in source dirs
     for search_dir in (REPO_ROOT / "proxy", REPO_ROOT / "dashboard"):
         if not search_dir.exists():
             continue
@@ -186,18 +189,25 @@ def compile_native_module(
     lto: str = "auto",
     jobs: int = 1,
     color_code: str = "36",
+    output_dir: Optional[Path] = None,
 ) -> bool:
     """
     Compile a single Python module into a native C-extension shared library (.so / .pyd)
-    using Nuitka --module mode. Python automatically imports the .so over .py.
+    using Nuitka --module mode.
+    
+    All compiled shared libraries are strictly placed inside dist/modules/, NEVER inside
+    source directories (proxy/ or dashboard/).
     """
     if not module_path.exists():
         log_error(f"Module file not found: {module_path}")
         return False
 
     module_name = module_path.stem
-    output_dir = module_path.parent
-    log_target(module_name, f"Compiling native C-extension: {module_path.relative_to(REPO_ROOT)}", color_code)
+    if output_dir is None:
+        output_dir = DIST_MODULES_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_target(module_name, f"Compiling native C-extension: {module_path.relative_to(REPO_ROOT)} -> {output_dir.relative_to(REPO_ROOT)}", color_code)
 
     cmd = [
         sys.executable,
@@ -247,7 +257,7 @@ def compile_native_module(
             log_error(f"Compilation of {module_name} failed with exit code {returncode}.")
             return False
 
-        # Locate the compiled shared library (.so or .pyd)
+        # Locate the compiled shared library (.so or .pyd) in output_dir
         compiled_files = list(output_dir.glob(f"{module_name}.*.so")) + \
                          list(output_dir.glob(f"{module_name}.so")) + \
                          list(output_dir.glob(f"{module_name}.*.pyd")) + \
@@ -256,7 +266,7 @@ def compile_native_module(
         if compiled_files:
             so_file = compiled_files[0]
             size_kb = so_file.stat().st_size / 1024
-            log_success(f"Compiled native C-extension: {so_file.name} ({size_kb:.1f} KB)")
+            log_success(f"Compiled native C-extension: {so_file.relative_to(REPO_ROOT)} ({size_kb:.1f} KB)")
             return True
         else:
             log_warn(f"Build succeeded but compiled shared object for {module_name} not found in {output_dir}")
@@ -485,9 +495,9 @@ def main():
 
         print("=" * 68)
         if success_count == len(modules_to_build):
-            log_success(f"All {success_count} modules compiled to native C-extensions successfully!")
-            print("\nYour proxy is now accelerated by native C-extensions.")
-            print("Python automatically prioritizes the compiled .so/.pyd modules over .py source.")
+            log_success(f"All {success_count} modules compiled to native C-extensions in dist/modules/ successfully!")
+            print("\nYour proxy is now accelerated by native C-extensions in dist/modules/.")
+            print("Source code remains 100% pure Python and clean for project copying.")
             print("\nTo start your accelerated proxy, simply run:\n")
             print("    ./start.sh proxy restart")
             print("    # or: ./dashboard.sh start --with-proxy\n")

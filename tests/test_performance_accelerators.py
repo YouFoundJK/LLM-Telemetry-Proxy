@@ -132,6 +132,36 @@ class TestBuildBinariesScript(unittest.TestCase):
             except Exception as e:
                 self.fail(f"gc.freeze() raised an exception: {e}")
 
+    def test_dist_modules_directory_configured(self):
+        # Verify that modules compile target is set to dist/modules
+        self.assertEqual(build_binaries.DIST_MODULES_DIR, REPO_ROOT / "dist" / "modules")
+
+    def test_source_directory_has_no_compiled_binaries(self):
+        # Verify proxy/ and dashboard/ source trees contain strictly pure Python files, no .so or .pyd
+        proxy_binaries = list((REPO_ROOT / "proxy").glob("*.so")) + list((REPO_ROOT / "proxy").glob("*.pyd"))
+        dashboard_binaries = list((REPO_ROOT / "dashboard").glob("*.so")) + list((REPO_ROOT / "dashboard").glob("*.pyd"))
+        self.assertEqual(proxy_binaries, [], f"Found unexpected compiled binaries in proxy/: {proxy_binaries}")
+        self.assertEqual(dashboard_binaries, [], f"Found unexpected compiled binaries in dashboard/: {dashboard_binaries}")
+
+    def test_clean_artifacts_wipes_dist_and_legacy_dirs(self):
+        # Verify clean_artifacts cleans both dist/ and any stray artifacts in proxy/
+        test_dist_mod = build_binaries.DIST_MODULES_DIR / "dummy_test.so"
+        test_proxy_mod = REPO_ROOT / "proxy" / "dummy_test.so"
+        try:
+            build_binaries.DIST_MODULES_DIR.mkdir(parents=True, exist_ok=True)
+            test_dist_mod.write_text("dummy")
+            test_proxy_mod.write_text("dummy")
+
+            build_binaries.clean_artifacts()
+
+            self.assertFalse(test_dist_mod.exists())
+            self.assertFalse(test_proxy_mod.exists())
+        finally:
+            if test_dist_mod.exists():
+                test_dist_mod.unlink()
+            if test_proxy_mod.exists():
+                test_proxy_mod.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

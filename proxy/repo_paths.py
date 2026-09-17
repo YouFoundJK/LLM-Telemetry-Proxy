@@ -47,3 +47,25 @@ def resolve_repo_root(start_file: Optional[Path] = None) -> Path:
 
 
 REPO_ROOT = resolve_repo_root()
+DIST_DIR = REPO_ROOT / "dist"
+DIST_MODULES_DIR = DIST_DIR / "modules"
+
+
+def setup_native_modules_path() -> bool:
+    """
+    Conditionally configure sys.path to load pre-compiled native C-extension modules
+    from dist/modules if they exist and native execution is not explicitly disabled.
+
+    Respects USE_NATIVE_BINARY=0 or USE_NATIVE_MODULES=0 to guarantee pure Python execution.
+    Returns True if dist/modules was added to sys.path, False otherwise.
+    """
+    for env_key in ("USE_NATIVE_BINARY", "USE_NATIVE_MODULES", "LLM_PROXY_NATIVE"):
+        if os.environ.get(env_key, "").strip() == "0":
+            return False
+
+    if DIST_MODULES_DIR.is_dir():
+        dist_mod_str = str(DIST_MODULES_DIR)
+        if dist_mod_str not in sys.path:
+            sys.path.insert(0, dist_mod_str)
+        return True
+    return False

@@ -90,8 +90,12 @@ get_proc_mode() {
         echo "(Standalone ELF Binary)"
         return
     fi
+    if [[ "${USE_NATIVE_BINARY:-}" == "0" ]]; then
+        echo "(Python Script)"
+        return
+    fi
     local so_count=0
-    for f in "$REPO_ROOT/proxy"/*.so "$REPO_ROOT/proxy"/*.pyd; do
+    for f in "$REPO_ROOT/dist/modules"/*.so "$REPO_ROOT/dist/modules"/*.pyd "$REPO_ROOT/proxy"/*.so "$REPO_ROOT/proxy"/*.pyd; do
         [[ -f "$f" ]] && ((so_count++))
     done
     if (( so_count > 0 )); then
@@ -416,9 +420,11 @@ start_proxy() {
 
     # 2. Check for Native C-Extension Modules vs Standalone Binary
     local so_count=0
-    for f in "$REPO_ROOT/proxy"/*.so "$REPO_ROOT/proxy"/*.pyd; do
-        [[ -f "$f" ]] && ((so_count++))
-    done
+    if [[ "${USE_NATIVE_BINARY:-}" != "0" ]]; then
+        for f in "$REPO_ROOT/dist/modules"/*.so "$REPO_ROOT/dist/modules"/*.pyd "$REPO_ROOT/proxy"/*.so "$REPO_ROOT/proxy"/*.pyd; do
+            [[ -f "$f" ]] && ((so_count++))
+        done
+    fi
 
     local proxy_bin=""
     if [[ "${USE_NATIVE_BINARY:-0}" == "1" ]]; then
